@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "emitDeclarationOnly": true,
+    "declaration": true,
+    "declarationMap": true,
+    // The source imports siblings with their .ts extension; esbuild resolves
+    // them and this pass only emits declarations, which TypeScript permits.
+    "allowImportingTsExtensions": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist", "assets", "**/*.test.ts", "**/*.test.tsx", "tests"]
+}

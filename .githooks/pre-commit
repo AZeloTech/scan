@@ -1,0 +1,3 @@
+#!/bin/sh
+# The PII guard is the backstop that runs before every commit. See README.
+exec node "$(git rev-parse --show-toplevel)/scripts/pii-guard.mjs" --staged

@@ -1,0 +1,154 @@
+# Vendored LSD reference — OpenCV `lsd.cpp`
+
+This directory vendors the **read-only reference source** that the Rust port
+in `dewarp-rs/src/lsd.rs` is written against. Nothing here is compiled; it exists
+so the port is auditable against the exact bytes it was derived from.
+
+## Primary file
+
+| | |
+|---|---|
+| File | `lsd.cpp` |
+| Upstream path | `modules/imgproc/src/lsd.cpp` |
+| Repository | https://github.com/opencv/opencv |
+| Tag | **5.0.0** |
+| URL | https://raw.githubusercontent.com/opencv/opencv/5.0.0/modules/imgproc/src/lsd.cpp |
+| sha256 | `3b27ddfbd30c73fe27b6ab966753fd1da83b41fa577332a0f88fab58bd265a34` |
+| Size | 41491 bytes / 1179 lines |
+| Fetched | 2026-08-18 |
+
+### Why tag 5.0.0 and not 4.5.4
+
+`5.0.0` is what our parity oracle actually runs: `opencv-python-headless==5.0.0.93`
+reports `cv2.__version__ == "5.0.0"` and `getBuildInformation()` "Version control: 5.0.0"
+(verified in `python:3.12-slim` docker). Porting from 4.5.4 would be a parity bug:
+there are two behavioural deltas between 4.5.4 and ≥4.6 (`std::sort` →
+`std::stable_sort` in the pseudo-ordering, and the rewritten `rect_nfa`
+rasterization + the `log_gamma(n+1)` fix in `nfa()`).
+
+`lsd.cpp` at 4.12.0 and 5.0.0 are algorithmically identical (diff is `std::`
+qualification, the `_refine` parameter type, and one dead `std::vector<cv::Point>`).
+
+## License
+
+The **repository LICENSE at tag 5.0.0 is Apache License 2.0**
+(https://raw.githubusercontent.com/opencv/opencv/5.0.0/LICENSE, first line
+"                                 Apache License / Version 2.0").
+
+The **per-file header inside `lsd.cpp` is OpenCV's legacy 3-clause-BSD
+boilerplate**, not an Apache header. Quoted verbatim from the fetched bytes
+(lines 1–40):
+
+```
+/*M///////////////////////////////////////////////////////////////////////////////////////
+//
+//  IMPORTANT: READ BEFORE DOWNLOADING, COPYING, INSTALLING OR USING.
+//
+//  By downloading, copying, installing or using the software you agree to this license.
+//  If you do not agree to this license, do not download, install,
+//  copy or use the software.
+//
+//
+//                           License Agreement
+//                For Open Source Computer Vision Library
+//
+// Copyright (C) 2013, OpenCV Foundation, all rights reserved.
+// Third party copyrights are property of their respective owners.
+//
+// Redistribution and use in source and binary forms, with or without modification,
+// are permitted provided that the following conditions are met:
+//
+//   * Redistributions of source code must retain the above copyright notice,
+//     this list of conditions and the following disclaimer.
+//
+//   * Redistributions in binary form must reproduce the above copyright notice,
+//     this list of conditions and the following disclaimer in the documentation
+//     and/or other materials provided with the distribution.
+//
+//   * The name of the copyright holders may not be used to endorse or promote products
+//     derived from this software without specific prior written permission.
+//
+// This software is provided by the copyright holders and contributors "as is" and
+// any express or implied warranties, including, but not limited to, the implied
+// warranties of merchantability and fitness for a particular purpose are disclaimed.
+// In no event shall the Intel Corporation or contributors be liable for any direct,
+// indirect, incidental, special, exemplary, or consequential damages
+// (including, but not limited to, procurement of substitute goods or services;
+// loss of use, data, or profits; or business interruption) however caused
+// and on any theory of liability, whether in contract, strict liability,
+// or tort (including negligence or otherwise) arising in any way out of
+// the use of this software, even if advised of the possibility of such damage.
+//
+//M*/
+```
+
+**Effective terms for our use: BSD-3-Clause (the file header) under an
+Apache-2.0 repository LICENSE.** Both are permissive and both are compatible
+with `dewarp-rs`'s own `license = "Apache-2.0"` (Cargo.toml). Attribution
+(this NOTICE + the header reproduced above) is what either license asks for on
+a derived work, and `src/lsd.rs` carries a pointer back here.
+
+### The legal basis for the 4.5.4 restoration — and why this port is stronger
+
+The byte-level history above (4.5.4 == 3.4.16 verbatim) is a *provenance*
+finding, not a licensing one, and on its own it makes the licensing story
+weaker rather than "nil": the vendored file is byte-identical to one that
+OpenCV had **removed for a license conflict**. The restoration's stated legal
+basis is upstream's own, quoted verbatim from the official
+`cv::LineSegmentDetector` documentation:
+
+> Implementation has been removed from OpenCV version 3.4.6 to 3.4.15 and
+> version 4.1.0 to 4.5.3 due original code license conflict. restored again
+> after Computation of a NFA code published under the MIT license
+
+linking https://github.com/rafael-grompone-von-gioi/binomial_nfa — the MIT
+publication, by the LSD author himself, of the contested **NFA computation**.
+So "restored after the upstream NFA code was relicensed MIT" is the official
+story, and this NOTICE records it as the basis rather than resting on the
+`grep AGPL == 0` count (which proves nothing about derivation).
+
+**The Rust port's position is strictly stronger than OpenCV's own**: the
+historically contested portion is exactly the code the port *excludes*.
+`LSD_REFINE_STD` never calls `rect_improve` / `rect_nfa` / `nfa` /
+`log_gamma_windschitl` / `log_gamma_lanczos`, so
+`dewarp-rs/src/lsd.rs` contains **no NFA computation at all** — not the
+binomial tail, not the log-gamma approximations, not the rectangle
+rasterization.
+
+**No AGPL exposure.** The `grep -c "AGPL\|Affero"` count on the fetched bytes is
+**0**, and none of the fetched OpenCV files reference Grompone von Gioi's IPOL
+reference C implementation (AGPL-3.0). That IPOL tarball was **never fetched,
+never read, and never ported** in this work.
+
+### Correction to a commonly repeated history claim
+
+It is often stated that OpenCV "reintroduced a fresh Apache-2.0 implementation"
+at 4.5.4. The bytes say otherwise, and the correct history matters for
+provenance:
+
+- `lsd.cpp` at **3.4.16** (sha `e3f1d5e3d75e4d7f213df124ba5c2aed2a66912afb74f850f74085dc26df2d1a`)
+  and at **4.5.4** (same sha, byte-identical) are the **same file**.
+- Between **4.1.0 and 4.5.3** the file is a 10990-byte stub whose bodies are
+  `CV_Error(Error::StsNotImplemented, "Implementation has been removed due original code license issues")`.
+- So 4.5.4 **restored OpenCV's own long-standing C++ implementation verbatim**;
+  it is not a clean-room rewrite done in 2021. Provenance is therefore "OpenCV
+  Foundation, 2013, BSD-3 header, restored in 4.5.4 under an Apache-2.0 repo",
+  which is what this NOTICE records.
+
+## Auxiliary sources — vendored under `aux/`
+
+`lsd.cpp` calls five OpenCV primitives whose *exact* semantics the port must
+reproduce — and two of them (`GaussianBlur`'s 8U fixed-point path and
+`INTER_LINEAR_EXACT`) are the highest parity-risk code in the whole port. Recording them by sha alone would have
+violated this NOTICE's "auditable against the exact bytes" standard for
+precisely that code, so they are vendored verbatim under `aux/`. All are from
+tag **5.0.0**, same Apache-2.0 repository LICENSE, fetched 2026-08-18; each
+sha256 below was re-verified against the vendored file.
+
+| Purpose | Upstream path (vendored as `aux/<basename>`) | sha256 |
+|---|---|---|
+| `GaussianBlur` 8U fixed-point kernel + dispatch | `modules/imgproc/src/smooth.dispatch.cpp` | `10af19878d22b25330efac59e35a10c5e29ebfb8bbd3d62d929ae278ed16b799` |
+| `hlineSmooth` / `vlineSmooth` scalar reference | `modules/imgproc/src/smooth.simd.hpp` | `1a4c10ce02263451cb8f78ef5c75b3ac44c79f77a8a37f2eec65967d5adb1aaf` |
+| `ufixedpoint16` / `ufixedpoint32` arithmetic | `modules/imgproc/src/fixedpoint.inl.hpp` | `daf6e02b7a4fba0e81393f32d62cffee43362fb0a40efac2c835005090d944fa` |
+| `fastAtan2` polynomial (`atan_f32`) | `modules/core/src/mathfuncs_core.simd.hpp` | `6b6d76e180bef9ed4d79ff3ed5e9d467655ed0af41c60a38806750b36922992b` |
+| `INTER_LINEAR_EXACT` (`resize_bitExact`) | `modules/imgproc/src/resize.cpp` | `e4610736015ab8e7395bde854a60337d1281b972566bb4806db04f1868f6e36c` |

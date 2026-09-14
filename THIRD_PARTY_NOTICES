@@ -1,0 +1,107 @@
+THIRD-PARTY NOTICES for @azelotech/scan
+=======================================
+
+AZelo-authored code in this repository is licensed under Apache-2.0 (see LICENSE).
+The components below keep their own licences, reproduced or referenced here. This
+file ships inside the npm tarball.
+
+
+1. scanic — document corner detection and perspective warp
+----------------------------------------------------------
+Upstream : https://github.com/marquaye/scanic
+Package  : scanic (npm dependency, not vendored)
+License  : MIT, Copyright (c) 2025 marquaye
+Used for : classical (Canny/contour) corner detection and the homography warp.
+
+
+2. scanic-ml — DocCornerNet LEAN model and trimmed ONNX Runtime Web
+-------------------------------------------------------------------
+Upstream : https://github.com/marquaye/scanic (directory `scanic-ml`)
+Package  : scanic-ml@0.2.0 (npm dependency; its files are copied into `assets/`
+           at build time by scripts/build-assets.mjs so they can be served
+           same-origin, unmodified)
+License  : MIT
+Files    : doccornernet_lean.ort        — DocCornerNet LEAN, a channel-slimmed
+                                          SimCC corner detector (MobileNetV2
+                                          backbone, mini-FPN, 1D coordinate
+                                          classification head)
+           ort-wasm-simd-threaded.wasm  — a minimal ONNX Runtime Web build
+                                          carrying only the operators this model
+                                          uses
+           ort-wasm-simd-threaded.mjs   — the emscripten loader
+Note     : the library pins numThreads = 1 and proxy = false. Host pages are not
+           cross-origin isolated, so ORT threads could not take effect anyway.
+
+
+3. ONNX Runtime Web (inside the scanic-ml build above)
+-------------------------------------------------------
+Upstream : https://github.com/microsoft/onnxruntime
+License  : MIT, Copyright (c) Microsoft Corporation
+
+
+4. OpenCV Line Segment Detector — ported to Rust in dewarp-rs/src/lsd.rs
+------------------------------------------------------------------------
+Ported from : modules/imgproc/src/lsd.cpp of opencv/opencv at tag 5.0.0
+              sha256 3b27ddfbd30c73fe27b6ab966753fd1da83b41fa577332a0f88fab58bd265a34
+Reference   : vendored read-only (never compiled) at
+              dewarp-rs/parity/reference/opencv-lsd/lsd.cpp with its NOTICE
+License     : the OpenCV repository at that tag is Apache-2.0; the file itself
+              carries OpenCV's legacy BSD-3-Clause header, reproduced verbatim in
+              the port's module documentation. Both are permissive and compatible
+              with this repository's Apache-2.0.
+Provenance note (important): OpenCV removed this implementation in 3.4.6-3.4.15
+and 4.1.0-4.5.3 over a licence conflict with the original AGPL reference
+implementation, and restored it after the NFA computation was republished under
+MIT. The NFA apparatus is precisely the part this Rust port EXCLUDES ENTIRELY
+(it is dead code under LSD_REFINE_STD). Grompone von Gioi's AGPL-3.0 IPOL
+reference `lsd.c` was never fetched, read or consulted.
+
+
+5. Classical dewarping reference implementation (Python, read for parity only)
+------------------------------------------------------------------------------
+Upstream : the PINTO0309-style classical document dewarping pipeline
+Reference: vendored read-only at dewarp-rs/parity/reference/src (never executed
+           in CI, never shipped in the tarball)
+License  : MIT, Copyright (c) 2026 Katsuya Hyodo
+Excluded : the upstream sample image `data/for_dewarping.png` is NOT vendored
+           here. This repository holds no photograph of a document.
+
+
+6. pdf.js (pdfjs-dist) — PDF import on the desktop intake path
+---------------------------------------------------------------
+Upstream : https://github.com/mozilla/pdf.js
+Package  : pdfjs-dist (npm dependency; worker, cmaps, standard fonts, ICC
+           profiles and wasm are copied into `assets/pdfjs/` at build time)
+License  : Apache-2.0, Copyright Mozilla Foundation
+Bundled inside that distribution and keeping their own licences:
+  - Liberation fonts (SIL Open Font License 1.1)
+  - Foxit fonts (see pdfjs-dist LICENSE_FOXIT)
+  - OpenJPEG (BSD-2-Clause), QCMS (MPL-2.0) inside the pdf.js wasm module
+The pdf.js path loads only when the host enables `intake.pdf`.
+
+
+7. pdf-lib — PDF assembly
+--------------------------
+Upstream : https://github.com/Hopding/pdf-lib
+License  : MIT
+
+
+8. clsx
+--------
+Upstream : https://github.com/lukeed/clsx
+License  : MIT
+
+
+9. GSAP (peer dependency)
+--------------------------
+Upstream : https://gsap.com
+License  : GSAP's own licence, accepted and held by the host application. This
+           library declares GSAP as a peer dependency and never bundles it, so
+           no GSAP code is redistributed in this tarball and the host shares one
+           copy with its own application.
+
+
+Reporting
+---------
+If you believe a component here is misattributed or mislicensed, open an issue at
+https://github.com/AZeloTech/scan/issues.

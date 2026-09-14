@@ -1,0 +1,234 @@
+/*
+ * @azelotech/scan — the whole stylesheet, in one file.
+ *
+ * Compiled at build time into plain CSS (`dist/styles.css`). Hosts import that
+ * one file: no Tailwind, no PostCSS, no config, and nothing that touches a
+ * single element outside the component's own root.
+ *
+ * Three rules govern everything here:
+ *
+ *   1. Every selector is scoped to `.scan-root`. Tailwind's `important` option
+ *      does that for the utilities; the hand-written rules below do it
+ *      themselves. The library must not be able to restyle its host.
+ *   2. There is no global reset. Tailwind's preflight is off. What the
+ *      components genuinely assume — border-box, no default margins, inheritable
+ *      fonts on form controls — is re-stated below, scoped.
+ *   3. No font is fetched. A library that loads a webfont would be making an
+ *      off-origin request on someone else's page, which this library never
+ *      does. The faces fall back to the system stack, and a host that wants the
+ *      product's own typefaces loads them itself and sets the three variables.
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  .scan-root {
+    /*
+     * Typography. Baloo 2, Plus Jakarta Sans and JetBrains Mono are the
+     * product's faces; the library ships none of them. Set these from the host
+     * to get them back — `--scan-font-display: "Baloo 2", cursive` and so on —
+     * after loading the face yourself.
+     */
+    --font-display: var(--scan-font-display, "Baloo 2", ui-rounded, "Segoe UI", system-ui, sans-serif);
+    --font-body: var(--scan-font-body, "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", sans-serif);
+    --font-mono: var(--scan-font-mono, "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace);
+
+    /*
+     * The tokens a host may override: the paper surfaces and the accent — the
+     * parts that should be able to match the application the scanner is
+     * embedded in. Everything else in the design system stays literal, because
+     * it is load-bearing for contrast.
+     *
+     * The capture screen ignores all of this and stays dark: a viewfinder on a
+     * light shell reads badly, and the corner brackets need the contrast.
+     */
+    --scan-surface: #fafaf7;
+    --scan-ink: #1b1f1a;
+    --scan-ink-muted: #63645b;
+    --scan-accent: #5c7f6b;
+    --scan-accent-ink: #fafaf7;
+    --scan-radius: 14px;
+
+    /* A plain 16px root so every size in the scale is literal. */
+    font-size: 16px;
+    -webkit-text-size-adjust: 100%;
+    font-family: var(--font-body);
+    color: var(--scan-ink);
+    background-color: var(--scan-surface);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+
+    /* The component fills whatever box the host gives it. */
+    block-size: 100%;
+    inline-size: 100%;
+    position: relative;
+    isolation: isolate;
+  }
+
+  /*
+   * The reset, scoped. This is deliberately the smallest thing that lets the
+   * components render as they were designed, not a copy of preflight.
+   */
+  .scan-root *,
+  .scan-root *::before,
+  .scan-root *::after {
+    box-sizing: border-box;
+    border-width: 0;
+    border-style: solid;
+  }
+
+  .scan-root h1,
+  .scan-root h2,
+  .scan-root h3,
+  .scan-root h4,
+  .scan-root p,
+  .scan-root figure,
+  .scan-root blockquote,
+  .scan-root dl,
+  .scan-root dd {
+    margin: 0;
+  }
+
+  .scan-root ol,
+  .scan-root ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .scan-root h1,
+  .scan-root h2,
+  .scan-root h3,
+  .scan-root h4 {
+    font-size: inherit;
+    font-weight: inherit;
+  }
+
+  .scan-root button,
+  .scan-root input,
+  .scan-root select,
+  .scan-root textarea {
+    font: inherit;
+    color: inherit;
+    margin: 0;
+    padding: 0;
+    background-color: transparent;
+    border-radius: 0;
+  }
+
+  .scan-root button {
+    cursor: pointer;
+    text-align: inherit;
+    text-transform: none;
+    -webkit-appearance: button;
+  }
+
+  .scan-root button:disabled {
+    cursor: default;
+  }
+
+  .scan-root img,
+  .scan-root svg,
+  .scan-root video,
+  .scan-root canvas {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+
+  /* A video element sized by its container must not be clamped by `height: auto`. */
+  .scan-root video {
+    height: 100%;
+  }
+
+  .scan-root table {
+    border-collapse: collapse;
+  }
+
+  .scan-root [hidden] {
+    display: none !important;
+  }
+
+  /* Baloo 2 ships generous tracking that reads loose at headline sizes. */
+  .scan-root .font-display {
+    letter-spacing: -0.01em;
+  }
+
+  /* A long file name never blows out a 320px screen. */
+  .scan-root h1,
+  .scan-root h2,
+  .scan-root h3,
+  .scan-root p,
+  .scan-root span,
+  .scan-root button {
+    overflow-wrap: anywhere;
+  }
+
+  .scan-root h1,
+  .scan-root h2,
+  .scan-root h3 {
+    text-wrap: balance;
+  }
+
+  .scan-root p {
+    text-wrap: pretty;
+  }
+
+  /* No 300ms tap delay, no accidental double-tap zoom on a control. */
+  .scan-root a,
+  .scan-root button,
+  .scan-root label,
+  .scan-root input,
+  .scan-root select,
+  .scan-root textarea,
+  .scan-root [role="button"] {
+    touch-action: manipulation;
+  }
+
+  /*
+   * One focus indicator for both surfaces. `sage` clears the 3:1 non-text
+   * contrast floor against the paper surface (4.2:1) and against the night
+   * surface (3.4:1), so the ring does not need to know which one it is on.
+   */
+  .scan-root :focus-visible {
+    outline: 2px solid #5c7f6b;
+    outline-offset: 2px;
+  }
+
+  /*
+   * Motion. Everything the library animates is decoration over a state change
+   * that has already happened, so switching it all off costs nothing but the
+   * flourish. GSAP, when the host provides it, reads the same preference.
+   */
+  @media (prefers-reduced-motion: reduce) {
+    .scan-root *,
+    .scan-root *::before,
+    .scan-root *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /*
+   * The one thing a screen reader needs that no utility provides: text that is
+   * announced but not seen. Used by the live region that calls out each
+   * captured page.
+   */
+  .scan-root .scan-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+}

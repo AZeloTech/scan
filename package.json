@@ -1,0 +1,104 @@
+{
+  "name": "@azelotech/scan",
+  "version": "0.1.0",
+  "description": "Document scanner as a React component: camera capture, corner correction, curved-page dewarp and PDF assembly, entirely on the device.",
+  "license": "Apache-2.0",
+  "author": "AZelo",
+  "homepage": "https://scan.azelo.med.br",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AZeloTech/scan.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AZeloTech/scan/issues"
+  },
+  "keywords": [
+    "scanner",
+    "document",
+    "pdf",
+    "camera",
+    "dewarp",
+    "react",
+    "on-device"
+  ],
+  "type": "module",
+  "sideEffects": [
+    "*.css"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./styles.css": "./dist/styles.css",
+    "./package.json": "./package.json",
+    "./self-test": {
+      "types": "./dist/self-test.d.ts",
+      "import": "./dist/self-test.js"
+    }
+  },
+  "bin": {
+    "scan-copy-assets": "./scripts/copy-assets.mjs"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "scripts/copy-assets.mjs",
+    "THIRD_PARTY_NOTICES",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build:assets": "node scripts/build-assets.mjs",
+    "build:js": "node scripts/build.mjs",
+    "build:types": "tsc -p tsconfig.build.json",
+    "build": "npm run build:assets && npm run build:js && npm run build:styles && npm run build:types",
+    "test": "node --test --experimental-strip-types --import ./scripts/test-alias.mjs \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "guard:pii": "node scripts/pii-guard.mjs",
+    "guard:dist": "node scripts/check-dist.mjs",
+    "smoke": "node tests/consumers/run-smoke.mjs",
+    "verify": "npm run guard:pii && npm run typecheck && npm run test && npm run build && npm run guard:dist",
+    "build:styles": "tailwindcss --postcss -i src/styles.css -o dist/styles.css --minify"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^5.4.149",
+    "scanic": "^1.6.0",
+    "scanic-ml": "^0.2.0"
+  },
+  "peerDependencies": {
+    "gsap": "^3.12.0",
+    "react": "^18.3.0 || ^19.0.0",
+    "react-dom": "^18.3.0 || ^19.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "autoprefixer": "^10.6.0",
+    "esbuild": "^0.24.0",
+    "gsap": "^3.15.0",
+    "postcss": "^8.5.28",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5.7.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "allowScripts": {
+    "esbuild@0.24.2": true
+  }
+}

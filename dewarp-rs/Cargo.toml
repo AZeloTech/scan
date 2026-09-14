@@ -1,0 +1,59 @@
+[package]
+name = "dewarp-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Classical (PINTO0309 doc-dewarping) document dewarper — Rust/WASM port"
+license = "Apache-2.0"
+
+# Ships as both a cdylib (wasm-bindgen target) and an rlib (native parity
+# harness + a future CLI).
+[lib]
+name = "dewarp_rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+image = { version = "0.25", default-features = false }
+imageproc = { version = "0.27", default-features = false }
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+# console_error_panic_hook: debug-build-only panic→JS console bridge; it is
+# stripped in the release build to save size.
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[features]
+# `lsd` is a DEFAULT feature. The wasm cdylib builds with default features,
+# and shipping an LSD-capable wasm that the caller enables via
+# `opts_json.use_line_term` is the whole point — leaving `lsd` opt-in would
+# build the production artifact and the parity artifact from different
+# feature sets, exactly the drift this arrangement exists to prevent. The
+# runtime switch is `use_line_term` (a JSON flag), not this feature;
+# `--no-default-features` remains the binary-size kill switch.
+default = ["lsd"]
+# parity: enables seam.rs's serde snapshot (de)serialization for the native
+# golden-test harness (`cargo test --features parity`). Never compiled into
+# the wasm cdylib target — see seam.rs's module doc comment.
+parity = ["dep:serde", "dep:serde_json"]
+# lsd: the real OpenCV-ported LSD (src/lsd.rs). Off => `lsd::detect`
+# returns an empty segment list (the Kim 2015 text-lines-only mode).
+lsd = []
+console_error_panic_hook = ["dep:console_error_panic_hook"]
+
+# --- Dependency decision, frozen ------------------------------------------
+# `nalgebra` is NOT a dependency: a hand-rolled Cholesky-with-LU-fallback is
+# ~60 lines and measurably shrinks the binary, so that is what ships.
+# lsq.rs hand-rolls the 8x8/7x7 dense
+# symmetric solve (Cholesky with LU fallback) on raw `[f64; N]` /
+# `[[f64; N]; N]` arrays — allocation-free, no external linear-algebra crate,
+# smaller wasm binary, and it keeps `lsq.rs` a self-contained, line-by-line
+# mirror of `lsq.py` with no crate-specific type conversions in the way.
+
+[profile.release]
+lto = true
+opt-level = "z"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+panic = "unwind" # keep unwind in dev so `cargo test` (host target) works normally

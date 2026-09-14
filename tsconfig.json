@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    // Deliberately NOT noUncheckedIndexedAccess: the imported source was written
+    // under plain `strict`, and switching it on here produced 174 errors in code
+    // whose behaviour nobody intended to change during an extraction. Worth
+    // enabling later, file by file.
+    "exactOptionalPropertyTypes": false,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": { "@/*": ["src/*"] },
+    "types": ["node"]
+  },
+  "include": ["src", "scripts", "tests"],
+  "exclude": ["node_modules", "dist", "assets"]
+}

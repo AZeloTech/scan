@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: PII guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      # No install: the guard has no dependencies on purpose, so it cannot be
+      # skipped by a broken lockfile. It is the one job that must always run.
+      - run: node scripts/pii-guard.mjs
+
+  build:
+    name: typecheck, tests, build
+    runs-on: ubuntu-latest
+    needs: guard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run guard:dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: |
+            dist
+            assets
+          retention-days: 7
+
+  smoke:
+    name: consumer smoke (vite + next, real browser)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      # Mounts <ScanFlow> under StrictMode in a Vite 6 consumer and a Next 15
+      # static-export consumer, feeds a synthetic page through the file intake,
+      # runs an ML inference and a PDF build, and fails on any off-origin
+      # request or any 404. A build-output assertion is not enough: the ML and
+      # pdf.js runtimes resolve their own files at runtime.
+      - run: npm run smoke
+
+  rust:
+    name: dewarp-rs
+    runs-on: ubuntu-latest
+    needs: guard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --manifest-path dewarp-rs/Cargo.toml
+      - run: cargo fmt --manifest-path dewarp-rs/Cargo.toml -- --check

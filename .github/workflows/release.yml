@@ -1,0 +1,68 @@
+name: release
+
+# Publishing is bound to a tag, and to nothing else. There is no manual
+# "publish" button and no npm token in this repository: npm trusted publishing
+# (OIDC) verifies that the tarball came from this workflow, in this repository,
+# and stamps the provenance attestation that says so.
+#
+# Bootstrap order matters: the first version must already exist on the registry
+# before a trusted publisher can be configured at all, so the first publish is
+# made by hand with a short-lived token and every one after it comes from here.
+# Until that is done this workflow will fail, which is the correct behaviour.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write # required for trusted publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci
+
+      # Everything CI checks, again, on the exact commit being published. A tag
+      # can point anywhere; this is the only run whose result is load-bearing.
+      - run: node scripts/pii-guard.mjs
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run guard:dist
+
+      - name: Tag must match package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json version $pkg" >&2
+            exit 1
+          fi
+
+      # What ships is what the tarball contains, so look at it before it goes.
+      - name: Inspect the tarball
+        run: |
+          npm pack --dry-run
+          npm pack --json | node -e "
+            const [meta] = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+            const forbidden = meta.files.filter((f) =>
+              /tesseract|traineddata|\.(png|jpe?g|heic|mp4|mov)$/i.test(f.path));
+            if (forbidden.length) {
+              console.error('refusing to publish, tarball contains:', forbidden.map(f => f.path));
+              process.exit(1);
+            }
+            console.log('tarball:', meta.files.length, 'files,', (meta.unpackedSize/1048576).toFixed(1), 'MB unpacked');
+          "
+
+      - run: npm publish --provenance --access public

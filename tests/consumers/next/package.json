@@ -1,0 +1,14 @@
+{
+  "name": "scan-smoke-next",
+  "private": true,
+  "scripts": {
+    "build": "next build",
+    "prebuild": "node prebuild.mjs"
+  },
+  "dependencies": {
+    "@azelotech/scan": "file:../../..",
+    "next": "15.5.18",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}

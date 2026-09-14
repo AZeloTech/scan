@@ -1,0 +1,4 @@
+/target
+# build-wasm.sh's scratch output — the vendored, content-addressed copies
+# live in ../ui/public/dewarp/ (committed there, same as /models/ and /ort/).
+/dist
