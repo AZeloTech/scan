@@ -12,6 +12,7 @@ import {
   releaseCanvas,
 } from "@/lib/image";
 import {
+  lastStillAttempt,
   liveQuadFreshAtTap,
   liveQuadSurvives,
   noteStillFailure,
@@ -30,9 +31,10 @@ import { connectionKind, shouldPrefetchHeavyAssets } from "@/lib/network";
 import { captureFromFile, type Capture, type CapturePath } from "@/lib/capture-intake";
 import { HINT_SAMPLE_WIDTH, readFrame, type FrameHint } from "@/lib/hints";
 import { assessSource, type GateReading } from "@/lib/capture-gate";
-import { type NormalizedQuad } from "@/lib/quad";
+import { normalizedCoverage, type NormalizedQuad } from "@/lib/quad";
 import { flash, shutterPulse } from "@/lib/motion";
-import { useLiveDetect } from "@/hooks/useLiveDetect";
+import { probe, probing, type CaptureProbe, type CornersFrom } from "@/lib/probe";
+import { useLiveDetect, type FrameBox } from "@/hooks/useLiveDetect";
 import { useAssetUrls, useScanRuntime } from "@/hooks/useScanRuntime";
 import { useCopy } from "@/components/I18n";
 import { CameraIcon, ImageIcon, SpinnerIcon } from "@/components/icons";
@@ -128,6 +130,37 @@ type IdleWindow = Window & {
 };
 
 type StageMode = "starting" | "live" | "fallback";
+
+/**
+ * Preview frames drawn to become a page this page load, numbered for the
+ * bench's probe (`lib/probe.ts`) — counted only while something listens.
+ */
+let previewGrabs = 0;
+
+/** Which of the two capture affordances the thumb landed on. */
+type CaptureTrigger = "shutter" | "frame";
+
+/**
+ * What a capture already knows before `emit` resolves its corners, for the
+ * bench's probe (`lib/probe.ts`). Built only while something is listening.
+ */
+type CaptureTrace = Omit<
+  CaptureProbe,
+  | "type"
+  | "doneAt"
+  | "frameW"
+  | "frameH"
+  | "cornersFrom"
+  | "corners"
+  | "detector"
+  | "confidence"
+  | "coverage"
+  | "mlWaitMs"
+> & {
+  /** Who measured the buffered quad, when one travelled. */
+  bufferedSource: CaptureProbe["detector"];
+  bufferedConfidence: number | null;
+};
 
 interface CaptureStageProps {
   onCapture: (capture: Capture) => void;
@@ -452,6 +485,7 @@ export function CaptureStage({
       gate: GateReading | null,
       taken: CapturePath,
       fallback: NormalizedQuad | null = null,
+      trace: CaptureTrace | null = null,
     ) => {
       // Run only when it can change the answer: this is a ~3 s WASM detect and
       // step 1 already outranks it. Only the corners are wanted from it — how
@@ -460,12 +494,48 @@ export function CaptureStage({
       // at the tap would otherwise silently hand this one frame to the
       // classical detector.
       let detection: QuadDetection | null = null;
+      let mlWaitMs: number | null = null;
       if (live === null) {
+        const waitStarted = performance.now();
         await waitForMlIdle();
+        mlWaitMs = performance.now() - waitStarted;
         detection = await detectInCanvas(frame, urls);
       }
       const detected = detection?.corners ?? null;
       const corners = resolveCaptureCorners(live, detected, fallback);
+      if (trace !== null) {
+        const cornersFrom: CornersFrom =
+          live !== null
+            ? "live"
+            : detected !== null
+              ? "detected"
+              : fallback !== null
+                ? "fallback"
+                : null;
+        const { bufferedSource, bufferedConfidence, ...known } = trace;
+        const fromDetector = cornersFrom === "detected";
+        probe({
+          ...known,
+          type: "capture",
+          doneAt: performance.now(),
+          frameW: frame.width,
+          frameH: frame.height,
+          cornersFrom,
+          corners,
+          detector: fromDetector
+            ? (detection?.source ?? null)
+            : cornersFrom === null
+              ? null
+              : bufferedSource,
+          confidence: fromDetector
+            ? (detection?.confidence ?? null)
+            : cornersFrom === null
+              ? null
+              : bufferedConfidence,
+          coverage: corners === null ? null : normalizedCoverage(corners),
+          mlWaitMs,
+        });
+      }
       onCapture({
         canonical: await encodeCanvas(frame, "canonical"),
         corners,
@@ -533,9 +603,10 @@ export function CaptureStage({
    * screen — where the user drags the handles — is what protects the crop, which
    * is why a slightly drifted quad beats none at all.
    */
-  const runCapture = React.useCallback(async () => {
+  const runCapture = React.useCallback(async (trigger: CaptureTrigger) => {
     const video = videoRef.current;
     if (video === null || busyRef.current || disabled) return;
+    const tappedAt = performance.now();
     // Both read synchronously, at the tap: everything below this line moves the
     // clock, and the whole point is to keep what the user was looking at.
     const grabbed = detect.takeQuadForCapture();
@@ -567,6 +638,8 @@ export function CaptureStage({
       // null corners = "detect on the frame you are given", inside `emit`.
       let corners: NormalizedQuad | null = null;
       let fallbackCorners: NormalizedQuad | null = null;
+      const stillW = still?.width ?? null;
+      const stillH = still?.height ?? null;
       if (still !== null) {
         try {
           frame = drawStill(still);
@@ -605,10 +678,20 @@ export function CaptureStage({
         liveQuadSurvives(grabbed.ageMs + (Date.now() - startedAt))
           ? grabbed.quad
           : null;
+      const stillUsed = frame !== null;
+      let grab: number | null = null;
+      let grabbedAt: number | null = null;
       if (frame === null) {
         // The preview path: same surface the quad was measured on, so it is the
         // capture's corners outright and no aspect check is owed.
         frame = frameToCanvas(video);
+        if (probing()) {
+          // Right after the draw, so the bench can name the frame it took.
+          grabbedAt = performance.now();
+          previewGrabs += 1;
+          grab = previewGrabs;
+          probe({ type: "grab", t: grabbedAt, id: grab });
+        }
         corners = bufferedQuad;
       } else if (previewAspect !== null) {
         // The still path: its own detection gets first refusal inside `emit`;
@@ -630,7 +713,25 @@ export function CaptureStage({
       } catch {
         gate = null;
       }
-      await emit(frame, corners, gate, "shutter", fallbackCorners);
+      const trace: CaptureTrace | null = probing()
+        ? {
+            t: tappedAt,
+            trigger,
+            stillUsed,
+            stillW,
+            stillH,
+            previewW: video.videoWidth,
+            previewH: video.videoHeight,
+            visible: visibleRect(detect.frameBox, stageRef.current),
+            bufferAgeMs: grabbed?.ageMs ?? null,
+            bufferedSource: grabbed?.source ?? null,
+            bufferedConfidence: grabbed?.confidence ?? null,
+            stillAttempt: lastStillAttempt(),
+            grab,
+            grabbedAt,
+          }
+        : null;
+      await emit(frame, corners, gate, "shutter", fallbackCorners, trace);
       setAnnouncement(copy.capture.captured(pageNumber));
     } catch (error) {
       setMessage(
@@ -650,7 +751,7 @@ export function CaptureStage({
 
   const handleShutter = React.useCallback(() => {
     shutterPulse(shutterRef.current);
-    void runCapture();
+    void runCapture("shutter");
   }, [runCapture]);
 
   const handleFile = React.useCallback(
@@ -713,6 +814,41 @@ export function CaptureStage({
         ? copy.capture.tip
         : null);
 
+  // What is over the viewfinder right now, as the bench's probe names it
+  // (`lib/probe.ts`) — the same conditions the markup below renders on. Only
+  // worked out while something listens: a host pays one property read.
+  const shownHints =
+    mode === "live" && probing()
+      ? hintKeys({
+          sheetFound: detect.hasQuad,
+          aim:
+            showHint && !detect.hasQuad
+              ? struggling
+                ? "edges-not-found"
+                : detect.searching
+                  ? "aim-at-document"
+                  : "fit-whole-page"
+              : null,
+          lowLight: showLightWarning,
+          tip: message === null && !disabled && struggling,
+        })
+      : "";
+  const reportedHintsRef = React.useRef("");
+  React.useEffect(() => {
+    const previous = reportedHintsRef.current;
+    reportedHintsRef.current = shownHints;
+    if (previous === shownHints || !probing()) return;
+    const before = previous === "" ? [] : previous.split(" ");
+    const after = shownHints === "" ? [] : shownHints.split(" ");
+    const t = performance.now();
+    for (const key of before) {
+      if (!after.includes(key)) probe({ type: "hint", t, key, shown: false });
+    }
+    for (const key of after) {
+      if (!before.includes(key)) probe({ type: "hint", t, key, shown: true });
+    }
+  }, [shownHints]);
+
   return (
     <div className={clsx("flex min-h-0 flex-1 flex-col gap-3", className)}>
       <div
@@ -741,7 +877,7 @@ export function CaptureStage({
             type="button"
             aria-label={captureLabel}
             onClick={() => {
-              void runCapture();
+              void runCapture("frame");
             }}
             disabled={busy}
             className="absolute inset-0 h-full w-full cursor-pointer"
@@ -985,6 +1121,41 @@ export function CaptureStage({
       </CameraActionBar>
     </div>
   );
+}
+
+/** The viewfinder's chips as one space-separated key list, for the probe. */
+function hintKeys(shown: {
+  sheetFound: boolean;
+  aim: string | null;
+  lowLight: boolean;
+  tip: boolean;
+}): string {
+  let keys = shown.sheetFound ? "sheet-found" : "";
+  if (shown.aim !== null) keys += (keys === "" ? "" : " ") + shown.aim;
+  if (shown.lowLight) keys += (keys === "" ? "" : " ") + "low-light";
+  if (shown.tip) keys += (keys === "" ? "" : " ") + "tip";
+  return keys;
+}
+
+/**
+ * The part of the preview the user could actually see — the object-cover crop —
+ * as fractions of the preview frame, for the probe. `null` before the frame box
+ * has been measured.
+ */
+function visibleRect(
+  box: FrameBox | null,
+  stage: HTMLElement | null,
+): CaptureProbe["visible"] {
+  if (box === null || stage === null || box.width <= 0 || box.height <= 0) {
+    return null;
+  }
+  const rect = stage.getBoundingClientRect();
+  return {
+    x: -box.left / box.width,
+    y: -box.top / box.height,
+    width: rect.width / box.width,
+    height: rect.height / box.height,
+  };
 }
 
 /**

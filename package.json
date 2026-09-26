@@ -58,7 +58,7 @@
   "scripts": {
     "build:assets": "node scripts/build-assets.mjs",
     "build:js": "node scripts/build.mjs",
-    "build:types": "tsc -p tsconfig.build.json",
+    "build:types": "tsc -p tsconfig.build.json && node scripts/prune-probe-types.mjs",
     "build": "npm run build:assets && npm run build:js && npm run build:styles && npm run build:types",
     "test": "node --test --experimental-strip-types --import ./scripts/test-alias.mjs \"src/**/*.test.ts\" \"scripts/bench/*.test.mjs\"",
     "typecheck": "tsc --noEmit",

@@ -82,6 +82,7 @@ import {
 } from "@/lib/quad";
 import { useAssetUrls } from "@/hooks/useScanRuntime";
 import { CAPTURE_GRACE_MS } from "@/lib/still-capture";
+import { probe, probing } from "@/lib/probe";
 
 /**
  * The window inside which the last *accepted* corners may still travel with a
@@ -169,6 +170,13 @@ function staleHorizonMs(source: DetectionSource, intervalMs: number): number {
 const SEARCHING_AFTER_MS = 2500;
 
 /**
+ * The bench's view of the overlay (`lib/probe.ts`) is sampled, not streamed: a
+ * 60 fps paint loop reporting every frame would be the instrument dominating
+ * what it measures. State changes are reported the frame they happen.
+ */
+const OVERLAY_PROBE_INTERVAL_MS = 100;
+
+/**
  * How much of its own edge each corner bracket runs along, and the ceiling on
  * that in real pixels.
  *
@@ -221,8 +229,13 @@ interface Runtime {
    * measurement, not the tween. It is cleared by {@link clearTracking} like
    * everything else — corners from a paused or torn-down viewfinder never travel
    * with a photo.
+   *
+   * Who measured it and how sure it was are stored **with** the quad, never
+   * looked up in `tracked` at capture time: the floor a capture holds the
+   * buffer to, and the provenance it reports, must describe this quad, not
+   * whatever the loop happens to be tracking by then.
    */
-  lastAccepted: { quad: NormalizedQuad; capturedAt: number } | null;
+  lastAccepted: AcceptedQuad | null;
   lastFrameAt: number;
   loopStartedAt: number;
   detecting: boolean;
@@ -361,6 +374,23 @@ export interface LiveOverlayRefs {
   brackets: React.MutableRefObject<SVGPathElement | null>;
 }
 
+/** The capture buffer as a capture receives it. */
+/** An accepted quad, with the detection that produced it. */
+interface AcceptedQuad {
+  quad: NormalizedQuad;
+  /** When the frame it describes was sampled. */
+  capturedAt: number;
+  source: DetectionSource;
+  confidence: number | null;
+}
+
+export interface BufferedQuad {
+  quad: NormalizedQuad;
+  ageMs: number;
+  source: DetectionSource;
+  confidence: number | null;
+}
+
 export interface LiveDetect {
   /** False once the device proved too slow — the brackets take over. */
   available: boolean;
@@ -376,9 +406,9 @@ export interface LiveDetect {
    *
    * Answers `null` outside {@link CAPTURE_GRACE_MS}, and the age alongside the
    * quad so the caller can charge its own shutter time against that window
-   * before using it.
+   * before using it. Which detector found them rides along for the probe.
    */
-  takeQuadForCapture: () => { quad: NormalizedQuad; ageMs: number } | null;
+  takeQuadForCapture: () => BufferedQuad | null;
   /** A capture just happened: the next page is a new question for the ML policy. */
   noteCapture: () => void;
 }
@@ -538,25 +568,27 @@ export function useLiveDetect({
    * second and a half), and only it can add that leg before asking
    * `liveQuadSurvives` the real question.
    */
-  const takeQuadForCapture = React.useCallback((): {
-    quad: NormalizedQuad;
-    ageMs: number;
-  } | null => {
+  const takeQuadForCapture = React.useCallback((): BufferedQuad | null => {
     const runtime = runtimeRef.current;
     const buffered = runtime.lastAccepted;
     if (!runtime.live || buffered === null) return null;
     const ageMs = performance.now() - buffered.capturedAt;
     if (ageMs < 0 || ageMs > CAPTURE_GRACE_MS) return null;
     // The buffer was accepted by `accept`, so it is judged by the same
-    // conditioned floor it cleared there — `tracked` is the candidate that
-    // produced it.
+    // conditioned floor it cleared there — from the candidate that produced
+    // it, which travels with it.
     const floor = coverageFloor(
-      runtime.tracked?.source ?? "classical",
-      runtime.tracked?.confidence ?? null,
+      buffered.source,
+      buffered.confidence,
       MIN_QUAD_AREA_FRACTION,
     );
     if (normalizedCoverage(buffered.quad) < floor) return null;
-    return { quad: buffered.quad, ageMs };
+    return {
+      quad: buffered.quad,
+      ageMs,
+      source: buffered.source,
+      confidence: buffered.confidence,
+    };
   }, []);
 
   React.useEffect(() => {
@@ -567,6 +599,10 @@ export function useLiveDetect({
     let frameHandle: number | null = null;
     let trackedQuad = false;
     let announcedSearching = false;
+    // What the probe last reported of the overlay (`lib/probe.ts`).
+    let overlayProbedAt = Number.NEGATIVE_INFINITY;
+    let probedTracking = false;
+    let probedSearching = false;
     runtime.mlEpoch += 1;
     runtime.live = true;
     // A probe kept across a pause would pair two frames minutes apart and read
@@ -730,6 +766,19 @@ export function useLiveDetect({
       // absolute; for the model, the same guarantee is kept by never running it
       // again this session.
       if (elapsed >= profile.budgetMs) {
+        reportPass(
+          source,
+          false,
+          null,
+          canvasWidth,
+          canvasHeight,
+          started,
+          elapsed,
+          false,
+          motionScore,
+          true,
+          false,
+        );
         if (source !== "ml") {
           setAvailable(false);
           return null;
@@ -739,19 +788,34 @@ export function useLiveDetect({
       }
       // The frame this describes is the one `sample` drew, not the moment the
       // detector got round to answering.
-      accept(detection, canvasWidth, canvasHeight, started);
+      const accepted = accept(detection, canvasWidth, canvasHeight, started);
       // A missed detection on a moved scene ends the hold: the stale
       // horizon exists to carry a stationary page through a flicker, and the
       // probe is what proves the page was not stationary. The capture buffer
       // goes with it — corners measured before a swing must not travel with a
       // photo taken after it. A missed detection on a *still* scene changes
       // nothing; that is the flicker the hold was built for.
-      if (detection === null && motionBreaksHold(motionScore)) {
+      const holdBroken = detection === null && motionBreaksHold(motionScore);
+      if (holdBroken) {
         runtime.target = null;
         runtime.tracked = null;
         runtime.lastAccepted = null;
       }
-      if (!adapt(elapsed, profile)) return null;
+      const keepGoing = adapt(elapsed, profile);
+      reportPass(
+        source,
+        false,
+        detection,
+        canvasWidth,
+        canvasHeight,
+        started,
+        elapsed,
+        accepted,
+        motionScore,
+        false,
+        holdBroken,
+      );
+      if (!keepGoing) return null;
       // Deliberately after `adapt`: the warm-up is detached and carries a
       // multi-megabyte download, so nothing it costs may reach the average that
       // decides whether live detection is possible on this device at all.
@@ -764,6 +828,55 @@ export function useLiveDetect({
         fallBackToClassical();
       }
       return runtime.intervalMs - elapsed;
+    }
+
+    /**
+     * One pass, as the bench sees it (`lib/probe.ts`). Positional so a page
+     * without a listener builds nothing: the check comes first.
+     */
+    function reportPass(
+      source: DetectionSource,
+      warmUp: boolean,
+      detection: FrameDetection | null,
+      width: number,
+      height: number,
+      frameAt: number,
+      passMs: number,
+      accepted: boolean,
+      motion: number | null,
+      timedOut: boolean,
+      holdBroken: boolean,
+    ): void {
+      if (!probing()) return;
+      const quad =
+        detection === null ? null : normalizeQuad(detection.corners, width, height);
+      probe({
+        type: "detect",
+        t: performance.now(),
+        frameAt,
+        source,
+        warmUp,
+        ok: detection !== null,
+        quad,
+        confidence: detection?.confidence ?? null,
+        coverage: quad === null ? null : normalizedCoverage(quad),
+        floor:
+          detection === null
+            ? null
+            : coverageFloor(
+                detection.source,
+                detection.confidence,
+                MIN_QUAD_AREA_FRACTION,
+              ),
+        accepted,
+        passMs,
+        intervalMs: runtime.intervalMs,
+        sampleW: width,
+        sampleH: height,
+        motion,
+        timedOut,
+        holdBroken,
+      });
     }
 
     async function detect(): Promise<void> {
@@ -830,7 +943,12 @@ export function useLiveDetect({
       // The capture buffer takes the accepted target, dated by the frame it
       // describes — the same clock the stale horizon reads, so an age computed
       // against it means what a capture thinks it means.
-      runtime.lastAccepted = { quad: runtime.target, capturedAt };
+      runtime.lastAccepted = {
+        quad: runtime.target,
+        capturedAt,
+        source: candidate.source,
+        confidence: candidate.confidence,
+      };
       return true;
     }
 
@@ -896,7 +1014,20 @@ export function useLiveDetect({
         if (cancelled || runtime.mlEpoch !== epoch) return;
         if (!isMlResultFresh(now, performance.now())) return;
         if (video.videoWidth === 0) return;
-        accept(detection, width, height, now);
+        const accepted = accept(detection, width, height, now);
+        reportPass(
+          "ml",
+          true,
+          detection,
+          width,
+          height,
+          now,
+          performance.now() - now,
+          accepted,
+          null,
+          false,
+          false,
+        );
       });
       // `detectOnCanvasMl` never rejects — it answers null and latches itself
       // off — so there is no rejection path to swallow here.
@@ -981,6 +1112,24 @@ export function useLiveDetect({
       if (isSearching !== announcedSearching) {
         announcedSearching = isSearching;
         setSearching(isSearching);
+      }
+      if (
+        probing() &&
+        (tracking !== probedTracking ||
+          isSearching !== probedSearching ||
+          now - overlayProbedAt >= OVERLAY_PROBE_INTERVAL_MS)
+      ) {
+        overlayProbedAt = now;
+        probedTracking = tracking;
+        probedSearching = isSearching;
+        probe({
+          type: "overlay",
+          t: now,
+          quad: runtime.current,
+          opacity: runtime.opacity,
+          hasQuad: tracking,
+          searching: isSearching,
+        });
       }
 
       frameHandle = window.requestAnimationFrame(frame);

@@ -43,6 +43,8 @@
  * thin shell around `ImageCapture` touches the DOM.
  */
 
+import { probe, probing } from "@/lib/probe";
+
 /**
  * How long the shutter may spend hoping for a still.
  *
@@ -338,6 +340,25 @@ export function stillCaptureFailures(): number {
 }
 
 /**
+ * Still attempts that reached the camera this page load, numbered for the
+ * bench's probe (`lib/probe.ts`) — counted only while something listens, so a
+ * build without the probe never touches it.
+ */
+let stillCalls = 0;
+
+/** The attempt the latest {@link takeStillPhoto} made, `null` when none reached the camera. */
+let lastAttempt: number | null = null;
+
+/**
+ * Which still attempt the most recent {@link takeStillPhoto} made — the id its
+ * `still-call` probe event carried — for the capture's own probe event.
+ * Always `null` when nothing is listening.
+ */
+export function lastStillAttempt(): number | null {
+  return lastAttempt;
+}
+
+/**
  * `lib.dom` declares `ImageCapture` unconditionally; Firefox and Safari do not
  * ship it. The `typeof` check is the only thing standing between the two.
  */
@@ -371,6 +392,12 @@ async function decodeStill(
     } catch {
       // Capabilities are a nicety; the default photo size is still a photo.
       settings = undefined;
+    }
+    if (probing()) {
+      // Synchronously before the call: whatever answers it (the bench's fake
+      // camera) learns which attempt it is answering.
+      stillCalls += 1;
+      probe({ type: "still-call", t: performance.now(), attempt: stillCalls });
     }
     const photo: unknown =
       settings === undefined
@@ -417,6 +444,31 @@ async function withBudget(
  * runs on phones that have a few hundred.
  */
 export async function takeStillPhoto(
+  track: MediaStreamTrack | null,
+  options: StillPhotoOptions,
+): Promise<ImageBitmap | null> {
+  const started = performance.now();
+  const callsBefore = stillCalls;
+  const bitmap = await attemptStill(track, options);
+  if (probing()) {
+    // Attempts never overlap (the flight latch), so a call counted while this
+    // one was awaited is this one's.
+    lastAttempt = stillCalls > callsBefore ? stillCalls : null;
+    probe({
+      type: "still",
+      t: started,
+      ms: performance.now() - started,
+      ok: bitmap !== null,
+      width: bitmap?.width ?? null,
+      height: bitmap?.height ?? null,
+      failures,
+      attempt: lastAttempt,
+    });
+  }
+  return bitmap;
+}
+
+async function attemptStill(
   track: MediaStreamTrack | null,
   {
     longEdgeTarget,

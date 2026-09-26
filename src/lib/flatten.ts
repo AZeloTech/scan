@@ -49,6 +49,7 @@ import {
 } from "@/lib/ml-detection";
 import { mlDetectorOptions, type AssetUrls } from "@/lib/runtime-config";
 import { denormalizeQuad, normalizeQuad, quadCoverage, type NormalizedQuad } from "@/lib/quad";
+import { probe, probing, type CaptureDetectProbe } from "@/lib/probe";
 
 export type { CornerPoints };
 
@@ -196,8 +197,24 @@ export async function detectInCanvas(
   source: HTMLCanvasElement,
   urls: AssetUrls,
 ): Promise<QuadDetection | null> {
+  return detectHeld(source, urls, "frame");
+}
+
+/**
+ * {@link detectInCanvas}, told what it is looking at — only so the bench's
+ * probe can tell a capture's detect from a confirm screen's.
+ */
+async function detectHeld(
+  source: HTMLCanvasElement,
+  urls: AssetUrls,
+  on: CaptureDetectProbe["on"],
+): Promise<QuadDetection | null> {
+  const started = performance.now();
   const detection = await detectFrame(source, DETECT_BUDGET_MS, urls);
-  if (detection === null) return null;
+  if (detection === null) {
+    reportCaptureDetect(on, source, started, null, null, false);
+    return null;
+  }
   const { corners, confidence } = detection;
   // The floor is conditioned on who answered: a high-confidence ML quad
   // is measured against the trusted floor, because a page honestly small in a
@@ -211,12 +228,47 @@ export async function detectInCanvas(
     MIN_QUAD_AREA_FRACTION,
   );
   if (quadCoverage(corners, source.width, source.height) < floor) {
+    reportCaptureDetect(on, source, started, detection, floor, false);
     return null;
   }
   const quad = normalizeQuad(corners, source.width, source.height);
+  reportCaptureDetect(on, source, started, detection, floor, quad !== null);
   return quad === null
     ? null
     : { corners: quad, confidence, source: detection.source };
+}
+
+/** A one-shot detect's answer as the bench's probe sees it (`lib/probe.ts`). */
+function reportCaptureDetect(
+  on: CaptureDetectProbe["on"],
+  frame: HTMLCanvasElement,
+  started: number,
+  detection: FrameDetection | null,
+  floor: number | null,
+  accepted: boolean,
+): void {
+  if (!probing()) return;
+  const quad =
+    detection === null
+      ? null
+      : normalizeQuad(detection.corners, frame.width, frame.height);
+  probe({
+    type: "capture-detect",
+    on,
+    t: started,
+    ms: performance.now() - started,
+    source: detection?.source ?? null,
+    quad,
+    confidence: detection?.confidence ?? null,
+    coverage:
+      detection === null
+        ? null
+        : quadCoverage(detection.corners, frame.width, frame.height),
+    floor,
+    accepted,
+    width: frame.width,
+    height: frame.height,
+  });
 }
 
 /**
@@ -239,7 +291,7 @@ export async function detectInBlob(
     return null;
   }
   try {
-    return await detectInCanvas(source, urls);
+    return await detectHeld(source, urls, "canonical");
   } finally {
     releaseCanvas(source);
   }

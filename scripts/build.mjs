@@ -7,9 +7,14 @@ import { build } from "esbuild";
 import { readFile, writeFile, rm, readdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PROBE_OFF } from "./probe-switch.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = join(ROOT, "dist");
+
+// The bench's probe (src/lib/probe.ts) is compiled out of everything this
+// script emits — see probe-switch.mjs. check-dist.mjs verifies.
+const { define: DEFINE, dropLabels: DROP_LABELS } = PROBE_OFF;
 
 await rm(DIST, { recursive: true, force: true });
 
@@ -37,6 +42,8 @@ const result = await build({
     // fails the build rather than quietly dragging the ONNX Runtime back in.
     "scanic",
   ],
+  define: DEFINE,
+  dropLabels: DROP_LABELS,
   logLevel: "info",
   metafile: true,
 });
@@ -112,6 +119,8 @@ await build({
   sourcemap: false,
   minify: true,
   legalComments: "none",
+  define: DEFINE,
+  dropLabels: DROP_LABELS,
   logLevel: "warning",
 });
 
@@ -134,6 +143,8 @@ for (const [entry, name] of WORKERS) {
     sourcemap: false,
     minify: true,
     legalComments: "none",
+    define: DEFINE,
+    dropLabels: DROP_LABELS,
     logLevel: "warning",
   });
 }
