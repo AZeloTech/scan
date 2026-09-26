@@ -102,7 +102,11 @@ function ScanSheet({ onDone, onClose }) {
 ```
 
 `ScanFlow` fills whatever box you give it and expects to be full-screen on a
-phone. It does not render a backdrop, trap focus or handle the back button, and
+phone — give it a box the size of the viewport (`position: fixed; inset: 0`,
+as in the consumer smoke test), not a smaller panel. The app shell's height is
+`100svh` with a `100vh` fallback, not a percentage of its container, so a
+box smaller than the viewport will not shrink it to fit; it will overflow that
+box instead. It does not render a backdrop, trap focus or handle the back button, and
 it never pushes a history entry — not even for its own page preview, which
 closes through its own controls and Escape. Those belong to your dialog,
 because only you know your navigation. Inside, it

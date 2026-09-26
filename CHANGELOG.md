@@ -72,6 +72,16 @@ land in 0.1.0 itself; each is a behaviour a host can observe.
   (`scripts/postcss-scope-root.mjs`) and the `container` core plugin is off. The
   dist guard now parses `dist/styles.css` and refuses any selector not scoped to
   `.scan-root`.
+- **`.app-h` was undefined.** `AppFrame` and `DesktopFlow` render the class, but
+  no rule answered it — it never made the port from the source app's global
+  CSS — so the viewfinder stage measured 0px tall in a plain host page and the
+  live overlay never mounted. `.scan-root .app-h` now sets `100svh` (`100vh`
+  fallback, `var(--app-h)` last) to match the source app's shell height. This
+  assumes the documented full-screen embed (`position: fixed; inset: 0`, as in
+  the consumer smoke test); a host that embeds `<ScanFlow>` inside a smaller,
+  non-fullscreen container will get a shell sized to the browser viewport
+  rather than that container (`src/styles.css`). The dist guard now fails the
+  build if the compiled stylesheet lacks a height rule for `.app-h`.
 - **No spurious "second scan store" warning.** A render React discards before
   committing — a sibling suspending in the host's `<Suspense>`, a lazy chunk
   resolving into a retry, an interrupted transition — created a store that was

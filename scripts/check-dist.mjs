@@ -14,6 +14,11 @@
 //      assets/ names the global a listener would be installed on, no emitted
 //      script still reads the build switch at run time, and the hook's module
 //      is not there in any form (code, declarations, maps).
+//   7. The compiled stylesheet defines `.app-h`. Its classes are hand-written
+//      and referenced by name (`AppFrame`, `DesktopFlow`), so nothing at build
+//      time checks that a rule exists for them the way Tailwind's own
+//      utilities are guaranteed to; a class that is used but never styled
+//      shipped once and measured 0px tall in a plain host page.
 
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import { join, extname } from "node:path";
@@ -176,6 +181,35 @@ for (const file of published) {
     problems.push(
       `${rel(file)}: still reads ${PROBE_SWITCH} at run time — the build did not define it, ` +
         `so a host page could switch the probe on.`
+    );
+  }
+}
+
+// 7. `dist/styles.css` defines `.app-h`.
+//
+// `AppFrame` and `DesktopFlow` (src/components) render this class by name,
+// but it is hand-written CSS, not a Tailwind utility, so nothing at build
+// time guarantees a rule answers it the way Tailwind's own classes are
+// guaranteed to. A selector that gets dropped, renamed or never written
+// compiles clean and ships broken: the class shows up in the DOM, no rule
+// gives it a height, and the viewfinder measures 0px tall in a plain host
+// page. See src/styles.css for the rule itself.
+if (existsSync(STYLES)) {
+  const { default: postcss } = await import("postcss");
+  const styleRoot = postcss.parse(readFileSync(STYLES, "utf8"));
+  let hasAppHeightRule = false;
+  styleRoot.walkRules((rule) => {
+    if (hasAppHeightRule) return;
+    const targetsAppH = rule.selectors.some((part) => /(^|\s)\.app-h(?![\w-])/.test(part.trim()));
+    if (!targetsAppH) return;
+    rule.walkDecls("height", () => {
+      hasAppHeightRule = true;
+    });
+  });
+  if (!hasAppHeightRule) {
+    problems.push(
+      "dist/styles.css: no height rule for .app-h — AppFrame and DesktopFlow render this class " +
+        "but nothing styles it, so the viewfinder measures 0px tall in a plain host page. See src/styles.css."
     );
   }
 }
