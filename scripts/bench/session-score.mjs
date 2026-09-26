@@ -1,0 +1,531 @@
+/**
+ * Scoring one played session: the probe's events against the frames that
+ * were on screen when they happened.
+ *
+ * Pure — a session script and the page's record in, numbers out — and
+ * unit-tested in `session-score.test.mjs`. Three clocks meet here, all in the
+ * page's `performance.now()` milliseconds except where named:
+ *
+ * - every probe event carries its own `t` (and a detect pass its `frameAt`,
+ *   the moment it sampled the video);
+ * - the player logged each **push** of a frame into the stream (`{ k, at }`)
+ *   and each **presentation** of one by the app's `<video>` (`{ at, k }`);
+ * - the script's marks are **camera time**: milliseconds since the camera
+ *   opened (`record.startedAt`).
+ *
+ * The frame on screen at a moment is the last one the `<video>` presented at
+ * or before it; its ground truth was logged when it was rendered. Before the
+ * first presentation it is **unknown** — never frame 0 — and so is anything
+ * scored against it.
+ *
+ * **A capture names its image by id, not by time.** The app numbers the
+ * preview frames it draws to make a page (`grab`) and its still attempts
+ * (`still-call`), and carries both numbers in its `capture` event; the page's
+ * listener named each grab by the timestamp of the frame the `<video>` held
+ * at the draw, and the fake camera stamped each still with the attempt it
+ * answered. A capture whose image cannot be named that way is **unscored**
+ * and counted as missing data.
+ */
+
+import {
+  cornersAtConfirmError,
+  falseLockExposure,
+  falseLocksPerMinute,
+  LOCK_TOLERANCE,
+  MAX_SAMPLE_GAP_MS,
+  mean,
+  percentile,
+  rate,
+  sampleTimeline,
+  scoreDetection,
+  staleOverlayAfterSwap,
+  staticJitter,
+  tapToConfirmLatency,
+  timeToLock,
+  visibleDistance,
+  weightedPercentile,
+  WRONG_CROP_MAX_CORNER_ERROR,
+} from "./metrics.mjs";
+
+/** An overlay counts as shown to the user from this opacity up. */
+export const OVERLAY_SHOWN_OPACITY = 0.5;
+
+/** A false lock on a page-less scene has to last this long to count. */
+export const FALSE_LOCK_MIN_MS = 300;
+
+/** A scoring window with more than this share of its time unobserved is missing data, not a measurement. */
+export const MAX_UNOBSERVED_SHARE = 0.2;
+
+/** Capture verdicts that count as a failed capture — a crop the user would have had to fix. */
+export const CAPTURE_FAILURES = new Set(["wrong", "false positive", "no corners", "confirm never opened"]);
+
+/**
+ * An image with no page in it went into the capture flow. The detector may
+ * have been right to find nothing; the capture still made a page of an empty
+ * desk. Its own failure class — never "ok", and never mixed into the
+ * wrong-crop rate.
+ */
+export const PAGELESS_CAPTURE = "page-less capture";
+
+/** The bench could not name the image that became the page: missing data, not a verdict. */
+export const UNSCORED_CAPTURE = "unscored";
+
+/** The whole image as a crop — what confirming with no corners delivers (the frame goes in flat). */
+const WHOLE_IMAGE = [
+  [0, 0],
+  [1, 0],
+  [1, 1],
+  [0, 1],
+];
+
+/** `{ topLeft: { x, y }, … }` (the library's quad) or `[[x, y] × 4]` → `[[x, y] × 4]`; null stays null. */
+export function toPoints(quad) {
+  if (quad === null || quad === undefined) return null;
+  if (Array.isArray(quad)) return quad;
+  return [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft].map((p) => [p.x, p.y]);
+}
+
+/**
+ * The frame index on screen at page time `at`: the last presentation at or
+ * before it — `null` before the first one. With no presentation log at all,
+ * the last frame pushed at least one frame interval before it (`null` before
+ * that).
+ */
+export function frameOnScreen(record, frameIntervalMs = 1000 / 30) {
+  const presented = record.presented ?? [];
+  const pushes = record.pushes ?? [];
+  return (at) => {
+    if (presented.length > 0) {
+      if (presented[0].at > at) return null;
+      let lo = 0;
+      let hi = presented.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (presented[mid].at <= at) lo = mid;
+        else hi = mid - 1;
+      }
+      return presented[lo].k;
+    }
+    let k = null;
+    for (const push of pushes) if (push.at <= at - frameIntervalMs) k = push.k;
+    return k;
+  };
+}
+
+/**
+ * The truth on screen at page time `t`: the page's quad, `null` for no page,
+ * `undefined` when it is not known which frame was on screen.
+ */
+export function truthOnScreen(record, frameAt = frameOnScreen(record)) {
+  return (t) => {
+    const k = frameAt(t);
+    if (k === null) return undefined;
+    const frame = record.frames[k];
+    return frame === undefined ? undefined : (frame.quad ?? null);
+  };
+}
+
+/** The overlay as the user saw it: `[{ t, quad, gt }]`, page time. */
+export function overlaySeries(record, gtAt) {
+  return record.events
+    .filter((e) => e.type === "overlay")
+    .map((e) => ({
+      t: e.t,
+      quad: e.quad !== null && e.opacity >= OVERLAY_SHOWN_OPACITY ? toPoints(e.quad) : null,
+      gt: gtAt(e.t),
+    }));
+}
+
+/**
+ * Over `[from, to]`, **time-weighted**: each overlay sample holds until the
+ * next ({@link sampleTimeline}; a gap past {@link MAX_SAMPLE_GAP_MS} is
+ * unobserved), and the shares are of the observed time — showing nothing, a
+ * quad on the page (within `LOCK_TOLERANCE`), near it, a wrong one (a corner
+ * past the wrong-crop threshold), a quad over a frame with no page, or one
+ * that cannot be judged (no true corner in the frame). Corners are judged the
+ * way a crop's are: only those the frame shows ({@link visibleDistance}).
+ * Time on a frame nobody can name counts as unobserved. The corner-error
+ * percentiles are weighted by time too.
+ */
+export function overlayAccuracy(series, { from, to, frame, maxGapMs = MAX_SAMPLE_GAP_MS }) {
+  const { intervals, observedMs, unobservedMs } = sampleTimeline(series, { from, to, maxGapMs });
+  const ms = { none: 0, locked: 0, near: 0, wrong: 0, onNothing: 0, unjudged: 0, unknown: 0 };
+  const errors = [];
+  const weights = [];
+  for (const interval of intervals) {
+    const { sample } = interval;
+    const span = interval.to - interval.from;
+    if (sample.quad === null) ms.none += span;
+    else if (sample.gt === undefined) ms.unknown += span;
+    else if (sample.gt === null) ms.onNothing += span;
+    else {
+      const error = visibleDistance(sample.quad, sample.gt, frame);
+      if (error === null) {
+        ms.unjudged += span;
+        continue;
+      }
+      errors.push(error);
+      weights.push(span);
+      if (error <= LOCK_TOLERANCE) ms.locked += span;
+      else if (error <= WRONG_CROP_MAX_CORNER_ERROR) ms.near += span;
+      else ms.wrong += span;
+    }
+  }
+  const scored = observedMs - ms.unknown;
+  return {
+    samples: series.filter((s) => s.t >= from && s.t <= to).length,
+    observedMs: scored,
+    unobservedMs: unobservedMs + ms.unknown,
+    noneShare: rate(ms.none, scored),
+    lockedShare: rate(ms.locked, scored),
+    nearShare: rate(ms.near, scored),
+    wrongShare: rate(ms.wrong, scored),
+    onNothingShare: rate(ms.onNothing, scored),
+    unjudgedShare: rate(ms.unjudged, scored),
+    errorP50: weightedPercentile(errors, weights, 50),
+    errorP95: weightedPercentile(errors, weights, 95),
+  };
+}
+
+/**
+ * Every detect pass, scored against the frame it sampled — the warm-up ML
+ * passes as their own rows (`"ml warm-up"`): an accepted warm-up answer puts
+ * corners on screen and into a capture like any other.
+ *
+ * Page and no-page frames have their own denominators: `wrongRate` is wrong
+ * answers over answers accepted **on a frame with a page**, `falsePositiveRate`
+ * is answers accepted on a frame without one over the passes that sampled
+ * such frames. A pass whose frame cannot be named is `unknownPasses`, and its
+ * answer is not scored.
+ */
+export function scorePasses(record, gtAt, frame) {
+  const bySource = {};
+  for (const e of record.events) {
+    if (e.type !== "detect") continue;
+    const key = e.warmUp ? `${e.source} warm-up` : e.source;
+    const entry = (bySource[key] ??= {
+      passes: 0,
+      answered: 0,
+      accepted: 0,
+      pagePasses: 0,
+      noPagePasses: 0,
+      unknownPasses: 0,
+      acceptedOnPage: 0,
+      wrong: 0,
+      falsePositive: 0,
+      ms: [],
+    });
+    entry.passes += 1;
+    entry.ms.push(e.passMs);
+    if (e.ok) entry.answered += 1;
+    const truth = gtAt(e.frameAt);
+    if (truth === undefined) entry.unknownPasses += 1;
+    else if (truth === null) entry.noPagePasses += 1;
+    else entry.pagePasses += 1;
+    if (!e.accepted) continue;
+    entry.accepted += 1;
+    if (truth === undefined) continue;
+    const score = scoreDetection(toPoints(e.quad), truth, frame);
+    if (!score.hasTruth) entry.falsePositive += 1;
+    else {
+      entry.acceptedOnPage += 1;
+      if (score.wrongCrop) entry.wrong += 1;
+    }
+  }
+  return Object.fromEntries(
+    Object.entries(bySource).map(([source, s]) => [
+      source,
+      {
+        passes: s.passes,
+        answered: s.answered,
+        accepted: s.accepted,
+        pagePasses: s.pagePasses,
+        noPagePasses: s.noPagePasses,
+        unknownPasses: s.unknownPasses,
+        acceptedOnPage: s.acceptedOnPage,
+        wrong: s.wrong,
+        falsePositive: s.falsePositive,
+        wrongRate: rate(s.wrong, s.acceptedOnPage),
+        falsePositiveRate: rate(s.falsePositive, s.noPagePasses),
+        msP50: percentile(s.ms, 50),
+        msP95: percentile(s.ms, 95),
+      },
+    ]),
+  );
+}
+
+/**
+ * The image a capture made its page of, by the ids it carried: the still the
+ * fake camera rendered for its attempt, or the preview frame its grab was
+ * stamped with. `known: false` when the ids name nothing — never a guess.
+ */
+export function capturedImage(script, record, capture) {
+  if (capture.stillUsed) {
+    const attempt = capture.stillAttempt ?? null;
+    const rendered = attempt === null ? null : ((record.stills ?? []).find((s) => s.attempt === attempt) ?? null);
+    if (rendered === null) return { known: false, source: "still (unidentified)" };
+    return {
+      known: true,
+      truth: rendered,
+      content: rendered.content ?? null,
+      source: `still ${rendered.width}×${rendered.height}`,
+      stillIndex: rendered.index ?? null,
+      k: rendered.k ?? null,
+    };
+  }
+  const grab = capture.grab === null || capture.grab === undefined ? null : ((record.grabs ?? []).find((g) => g.id === capture.grab) ?? null);
+  const k = grab?.k ?? null;
+  const truth = k === null ? undefined : script.framesTruth[k];
+  if (truth === undefined) return { known: false, source: "preview frame (unidentified)" };
+  return { known: true, truth, content: record.frameContent?.[k] ?? null, source: `preview frame ${k}`, stillIndex: null, k };
+}
+
+/**
+ * Each capture, from tap to confirm screen and out of it: which image became
+ * the page, its truth, and three crops judged against it, never blended —
+ *
+ * - the **proposal** the confirm screen opened with (`verdict`, `atConfirm`,
+ *   `confirmCorners`): what the detector chain offered;
+ * - the crop the editor **showed** (`shownVerdict`): the proposal, or the
+ *   editor's own inset default when there was none;
+ * - the **final** crop the user left with (`finalVerdict`): what the page
+ *   became — the corners confirmed, or the whole image with none.
+ *
+ * Verdicts: `good`, `wrong`, `no corners` (a page, and nothing to crop it
+ * with), `false positive` (corners on an image with no page),
+ * {@link PAGELESS_CAPTURE} (an image with no page became a capture),
+ * `confirm never opened`, and {@link UNSCORED_CAPTURE} (the image could not be
+ * named). {@link CAPTURE_FAILURES} are the ones a user would have had to fix.
+ * With the image's content boxes, each crop also says whether it cut content
+ * (`contentClipped`, `finalContentClipped`) and `severe` = wrong ∨ clipped;
+ * a page captured with no content truth is `contentUnknown` — missing data,
+ * never "not clipped".
+ */
+export function scoreCaptures(script, record) {
+  const events = record.events;
+  const captures = events.filter((e) => e.type === "capture");
+  return captures.map((capture, index) => {
+    const next = captures[index + 1]?.t ?? Infinity;
+    const attempt = capture.stillAttempt ?? null;
+    // The attempt's own report — by id; an attempt that never reached the
+    // camera has none, and only its outcome is looked up by time.
+    const still =
+      attempt !== null
+        ? events.find((e) => e.type === "still" && e.attempt === attempt)
+        : events.find((e) => e.type === "still" && e.t >= capture.t - 1 && e.t <= capture.doneAt);
+    const open = events.find((e) => e.type === "confirm-open" && e.t >= capture.t && e.t < next) ?? null;
+    const done = events.find((e) => e.type === "confirm-done" && open !== null && e.t >= open.t && e.t < next) ?? null;
+    const frame = { width: capture.frameW, height: capture.frameH };
+    const image = capturedImage(script, record, capture);
+    const truth = image.known ? image.truth : null;
+    /** The page's corners on the image; `null` = no page; `undefined` = unknown image. */
+    const truthQuad = !image.known ? undefined : truth.quad === null || truth.quad === undefined ? null : (truth.corners ?? truth.quad);
+    const content = image.known ? image.content : null;
+    const judge = (corners) => (truthQuad === undefined ? null : scoreDetection(corners, truthQuad, frame, { content }));
+    const atError = (corners) => (truthQuad === undefined ? null : cornersAtConfirmError(corners, truthQuad, frame));
+    const corners = toPoints(open?.corners ?? null);
+    const shownCorners = open === null ? null : toPoints(open.shownCorners ?? null);
+    const finalCorners = done === null ? null : (toPoints(done.corners) ?? WHOLE_IMAGE);
+    const proposal = judge(corners);
+    const shown = open === null ? null : judge(shownCorners);
+    const final = done === null ? null : judge(finalCorners);
+    // The edge refinement that produced the seed, if one did: its input is the
+    // seed this capture would have opened with before refinement existed —
+    // scored on the same run, so the comparison is paired.
+    const refine =
+      [...events].reverse().find((e) => e.type === "refine" && e.t >= capture.t && (open === null || e.t <= open.t)) ?? null;
+    const refinedSeed = refine !== null && open !== null && sameQuad(toPoints(refine.output), corners);
+    const unrefinedCorners = refinedSeed ? toPoints(refine.input) : corners;
+    const unrefined = judge(unrefinedCorners);
+    const headline = (score) =>
+      open === null ? "confirm never opened" : truthQuad === undefined ? UNSCORED_CAPTURE : captureVerdict(score);
+    return {
+      trigger: capture.trigger,
+      tapAt: capture.t - record.startedAt,
+      stillAttempt: attempt,
+      grab: capture.grab ?? null,
+      stillAttempted: still !== undefined,
+      stillOk: still?.ok ?? null,
+      stillMs: still?.ms ?? null,
+      stillUsed: capture.stillUsed,
+      stillSize: capture.stillW === null ? null : [capture.stillW, capture.stillH],
+      previewSize: [capture.previewW, capture.previewH],
+      frame: [frame.width, frame.height],
+      imageSource: image.source,
+      imageKnown: image.known,
+      k: image.known ? image.k : null,
+      stillIndex: image.known ? image.stillIndex : null,
+      cornersFrom: capture.cornersFrom,
+      detector: capture.detector,
+      confidence: capture.confidence,
+      bufferAgeMs: capture.bufferAgeMs,
+      mlWaitMs: capture.mlWaitMs,
+      hasTruth: truthQuad !== undefined && truthQuad !== null,
+      truthWhole: truth?.whole ?? null,
+      truthCorners: truthQuad ?? null,
+      // (a) the proposal the confirm screen opened with
+      confirmCorners: corners,
+      atConfirm: atError(corners),
+      verdict: headline(proposal),
+      iou: proposal?.iou ?? null,
+      orderWrong: proposal?.orderWrong ?? null,
+      contentClipped: proposal?.contentClipped ?? null,
+      // A page whose content the bench does not know: its crops' content
+      // verdicts are unknown, and so is whether the capture was severe.
+      contentUnknown: open !== null && truthQuad !== undefined && truthQuad !== null && (content === null || content === undefined),
+      identifierClipped: proposal?.content?.identifierClipped ?? null,
+      marginClipped: proposal?.marginClipped ?? null,
+      severe: open === null ? true : (proposal?.severe ?? null),
+      // (b) what the editor showed
+      shownCorners,
+      shownAtConfirm: open === null ? null : atError(shownCorners),
+      shownVerdict: open === null ? "confirm never opened" : truthQuad === undefined ? UNSCORED_CAPTURE : cropVerdict(shown),
+      // (c) what the user left with
+      finalCorners,
+      finalAtConfirm: final === null ? null : atError(finalCorners),
+      finalVerdict:
+        open === null ? "confirm never opened" : done === null ? "not confirmed" : truthQuad === undefined ? UNSCORED_CAPTURE : cropVerdict(final),
+      finalContentClipped: final?.contentClipped ?? null,
+      finalSevere: final === null ? null : final.severe,
+      wholePhoto: done?.wholePhoto ?? null,
+      pagelessCapture: open !== null && truthQuad === null,
+      refine:
+        refine === null
+          ? null
+          : {
+              from: refine.from,
+              mode: refine.mode,
+              changed: refine.changed,
+              reason: refine.reason,
+              ms: refine.ms,
+              modes: refine.sides.map((side) => side.mode),
+              seeded: refinedSeed,
+            },
+      unrefinedCorners,
+      unrefinedAtConfirm: atError(unrefinedCorners),
+      unrefinedVerdict: headline(unrefined),
+      tapToConfirmMs: tapToConfirmLatency(capture, open),
+      captureMs: capture.doneAt - capture.t,
+      confirmEdited: done?.edited ?? null,
+      confirmOpened: open !== null,
+    };
+  });
+}
+
+/** Two quads (`[[x, y] × 4]`) that are the same answer, to float noise. */
+function sameQuad(a, b) {
+  if (a === null || b === null) return a === b;
+  return a.every(([x, y], i) => Math.abs(x - b[i][0]) < 1e-6 && Math.abs(y - b[i][1]) < 1e-6);
+}
+
+/** The proposal's verdict: on an image with no page, corners are a false positive and none a page-less capture. */
+function captureVerdict(score) {
+  if (score.hasTruth) return score.detected ? (score.wrongCrop ? "wrong" : "good") : "no corners";
+  return score.detected ? "false positive" : PAGELESS_CAPTURE;
+}
+
+/** A crop's verdict (shown, final): any crop of an image with no page is a page-less capture. */
+function cropVerdict(score) {
+  if (score === null) return null;
+  if (!score.hasTruth) return PAGELESS_CAPTURE;
+  if (!score.detected) return "no corners";
+  return score.wrongCrop ? "wrong" : "good";
+}
+
+/**
+ * Everything the report shows for one played session.
+ *
+ * `script` is the session script; the record's `frames` are the per-frame
+ * truth. `missingData` lists what could not be measured — a window mostly
+ * unobserved, a swap with no sample after it, a capture whose image could
+ * not be named or whose page's content is not known — which `--compare`
+ * refuses to wave through.
+ */
+export function scoreSession(script, record) {
+  const frame = script.frame;
+  const t0 = record.startedAt;
+  const at = (cameraMs) => t0 + cameraMs;
+  const frameAt = frameOnScreen(record);
+  const gtAt = truthOnScreen(record, frameAt);
+  const withTruth = { ...script, framesTruth: record.frames };
+  const series = overlaySeries(record, gtAt);
+  const marks = script.marks;
+  const out = { frame, marks, missingData: [] };
+  const windowed = (name, accuracy) => {
+    const total = accuracy.observedMs + accuracy.unobservedMs;
+    if (total > 0 && accuracy.unobservedMs > MAX_UNOBSERVED_SHARE * total) {
+      out.missingData.push(`${name}: ${Math.round(accuracy.unobservedMs)} of ${Math.round(total)} ms unobserved`);
+    }
+    return accuracy;
+  };
+
+  if (marks.lockFrom !== undefined) {
+    const from = at(marks.lockFrom);
+    const lock = timeToLock(series, { from, frame });
+    out.timeToLockMs = lock;
+    const holdTo = at(marks.holdTo);
+    const jitterFrom = lock === null ? at(marks.holdFrom ?? marks.lockFrom) : from + lock;
+    out.jitter = staticJitter(series, { from: jitterFrom, to: holdTo, frame });
+    out.truthMotion = staticJitter(
+      series.map((s) => ({ ...s, quad: s.quad === null || s.gt === undefined ? null : s.gt })),
+      { from: jitterFrom, to: holdTo, frame },
+    );
+    out.hold = windowed("hold", overlayAccuracy(series, { from: at(marks.holdFrom ?? marks.lockFrom), to: holdTo, frame }));
+  }
+  if (marks.swapAt !== undefined) {
+    const swapAt = at(marks.swapAt);
+    const oldGt = gtAt(swapAt - 1);
+    const stale =
+      oldGt === null || oldGt === undefined
+        ? { outcome: "unobserved", ms: null }
+        : staleOverlayAfterSwap(series, { swapAt, oldGt, frame, to: marks.holdTo2 === undefined ? Infinity : at(marks.holdTo2) });
+    out.staleAfterSwap = stale.outcome;
+    out.staleAfterSwapMs = stale.ms;
+    if (stale.outcome === "unobserved") out.missingData.push("swap: the overlay (or the old page) was not observed throughout the swap");
+    out.timeToLockAfterSwapMs = timeToLock(series, { from: at(marks.lockFrom2), frame });
+    out.holdAfterSwap = windowed(
+      "hold after the swap",
+      overlayAccuracy(series, { from: at(marks.lockFrom2), to: at(marks.holdTo2), frame }),
+    );
+  }
+  if (marks.negativeFrom !== undefined) {
+    const from = at(marks.negativeFrom);
+    const to = at(marks.negativeTo);
+    out.falseLocksPerMinute = falseLocksPerMinute(series, { from, to, minHoldMs: FALSE_LOCK_MIN_MS });
+    out.falseLockExposure = falseLockExposure(series, { from, to });
+    out.negative = windowed("no page in view", overlayAccuracy(series, { from, to, frame }));
+  }
+  if (marks.partialFrom !== undefined) {
+    // The page is cut off: the overlay is judged on the corners the frame
+    // shows, exactly as a crop of the same frame would be.
+    out.partial = windowed("page cut off", overlayAccuracy(series, { from: at(marks.partialFrom), to: at(marks.partialTo), frame }));
+  }
+  out.passes = scorePasses(record, gtAt, frame);
+  out.captures = scoreCaptures(withTruth, record);
+  out.captures.forEach((capture, index) => {
+    if (capture.verdict === UNSCORED_CAPTURE) out.missingData.push(`capture ${index + 1}: ${capture.imageSource}`);
+    else if (capture.contentUnknown) out.missingData.push(`capture ${index + 1}: no content truth for ${capture.imageSource}`);
+  });
+  // Every scripted tap owes a capture: one that never came is a failure too,
+  // not a smaller denominator.
+  out.expectedCaptures = (script.actions ?? []).filter((a) => a.tap !== undefined).length;
+  out.missingCaptures = Math.max(0, out.expectedCaptures - out.captures.length);
+  const pushes = record.pushes ?? [];
+  const span = pushes.length > 1 ? pushes[pushes.length - 1].at - pushes[0].at : 0;
+  out.stream = {
+    pushed: pushes.length,
+    fps: span > 0 ? ((pushes.length - 1) * 1000) / span : null,
+    skipped: record.skipped ?? 0,
+    presented: (record.presented ?? []).length,
+    stillRenderMs: mean((record.stills ?? []).map((s) => s.renderMs)),
+  };
+  out.hints = hintTimeline(record);
+  return out;
+}
+
+/** The chips over the viewfinder, in order: `+key` shown, `-key` gone, camera time. */
+export function hintTimeline(record) {
+  return record.events
+    .filter((e) => e.type === "hint")
+    .map((e) => ({ t: e.t - record.startedAt, change: `${e.shown ? "+" : "-"}${e.key}` }));
+}

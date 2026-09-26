@@ -23,3 +23,8 @@ tests/consumers/*/dist/
 tests/consumers/*/out/
 tests/consumers/*/.next/
 tests/consumers/*/package-lock.json
+
+# The detection bench's synthetic output (reports, contact sheets, the bench
+# page's bundle). Generated from seeds on every run; never committed. Anything
+# derived from REAL media is written outside the repository altogether.
+.bench-out/

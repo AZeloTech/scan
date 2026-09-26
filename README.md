@@ -284,6 +284,19 @@ any off-origin request or any 404.
 > repository and recorded in `fixtures/PROVENANCE.md`. The guard runs before
 > every commit and in CI, and has no override flag.
 
+`npm run bench` runs the detection bench: a seeded scene emulator renders
+documents on desks in headless Chromium, the library's own detectors run on
+them, and every answer is scored against exact ground truth into `.bench-out/`
+(git-ignored). `npm run bench -- --suite session` does the same for the whole
+flow: the real `<ScanFlow>` on an emulated phone, fed by an emulated camera
+watching a document being scanned; `npm run bench:play` opens the same flow in
+a playground with a live HUD. With `SCAN_REAL_MEDIA` pointing at real photos
+and clips **outside** the repository, `--suite real-stills` and
+`--suite real-video` score them too, and `npm run bench:label` serves a page
+for labelling their corners by hand. Nothing it renders is committed, and
+anything derived from real photos stays outside the repository, in
+`~/.cache/scan-bench/`. See [`scripts/bench/README.md`](scripts/bench/README.md).
+
 If `npm run smoke` cannot download the Chromium build Playwright expects, point
 it at a browser you already have:
 
