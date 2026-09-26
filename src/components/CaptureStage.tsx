@@ -23,7 +23,9 @@ import {
 import {
   detectInCanvas,
   isMlDetectionReady,
+  refineCorners,
   waitForMlIdle,
+  type DetectionSource,
   type QuadDetection,
 } from "@/lib/flatten";
 import { prefetchDewarpAssets } from "@/lib/dewarp/prefetch";
@@ -474,6 +476,13 @@ export function CaptureStage({
    *     here is only the priority, and measuring this frame always outranks
    *     remembering another one.
    *
+   * Whichever of the three wins is then **refined** onto the paper's edge on
+   * this frame ({@link refineCorners}) before it seeds the confirm screen: the
+   * detect refines its own answer; a `live` or `fallback` quad — measured on a
+   * 640 px sample of an earlier frame — is refined here, as the detector that
+   * measured it (`carriedSource`) allows. The priority above is untouched:
+   * refinement only ever moves corners that were already chosen.
+   *
    * The frame is encoded **once**, as the page's canonical. Nothing here warps
    * anything: the corners travel with the page and the warp happens inside its
    * single render, so a capture costs one encode instead of two.
@@ -486,6 +495,7 @@ export function CaptureStage({
       taken: CapturePath,
       fallback: NormalizedQuad | null = null,
       trace: CaptureTrace | null = null,
+      carriedSource: DetectionSource | null = null,
     ) => {
       // Run only when it can change the answer: this is a ~3 s WASM detect and
       // step 1 already outranks it. Only the corners are wanted from it — how
@@ -502,7 +512,11 @@ export function CaptureStage({
         detection = await detectInCanvas(frame, urls);
       }
       const detected = detection?.corners ?? null;
-      const corners = resolveCaptureCorners(live, detected, fallback);
+      let corners = resolveCaptureCorners(live, detected, fallback);
+      // The detect refined its own answer; a carried quad is refined here.
+      if (corners !== null && corners !== detected) {
+        corners = refineCorners(frame, corners, carriedSource, live !== null ? "live" : "fallback");
+      }
       if (trace !== null) {
         const cornersFrom: CornersFrom =
           live !== null
@@ -731,7 +745,15 @@ export function CaptureStage({
             grabbedAt,
           }
         : null;
-      await emit(frame, corners, gate, "shutter", fallbackCorners, trace);
+      await emit(
+        frame,
+        corners,
+        gate,
+        "shutter",
+        fallbackCorners,
+        trace,
+        grabbed?.source ?? null,
+      );
       setAnnouncement(copy.capture.captured(pageNumber));
     } catch (error) {
       setMessage(

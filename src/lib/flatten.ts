@@ -49,7 +49,8 @@ import {
 } from "@/lib/ml-detection";
 import { mlDetectorOptions, type AssetUrls } from "@/lib/runtime-config";
 import { denormalizeQuad, normalizeQuad, quadCoverage, type NormalizedQuad } from "@/lib/quad";
-import { probe, probing, type CaptureDetectProbe } from "@/lib/probe";
+import { probe, probing, type CaptureDetectProbe, type RefineProbe } from "@/lib/probe";
+import { refineOnCanvas } from "@/lib/refine";
 
 export type { CornerPoints };
 
@@ -192,12 +193,65 @@ async function detectFrame(
 /**
  * Detect the page in a frame the caller already holds. Never rejects: no quad
  * is a normal answer and the warp rescue is the contract.
+ *
+ * The answer is **refined** onto the paper's edge ({@link refineCorners})
+ * unless `refine: false` — which only the bench asks for, to measure the
+ * detector on its own.
  */
 export async function detectInCanvas(
   source: HTMLCanvasElement,
   urls: AssetUrls,
+  { refine = true }: { refine?: boolean } = {},
 ): Promise<QuadDetection | null> {
-  return detectHeld(source, urls, "frame");
+  return detectHeld(source, urls, "frame", refine);
+}
+
+/**
+ * Where the corners handed to {@link refineCorners} came from — the capture's
+ * own detect, the live loop's quad (on the preview frame, or carried to the
+ * still), or a fresh detect on a stored canonical.
+ */
+export type RefineFrom = RefineProbe["from"];
+
+/**
+ * Move a quad that is about to seed a confirm screen onto the paper's edge,
+ * on the image it is normalized to (`lib/refine.ts`). The detectors answer
+ * slightly inside the page as a rule, and on a low-contrast table the model can
+ * pull a corner onto the text block; the refinement measures the edge itself.
+ *
+ * Runs **after** every gate — the coverage floor judged the detector's own
+ * answer — and never decides whether there are corners, only where. A quad
+ * from the classical detector (or of unknown origin) is only ever snapped
+ * locally: its confident failure is the desk, and a wide search from there
+ * would only make the desk look more like a page. Refinement that fails,
+ * doubts or runs out of time answers the corners it was given.
+ */
+export function refineCorners(
+  frame: HTMLCanvasElement,
+  quad: NormalizedQuad,
+  detector: DetectionSource | null,
+  from: RefineFrom,
+): NormalizedQuad {
+  const mode = detector === "ml" ? "full" : "local";
+  const result = refineOnCanvas(frame, quad, { mode });
+  if (probing()) {
+    probe({
+      type: "refine",
+      t: performance.now(),
+      from,
+      detector,
+      mode,
+      input: quad,
+      output: result.quad,
+      changed: result.changed,
+      reason: result.reason,
+      sides: result.sides,
+      ms: result.ms,
+      width: frame.width,
+      height: frame.height,
+    });
+  }
+  return result.quad;
 }
 
 /**
@@ -208,6 +262,7 @@ async function detectHeld(
   source: HTMLCanvasElement,
   urls: AssetUrls,
   on: CaptureDetectProbe["on"],
+  refine = true,
 ): Promise<QuadDetection | null> {
   const started = performance.now();
   const detection = await detectFrame(source, DETECT_BUDGET_MS, urls);
@@ -233,9 +288,14 @@ async function detectHeld(
   }
   const quad = normalizeQuad(corners, source.width, source.height);
   reportCaptureDetect(on, source, started, detection, floor, quad !== null);
-  return quad === null
-    ? null
-    : { corners: quad, confidence, source: detection.source };
+  if (quad === null) return null;
+  return {
+    corners: refine
+      ? refineCorners(source, quad, detection.source, on === "frame" ? "detected" : "canonical")
+      : quad,
+    confidence,
+    source: detection.source,
+  };
 }
 
 /** A one-shot detect's answer as the bench's probe sees it (`lib/probe.ts`). */

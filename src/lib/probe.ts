@@ -38,6 +38,7 @@
 
 import type { DetectionSource } from "@/lib/flatten";
 import type { NormalizedQuad } from "@/lib/quad";
+import type { SideReport } from "@/lib/refine";
 import { probeListener } from "@/lib/probe-hook";
 
 /**
@@ -205,6 +206,34 @@ export interface CaptureDetectProbe {
   height: number;
 }
 
+/**
+ * Capture-time edge refinement (`lib/refine.ts`) run on corners about to seed
+ * a confirm screen: what went in, what came out, and why, side by side.
+ */
+export interface RefineProbe {
+  type: "refine";
+  t: number;
+  /**
+   * Whose corners were refined: the capture's own detect (`detected`), the
+   * live loop's quad on the preview frame (`live`) or carried to the still
+   * (`fallback`), or a fresh detect on a stored canonical (`canonical`).
+   */
+  from: "detected" | "live" | "fallback" | "canonical";
+  detector: DetectionSource | null;
+  /** `local` for the classical detector's quads: never searched wide. */
+  mode: "full" | "local";
+  input: NormalizedQuad;
+  output: NormalizedQuad;
+  changed: boolean;
+  reason: string;
+  /** TL→TR, TR→BR, BR→BL, BL→TL. */
+  sides: SideReport[];
+  ms: number;
+  /** The image the corners are fractions of. */
+  width: number;
+  height: number;
+}
+
 /** One still-photo attempt, however it ended. */
 export interface StillProbe {
   type: "still";
@@ -255,6 +284,7 @@ export type ProbeEvent =
   | StillCallProbe
   | GrabProbe
   | CaptureDetectProbe
+  | RefineProbe
   | StillProbe
   | ConfirmOpenProbe
   | ConfirmDoneProbe;

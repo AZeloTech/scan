@@ -16,6 +16,22 @@ freezes at 1.0.
   anybody relies on it.
 - `scan-copy-assets`, a command that copies this package's runtime files into a
   directory the host serves.
+- **Corners start on the paper's edge.** The corners a capture (or a gallery
+  pick, or a confirm screen's fresh detect) seeds the confirm screen with are
+  refined on the full-resolution image before they are shown: each side is
+  snapped onto the edge where the page's paper ends, and a side the model
+  pulled onto the text block of a page on a light table is searched for
+  further out. It reads the page's own stock (a navy card, a kraft envelope,
+  not only white paper) and takes a form's printed border for print. It
+  never moves a side inward across page content, or without enough of the
+  background in view to show it is cutting background, or along the chord of
+  a curled side; never searches past a page edge to a repeating background
+  (stripes, tiles), across a dark desk or from a side with no paper right
+  past it; never turns the quad inside out or onto a neighbour; never places
+  a corner off the image; never searches far from a classical-detector quad;
+  keeps no copy of the page once it returns; and gives up — keeping the
+  detector's corners — on any doubt or after 250 ms, checking the clock every
+  few milliseconds of work (`src/lib/refine.ts`).
 
 ### Changed before first publish — host integration
 Found by embedding 0.1.0 in a host page. None of these is on npm yet, so they
