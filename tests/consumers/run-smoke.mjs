@@ -142,6 +142,12 @@ async function drive(name, port) {
   const failures = [];
   if (report.error) failures.push(`the page reported: ${report.error}`);
   if (!report.mlReady) failures.push("the ML detector never became ready");
+  // Live detection runs off the main thread when the host serves the worker
+  // (and lets it compile WebAssembly): anything else still scans, on the main
+  // thread, but in a consumer build it is a packaging or header regression.
+  if (report.detectWorker !== "worker") {
+    failures.push(`live detection would not run in its worker: ${report.detectWorker ?? "not reported"}`);
+  }
   if (!report.pdfBytes) failures.push("no PDF was built");
   if (offOrigin.length > 0) {
     failures.push(

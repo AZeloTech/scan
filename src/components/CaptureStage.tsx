@@ -34,6 +34,7 @@ import { captureFromFile, type Capture, type CapturePath } from "@/lib/capture-i
 import { HINT_SAMPLE_WIDTH, readFrame, type FrameHint } from "@/lib/hints";
 import { assessSource, type GateReading } from "@/lib/capture-gate";
 import { normalizedCoverage, type NormalizedQuad } from "@/lib/quad";
+import { refineOnCanvas } from "@/lib/refine";
 import { flash, shutterPulse } from "@/lib/motion";
 import { probe, probing, type CaptureProbe, type CornersFrom } from "@/lib/probe";
 import { useLiveDetect, type FrameBox } from "@/hooks/useLiveDetect";
@@ -391,9 +392,23 @@ export function CaptureStage({
     };
   }, [intakeImages, reportError, useCamera]);
 
+  const detect = useLiveDetect({
+    videoRef,
+    containerRef: stageRef,
+    active: mode === "live" && !disabled && !cameraLost,
+    paused: paused || busy,
+  });
+  /**
+   * Whether the live loop reads the hint for us: on the worker lane the
+   * detection worker takes it from the loop's own frames, and this screen's
+   * timer — a second draw of the video on the main thread, five times a
+   * second — does not run.
+   */
+  const loopHints = detect.hint !== null;
+
   // ── live hints (~5 fps on a 320 px sample) ────────────────────────────────
   React.useEffect(() => {
-    if (mode !== "live") return;
+    if (mode !== "live" || loopHints) return;
     const timer = window.setInterval(() => {
       const video = videoRef.current;
       const canvas = sampleCanvasRef.current;
@@ -409,7 +424,7 @@ export function CaptureStage({
       setHint(readFrame(image).hint);
     }, HINT_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [mode]);
+  }, [mode, loopHints]);
 
   /**
    * ── the curved-page engine, fetched on Wi-Fi before anyone asks ───────────
@@ -528,8 +543,22 @@ export function CaptureStage({
                 : null;
         const { bufferedSource, bufferedConfidence, ...known } = trace;
         const fromDetector = cornersFrom === "detected";
+        // The other capture policy, on the same capture: without the classical
+        // fall-through the detect would have come back empty and the buffered
+        // quad (if one could travel) would have seeded the screen instead.
+        let alternative: CaptureProbe["alternative"] = null;
+        if (fromDetector && detection?.fellThrough === true) {
+          alternative =
+            fallback === null
+              ? { corners: null, cornersFrom: null }
+              : {
+                  corners: refineOnCanvas(frame, fallback, { mode: carriedSource === "ml" ? "full" : "local" }).quad,
+                  cornersFrom: "fallback",
+                };
+        }
         probe({
           ...known,
+          alternative,
           type: "capture",
           doneAt: performance.now(),
           frameW: frame.width,
@@ -559,13 +588,6 @@ export function CaptureStage({
     },
     [onCapture, path, urls],
   );
-
-  const detect = useLiveDetect({
-    videoRef,
-    containerRef: stageRef,
-    active: mode === "live" && !disabled && !cameraLost,
-    paused: paused || busy,
-  });
 
   /**
    * The tip box only appears after the detector has genuinely been stuck, and
@@ -819,7 +841,8 @@ export function CaptureStage({
 
   // While the quad is on screen it IS the feedback: the blur chip would just
   // argue with it. Poor light is the one thing the quad cannot tell the user.
-  const showLightWarning = hint === "low_light";
+  const liveHint = detect.hint ?? hint;
+  const showLightWarning = liveHint === "low_light";
   const showHint = !detect.hasQuad || showLightWarning;
 
   /**
@@ -878,16 +901,20 @@ export function CaptureStage({
         className="relative min-h-0 flex-1 overflow-hidden rounded-lg bg-shell-sunken"
       >
         {/* Always mounted: the stream is attached to this node before the mode
-            flips to "live", so it must exist from the first render. */}
+            flips to "live", so it must exist from the first render. Kept out
+            of sight by opacity, never by `display: none` or `visibility`:
+            WebKit leaves a camera stream attached to a video it does not
+            render without a frame for good, even once it is shown. */}
         <video
           ref={videoRef}
           playsInline
           muted
           autoPlay
           aria-label={copy.capture.videoLabel}
+          aria-hidden={mode !== "live" || undefined}
           className={clsx(
             "absolute inset-0 h-full w-full object-cover",
-            mode !== "live" && "hidden",
+            mode !== "live" && "pointer-events-none opacity-0",
           )}
         />
 

@@ -51,6 +51,8 @@ import { mlDetectorOptions, type AssetUrls } from "@/lib/runtime-config";
 import { denormalizeQuad, normalizeQuad, quadCoverage, type NormalizedQuad } from "@/lib/quad";
 import { probe, probing, type CaptureDetectProbe, type RefineProbe } from "@/lib/probe";
 import { refineOnCanvas } from "@/lib/refine";
+import { demoteDetectLane, detectLane, detectLaneSettled, laneDetect } from "@/lib/detect-lane";
+import type { DetectPlan } from "@/lib/detect-protocol";
 
 export type { CornerPoints };
 
@@ -147,6 +149,12 @@ export interface QuadDetection {
   confidence: number | null;
   /** Which detector answered — carried for the debug panel's capture row. */
   source: DetectionSource;
+  /**
+   * The model answered "no page" and these are the classical detector's
+   * corners ({@link CAPTURE_CLASSICAL_FALL_THROUGH}) — for the bench's
+   * comparison of the two capture policies.
+   */
+  fellThrough?: boolean;
 }
 
 /**
@@ -169,25 +177,147 @@ export interface FrameDetection {
 }
 
 /**
- * One pass with whichever detector this session is currently on — the model
- * when it is warm, the classical pipeline otherwise.
+ * The capture path's policy when the model is ready and **answers that there
+ * is no page**: ask the classical detector anyway (`true`, the fall-through)
+ * or take no corners (`false`: the confirm screen opens on the whole frame
+ * and the user places them).
  *
- * ML-first means ML-*first*, not ML-only: a pass that answers nothing — no page
- * in the frame, an earlier pass still in flight, a runtime that latched off
- * mid-call — is followed by a classical pass rather than by a shrug. On the
- * capture path that second pass costs milliseconds and is the difference
- * between a page that arrives warped and one the user has to fix by hand.
+ * Either way the classical detector still answers when the model *cannot* —
+ * not ready yet, latched off, out of time, or (main-thread lane) held by a
+ * live pass — because then it is the only detector there is. Decided on the
+ * bench's sessions and scenes (`scripts/bench/README.md`, "Capture: the
+ * classical fall-through"): the fall-through's rescues outnumber its
+ * miscrops.
+ */
+export const CAPTURE_CLASSICAL_FALL_THROUGH = true;
+
+/** How long a capture waits for a lane still being decided before running on this thread. */
+const LANE_WAIT_MS = 250;
+
+/** A one-shot detect's answer, and how it came to be — for the probe and the capture policy. */
+interface HeldDetection {
+  detection: FrameDetection | null;
+  lane: "worker" | "main";
+  /** The model answered nothing and the classical detector was asked. */
+  fellThrough: boolean;
+  /** Why the model was not asked (`busy`: a live pass held it — a downgrade). */
+  mlSkipped: "busy" | "not-ready" | "disabled" | null;
+  /** Worker lane: time spent queued behind a live pass already running. */
+  queueMs: number | null;
+}
+
+/**
+ * One detect with whichever detector this session is currently on — the model
+ * when it is warm, the classical pipeline otherwise — on whichever lane the
+ * session runs detection on.
+ *
+ * ML-first means ML-*first*: a model that cannot answer — not ready, latched
+ * off mid-call, out of time, held by an earlier pass — is followed by a
+ * classical pass rather than by a shrug. A model that *did* answer "no page"
+ * is followed by one only under {@link CAPTURE_CLASSICAL_FALL_THROUGH}.
  */
 async function detectFrame(
   source: HTMLCanvasElement,
   budgetMs: number,
   urls: AssetUrls,
-): Promise<FrameDetection | null> {
-  if (primaryDetector({ ready: isMlReady(), disabled: isMlDisabled() }) === "ml") {
-    const detection = await detectOnCanvasMl(source, budgetMs, urls);
-    if (detection !== null) return detection;
+): Promise<HeldDetection> {
+  // A lane still being decided is usually decided in milliseconds; running
+  // the model here meanwhile would warm a second ONNX session beside the
+  // worker's. But a worker script still on its way (or one that will never
+  // say hello) can take seconds, and a capture's budget must not start after
+  // them: past a short wait the capture runs here, with the model only if it
+  // is already proven on this thread — otherwise the classical detector.
+  await Promise.race([
+    detectLaneSettled(),
+    new Promise<void>((resolve) => window.setTimeout(resolve, LANE_WAIT_MS)),
+  ]);
+  const mlPrimary = primaryDetector({ ready: isMlReady(), disabled: isMlDisabled() }) === "ml";
+  if (detectLane() === "worker") {
+    const held = await detectFrameInWorker(source, budgetMs, mlPrimary);
+    // A worker that died during the job handed the session to this thread.
+    if (held !== null) return held;
   }
-  return detectOnCanvas(source, budgetMs, urls);
+  let mlSkipped: HeldDetection["mlSkipped"] = mlPrimary ? null : isMlDisabled() ? "disabled" : "not-ready";
+  if (mlPrimary) {
+    if (isMlBusy()) mlSkipped = "busy";
+    const pass = await mlPass(source, budgetMs, urls);
+    if (pass.detection !== null) {
+      return { detection: pass.detection, lane: "main", fellThrough: false, mlSkipped: null, queueMs: null };
+    }
+    if (pass.outcome === "none" && !CAPTURE_CLASSICAL_FALL_THROUGH) {
+      return { detection: null, lane: "main", fellThrough: false, mlSkipped: null, queueMs: null };
+    }
+  }
+  return {
+    detection: await detectOnCanvas(source, budgetMs, urls),
+    lane: "main",
+    fellThrough: mlPrimary && mlSkipped === null,
+    mlSkipped,
+    queueMs: null,
+  };
+}
+
+/**
+ * The same detect in the worker: the frame goes over as an `ImageBitmap`
+ * (Chromium defers the pixel copy to the worker), jumps the live queue, and
+ * the worker runs the plan — model, then classical when the policy or the
+ * model's absence says so. `null` when the worker was lost, so the caller can
+ * run it here instead.
+ */
+async function detectFrameInWorker(
+  source: HTMLCanvasElement,
+  budgetMs: number,
+  mlPrimary: boolean,
+): Promise<HeldDetection | null> {
+  const plan: DetectPlan = !mlPrimary ? "classical" : CAPTURE_CLASSICAL_FALL_THROUGH ? "ml-then-classical" : "ml";
+  let frame: ImageBitmap;
+  try {
+    frame = await createImageBitmap(source);
+  } catch {
+    return null;
+  }
+  const reply = await laneDetect(
+    {
+      frame,
+      width: source.width,
+      height: source.height,
+      plan,
+      priority: "capture",
+      capturedAt: performance.now(),
+      epoch: 0,
+      luma: false,
+      refineMs: 0,
+      evidence: false,
+      held: null,
+      hint: false,
+    },
+    budgetMs,
+  );
+  if (reply.type === "miss") return detectLane() === "worker" ? emptyHeld("worker", mlPrimary) : null;
+  // The model failed in the worker: the session moves to this thread, which
+  // warms its own (the classical answer the worker gave instead still stands).
+  if (reply.mlFailed) demoteDetectLane("worker-ml-failed");
+  const detection =
+    reply.success && reply.corners !== null && reply.detector !== null
+      ? { corners: reply.corners, confidence: reply.confidence, source: reply.detector }
+      : null;
+  return {
+    detection,
+    lane: "worker",
+    fellThrough: reply.fellThrough,
+    mlSkipped: mlPrimary ? null : isMlDisabled() ? "disabled" : "not-ready",
+    queueMs: reply.queueMs,
+  };
+}
+
+function emptyHeld(lane: "worker" | "main", mlPrimary: boolean): HeldDetection {
+  return {
+    detection: null,
+    lane,
+    fellThrough: false,
+    mlSkipped: mlPrimary ? null : isMlDisabled() ? "disabled" : "not-ready",
+    queueMs: null,
+  };
 }
 
 /**
@@ -265,9 +395,10 @@ async function detectHeld(
   refine = true,
 ): Promise<QuadDetection | null> {
   const started = performance.now();
-  const detection = await detectFrame(source, DETECT_BUDGET_MS, urls);
+  const held = await detectFrame(source, DETECT_BUDGET_MS, urls);
+  const detection = held.detection;
   if (detection === null) {
-    reportCaptureDetect(on, source, started, null, null, false);
+    reportCaptureDetect(on, source, started, null, null, false, held);
     return null;
   }
   const { corners, confidence } = detection;
@@ -283,11 +414,11 @@ async function detectHeld(
     MIN_QUAD_AREA_FRACTION,
   );
   if (quadCoverage(corners, source.width, source.height) < floor) {
-    reportCaptureDetect(on, source, started, detection, floor, false);
+    reportCaptureDetect(on, source, started, detection, floor, false, held);
     return null;
   }
   const quad = normalizeQuad(corners, source.width, source.height);
-  reportCaptureDetect(on, source, started, detection, floor, quad !== null);
+  reportCaptureDetect(on, source, started, detection, floor, quad !== null, held);
   if (quad === null) return null;
   return {
     corners: refine
@@ -295,6 +426,7 @@ async function detectHeld(
       : quad,
     confidence,
     source: detection.source,
+    fellThrough: held.fellThrough,
   };
 }
 
@@ -306,6 +438,7 @@ function reportCaptureDetect(
   detection: FrameDetection | null,
   floor: number | null,
   accepted: boolean,
+  held: HeldDetection,
 ): void {
   if (!probing()) return;
   const quad =
@@ -328,6 +461,10 @@ function reportCaptureDetect(
     accepted,
     width: frame.width,
     height: frame.height,
+    lane: held.lane,
+    queueMs: held.queueMs,
+    fellThrough: held.fellThrough,
+    mlSkipped: held.mlSkipped,
   });
 }
 
@@ -477,6 +614,10 @@ export async function waitForMlIdle(
   budgetMs: number = ML_FLIGHT_WAIT_MS,
 ): Promise<void> {
   if (isMlDisabled()) return;
+  // On the worker lane the capture's job jumps the worker's queue instead: it
+  // waits at most for the one pass already running there, and the model is
+  // never skipped for it.
+  if (detectLane() === "worker") return;
   const deadline = performance.now() + budgetMs;
   while (isMlBusy() && performance.now() < deadline) {
     await new Promise((resolve) => window.setTimeout(resolve, 50));
@@ -507,7 +648,43 @@ export async function detectOnCanvasMl(
   budgetMs: number,
   urls: AssetUrls,
 ): Promise<FrameDetection | null> {
-  if (!beginMlPass()) return null;
+  return (await mlPass(source, budgetMs, urls)).detection;
+}
+
+/**
+ * {@link detectOnCanvasMl}, saying why it answered nothing: `none` — the
+ * model ran and found no page; `busy` — an earlier pass held it; `timeout` —
+ * the budget ran out first; `failed` — the runtime threw (and is latched off).
+ */
+async function mlPass(
+  source: HTMLCanvasElement,
+  budgetMs: number,
+  urls: AssetUrls,
+): Promise<{ detection: FrameDetection | null; outcome: "found" | "none" | "busy" | "timeout" | "failed" }> {
+  if (detectLane() === "worker") {
+    // The model lives in the worker while that lane is on: never a second
+    // session here.
+    let frame: ImageBitmap;
+    try {
+      frame = await createImageBitmap(source);
+    } catch {
+      return { detection: null, outcome: "failed" };
+    }
+    const reply = await laneDetect(
+      { frame, width: source.width, height: source.height, plan: "ml", priority: "capture", capturedAt: performance.now(), epoch: 0, luma: false, refineMs: 0, evidence: false, held: null, hint: false },
+      budgetMs,
+    );
+    if (reply.type === "miss") return { detection: null, outcome: "timeout" };
+    if (reply.mlFailed) {
+      demoteDetectLane("worker-ml-failed");
+      return { detection: null, outcome: "failed" };
+    }
+    return reply.success && reply.corners !== null
+      ? { detection: { corners: reply.corners, confidence: reply.confidence, source: "ml" }, outcome: "found" }
+      : { detection: null, outcome: "none" };
+  }
+  if (!beginMlPass()) return { detection: null, outcome: "busy" };
+  let failed = false;
   const work = (async () => {
     const { scanDocument } = await loadScanic(urls);
     return scanDocument(source, {
@@ -525,12 +702,29 @@ export async function detectOnCanvasMl(
   // however late it landed, which is what promotes the model to primary.
   // `withBudget` swallows the rejection separately. The flight latch is
   // released here, on the *work*, for the same reason.
-  work.then(markMlReady, disableMl).finally(endMlPass);
-  const result = await withBudget(work, budgetMs);
-  if (result?.success !== true || result.corners === null) return null;
+  work
+    .then(markMlReady, () => {
+      failed = true;
+      disableMl();
+    })
+    .finally(endMlPass);
+  let settled = false;
+  const result = await withBudget(
+    work.then((value) => {
+      settled = true;
+      return value;
+    }),
+    budgetMs,
+  );
+  if (result?.success !== true || result.corners === null || result.corners === undefined) {
+    return { detection: null, outcome: failed ? "failed" : settled ? "none" : "timeout" };
+  }
   return {
-    corners: result.corners,
-    confidence: result.confidence ?? null,
-    source: "ml",
+    detection: {
+      corners: result.corners,
+      confidence: result.confidence ?? null,
+      source: "ml",
+    },
+    outcome: "found",
   };
 }

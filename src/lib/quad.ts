@@ -145,55 +145,6 @@ export function lerpQuad(
   };
 }
 
-/**
- * Adjacent-frame averaging for the live detector.
- *
- * Scanic detects each frame independently. On a stationary page it can switch
- * between two equally plausible edge pixels (or two near-tied contours), and
- * sending each answer straight to the animation makes the outline chase that
- * high-frequency noise. Averaging the newest detection with the previous RAW
- * detection is a two-sample low-pass filter: an A/B/A/B edge toggle resolves
- * to the same midpoint instead of becoming visible motion.
- *
- * The filter deliberately stops smoothing when detections are 500 ms apart.
- * At that cadence the half-frame lag would be more distracting than the
- * occasional jump, while healthy 8/4 fps loops add only 62.5–125 ms of lag.
- */
-const DETECTION_SMOOTHING_MAX_GAP_MS = 500;
-
-export class QuadDetectionSmoother {
-  private previous: NormalizedQuad | null = null;
-  private previousAt = Number.NEGATIVE_INFINITY;
-
-  update(next: NormalizedQuad, now: number): NormalizedQuad {
-    const elapsed = now - this.previousAt;
-    const previous = this.previous;
-    const canSmooth =
-      previous !== null &&
-      Number.isFinite(elapsed) &&
-      elapsed > 0 &&
-      elapsed < DETECTION_SMOOTHING_MAX_GAP_MS;
-    const result = canSmooth
-      ? lerpQuad(
-          previous,
-          next,
-          Math.max(
-            0.5,
-            Math.min(1, elapsed / DETECTION_SMOOTHING_MAX_GAP_MS),
-          ),
-        )
-      : next;
-    this.previous = next;
-    this.previousAt = now;
-    return result;
-  }
-
-  reset(): void {
-    this.previous = null;
-    this.previousAt = Number.NEGATIVE_INFINITY;
-  }
-}
-
 /** Frame diagonal in frame-width units, for an `aspect` of height/width. */
 export function frameDiagonal(aspect: number): number {
   return Math.hypot(1, aspect);

@@ -10,27 +10,50 @@
  * are the only two things that fire one. What this hook does is *find* the page
  * and show the user it has.
  *
- * Two loops and an adaptive throttle, all of it in refs:
+ * Two loops, all of it in refs:
  *
  *  1. **Detection** — a self-scheduling chain (never `setInterval`: a slow pass
- *     must not queue up behind itself), single-flight by construction, sampling
- *     the video into ONE reused canvas at ~640 px. **The pass is scanic's ML
- *     corner model**: opening this screen starts its ~3.4 MB of model
- *     and WASM downloading straight away, and from the moment that runtime is
- *     warm the model *is* the loop. The classical detector runs in its place
- *     until then, so the viewfinder is never dead on a slow connection, and it
- *     takes back over for the rest of the session if anything about the ML path
- *     fails — an asset that will not load, a runtime that will not compile, a
- *     device the inference is measurably too slow on. Silently, either way:
- *     nothing the user could have done changed. Whichever detector is running,
- *     the chain measures it and adapts — slow → half the rate; hopeless →
- *     classical loses the feature for the session (the screen falls back to the
- *     static framing brackets) and ML instead hands back to classical.
- *  2. **Animation** — a rAF that eases the drawn quad toward the newest
- *     detection (35 % per frame) and cross-fades it in and out, writing the
- *     `d` attribute of the overlay's two bracket paths directly. No React state
+ *     must not queue up behind itself), single-flight by construction, on a
+ *     ~640 px sample of the video. **The pass is scanic's ML corner model**:
+ *     opening this screen starts its ~3.4 MB of model and WASM downloading
+ *     straight away, and from the moment that runtime is warm the model *is*
+ *     the loop. The classical detector runs in its place until then, so the
+ *     viewfinder is never dead on a slow connection, and it takes back over for
+ *     the rest of the session if anything about the ML path fails.
+ *
+ *     **Where a pass runs** is the session's detection lane
+ *     (`lib/detect-lane.ts`): in the detection worker when the browser can —
+ *     the main thread then only grabs the frame (`createImageBitmap` of the
+ *     video at the sample size) and hands it over — else on the main thread,
+ *     exactly as before the worker existed.
+ *
+ *     **How often** follows what a pass costs (`lib/cadence.ts`): the loop
+ *     keeps its detector to a share of its thread's time, so a fast phone
+ *     looks up to eight times a second and a slow one backs off by itself.
+ *     Whichever detector is running, the chain also measures it for the
+ *     *hopeless* verdict — classical hopeless: live detection is off for the
+ *     session (the screen falls back to the static framing brackets); ML
+ *     hopeless: it hands back to classical.
+ *  2. **Animation** — a rAF that eases the drawn quad toward the display
+ *     filter's answer and cross-fades it in and out, writing the `d`
+ *     attribute of the overlay's two bracket paths directly. No React state
  *     per frame: at 60 fps that would re-render the whole capture screen sixty
  *     times a second.
+ *
+ * **What is drawn is not what is measured.** Every accepted detection is kept
+ * raw and dated by the frame it describes — that is what arbitration, the
+ * stale horizon and a capture's buffered corners read. Only the overlay goes
+ * through a display filter (a per-corner One-Euro filter, `lib/one-euro.ts`):
+ * calm on a still page, quick on a moving one, reset whenever the thing being
+ * tracked changes (a new detector, a page swap, a new frame box).
+ *
+ * **"Sheet found" needs paper.** A quad is drawn — and the viewfinder says it
+ * found a sheet — only once the pixels in and around it look like a page
+ * (`lib/paper-evidence.ts`): the model's confidence is 1.0 on a laptop lid. A
+ * quad without that evidence is tracked (and still travels with a capture)
+ * but not shown. The classical detector's quads are held to more: never shown
+ * once the model is ready, and before that only when they pass its sanity
+ * checks (not the frame's own border, not a sliver, paper inside).
  *
  * Everything here stops when the tab is hidden, the camera track ends, a
  * capture is in flight or a sheet covers the viewfinder — and stopping *drops
@@ -58,7 +81,6 @@ import {
   ML_CADENCE_MS,
   ML_CALL_BUDGET_MS,
   ML_HOPELESS_PASS_MS,
-  ML_SLOW_PASS_MS,
   ML_WARM_UP_BUDGET_MS,
   primaryDetector,
   shouldWarmUpMl,
@@ -73,13 +95,30 @@ import {
 import { prefersReducedMotion } from "@/lib/motion";
 import {
   cornerBracketPath,
+  CORNER_KEYS,
+  denormalizeQuad,
   lerpQuad,
   normalizedCoverage,
   normalizeQuad,
-  QuadDetectionSmoother,
   type BracketCap,
   type NormalizedQuad,
 } from "@/lib/quad";
+import { QuadOneEuro } from "@/lib/one-euro";
+import { CadenceController, type CadenceProfile } from "@/lib/cadence";
+import { classicalQuadSane, paperEvidence, type PaperEvidence } from "@/lib/paper-evidence";
+import { refineQuad } from "@/lib/refine";
+import type { CornerPoints } from "@/lib/flatten";
+import {
+  demoteDetectLane,
+  detectLane,
+  detectLaneGeneration,
+  detectLaneReady,
+  holdDetectLane,
+  laneDetect,
+  startDetectLane,
+} from "@/lib/detect-lane";
+import type { DetectLaneKind } from "@/lib/detect-protocol";
+import type { FrameHint } from "@/lib/hints";
 import { useAssetUrls } from "@/hooks/useScanRuntime";
 import { CAPTURE_GRACE_MS } from "@/lib/still-capture";
 import { probe, probing } from "@/lib/probe";
@@ -103,20 +142,14 @@ const SAMPLE_LONG_EDGE = 640;
 const WARMUP_PASSES = 2;
 
 /**
- * What one detector's passes cost and how the loop is allowed to react.
+ * What one detector's passes may cost before the loop gives up on it.
  *
- * The two detectors are different workloads — a contour trace at ~8 fps against
- * a 640 px inference at ~1.4 — so every number the adaptive throttle reads is
- * per detector, and the measurements are thrown away at a handover rather than
- * averaged across one.
+ * The two detectors are different workloads — a contour trace against a 640 px
+ * inference — so the hopeless verdict and the budget are per detector, and
+ * the measurements are thrown away at a handover rather than averaged across
+ * one. How often a detector is polled is the cadence's business (below).
  */
 interface PassProfile {
-  /** Where the cadence starts, before any backing off. */
-  intervalMs: number;
-  /** The slowest this detector will ever be polled. */
-  slowestIntervalMs: number;
-  /** Rolling average above this: halve the rate. */
-  slowMs: number;
   /** Rolling average above this: this device cannot run this detector live. */
   hopelessMs: number;
   /** How long we wait on one pass before abandoning it (it still finishes). */
@@ -124,37 +157,72 @@ interface PassProfile {
 }
 
 const PASS_PROFILES: Record<DetectionSource, PassProfile> = {
-  classical: {
-    intervalMs: 125,
-    slowestIntervalMs: 1000,
-    slowMs: 90,
-    hopelessMs: 250,
-    budgetMs: 2000,
+  classical: { hopelessMs: 250, budgetMs: 2000 },
+  ml: { hopelessMs: ML_HOPELESS_PASS_MS, budgetMs: ML_CALL_BUDGET_MS },
+};
+
+/**
+ * The cadence per lane and detector (`lib/cadence.ts`): the share of its
+ * thread a detector may take, and the bounds on the interval.
+ *
+ * The worker's thread is its own, so it may spend a third of it — the main
+ * thread's is the user's: the model gets 15 % of it (a pass that is a long
+ * task is charged double), which on a mid-range phone is about the old
+ * 700 ms beat and on a desktop four times faster. The ML ceiling is the old
+ * fixed cadence; nothing is ever polled slower than it used to be.
+ *
+ * The ceiling wins over the duty on purpose: on a core where a model pass
+ * costs more than ~245 ms the worker runs above its 35 % (a 415 ms pass at
+ * the 700 ms beat is ~60 %) rather than letting the overlay fall further
+ * behind the hand — the same beat, and the same work, the main thread
+ * carried before the worker existed. The warm-up passes are left out of the
+ * cadence as well as the hopeless verdict: charged, the first pass's
+ * one-time costs would push the second reading — and with it the first lock
+ * — most of a second back.
+ */
+const CADENCE: Record<DetectLaneKind, Record<DetectionSource, CadenceProfile>> = {
+  worker: {
+    ml: { targetDuty: 0.35, minMs: 120, maxMs: ML_CADENCE_MS, initialMs: 120 },
+    classical: { targetDuty: 0.35, minMs: 125, maxMs: 1000, initialMs: 125 },
   },
-  ml: {
-    intervalMs: ML_CADENCE_MS,
-    slowestIntervalMs: 2000,
-    slowMs: ML_SLOW_PASS_MS,
-    hopelessMs: ML_HOPELESS_PASS_MS,
-    budgetMs: ML_CALL_BUDGET_MS,
+  main: {
+    ml: { targetDuty: 0.15, minMs: 150, maxMs: ML_CADENCE_MS, initialMs: 300 },
+    classical: { targetDuty: 0.25, minMs: 125, maxMs: 1000, initialMs: 125 },
   },
 };
 
-/** How much of the remaining distance the drawn quad covers each frame. */
-const LERP_FACTOR = 0.35;
+/**
+ * Time constant of the drawn quad's glide toward the filter's answer: a
+ * frame or so — enough to turn each new answer into motion rather than a
+ * jump, short enough not to add lag (the bench: every 20 ms of glide cost
+ * about a point of on-page time under a trembling hand).
+ */
+const DISPLAY_EASE_MS = 16;
+
+/**
+ * The time a pass may spend moving the model's quad onto the paper's edges
+ * on its own ~640 px frame (`lib/refine.ts`, the refinement a capture runs
+ * on its full image) before drawing it. On the bench's scenes this took the
+ * model's live answer from 71 % to 91 % within 2 % of the page (p50 corner
+ * error 1.01 → 0.08 % of the diagonal) for ~7 ms a pass (p95 17).
+ */
+const LIVE_REFINE_BUDGET_MS = 60;
 const FADE_IN_MS = 200;
 const FADE_OUT_MS = 300;
-/** No successful detection for this long and the page is considered lost. */
+/** No successful detection for this long and a classical quad is considered lost. */
 const QUAD_STALE_MS = 700;
+/** The ML quad's horizon: this plus two beats, within the bounds below. */
+const ML_STALE_BASE_MS = 400;
+const ML_STALE_MIN_MS = 600;
 
 /**
  * How long a tracked quad survives without a fresh detection behind it.
  *
- * A quad the *model* found gets the classical horizon plus the beat it is
- * actually being polled at — the current one, not the nominal cadence, because
- * a device that has been throttled answers more slowly still. Retiring it at the
- * classical horizon would blink the overlay off between two perfectly good ML
- * detections.
+ * A quad the *model* found gets two of the beats it is actually being polled
+ * at plus a margin — never less than {@link ML_STALE_MIN_MS}, never more than
+ * the horizon of the old fixed cadence — because a device that has backed off
+ * answers more slowly still, and retiring its quad early would blink the
+ * overlay off between two good detections.
  *
  * The horizon only carries a **stationary** page: a missed pass whose motion
  * probe says the scene moved ends the hold immediately
@@ -163,11 +231,90 @@ const QUAD_STALE_MS = 700;
  */
 function staleHorizonMs(source: DetectionSource, intervalMs: number): number {
   return source === "ml"
-    ? QUAD_STALE_MS + Math.max(ML_CADENCE_MS, intervalMs)
+    ? Math.min(QUAD_STALE_MS + ML_CADENCE_MS, Math.max(ML_STALE_MIN_MS, ML_STALE_BASE_MS + 2 * intervalMs))
     : QUAD_STALE_MS;
 }
 /** Nothing found for this long → the gentle "aim at the document" chip. */
 const SEARCHING_AFTER_MS = 2500;
+
+/**
+ * The motion probe compares a pass's frame with the one about this long
+ * before it — the spacing `MOTION_DROP_THRESHOLD` was calibrated at — however
+ * fast the loop now runs.
+ */
+const MOTION_SPAN_MS = 700;
+
+/**
+ * A raw detection this far (share of the frame's diagonal) from the last one
+ * is another page, or the same one somewhere else: the display filter starts
+ * over and the sheet has to earn "found" again.
+ */
+const JUMP_RESET_DIAG = 0.08;
+
+/**
+ * Consecutive readings that say "paper" before a tracked quad counts as a
+ * found sheet — one lucky reading of a place mat is not a page — and
+ * consecutive readings that say "not paper" before a found sheet is let go —
+ * one bad reading (a hand's shadow crossing an edge, a glare) is not a lost
+ * sheet.
+ */
+const LOCK_CONFIRM_READINGS = 2;
+const LOCK_RELEASE_MISSES = 2;
+
+/**
+ * A quad within {@link JUMP_RESET_DIAG} of the last found sheet, seen within
+ * this long, is that sheet coming back — after a whip away and back, a
+ * remount of the scanner, a page swapped in at the same spot — and one
+ * reading that says paper, with every side on its edges
+ * ({@link KEEP_SIDE_SUPPORT}), is enough to find it again. One lucky reading of a
+ * place mat is the reason for two; one lucky reading exactly where a sheet
+ * was just found is not the same bet.
+ */
+const RECALL_MS = 10_000;
+
+/**
+ * A found sheet's surface can stop reading as paper while the sheet is still
+ * there — tilted steeply, its print foreshortened into dense, solid-looking
+ * blocks and its lighting stretched into a gradient. While the tracked quad
+ * moves continuously (no reset), is that foreshortened (its shorter side of
+ * a pair at most {@link KEEP_FORESHORTENING} of the longer: 0.57–0.60 at the
+ * `steep-tilt` session's 45–55°) and every side the frame shows still steps
+ * along at least {@link KEEP_SIDE_SUPPORT} of its profiles, a "not paper"
+ * reading is not held against the found sheet. Entering "found" still needs
+ * the whole evidence. A quad seen square-on gets no such allowance: a black
+ * keyboard read head-on (0.84–0.90) has four strong edges too, and kept
+ * "found" it was carried into a capture.
+ */
+const KEEP_SIDE_SUPPORT = 0.8;
+const KEEP_FORESHORTENING = 0.75;
+
+/** Consecutive worker passes that timed out before the lane is written off as stalled. */
+const WORKER_STALL_LIMIT = 3;
+/** Consecutive frames that could not be grabbed or read before the worker lane is written off. */
+const WORKER_GRAB_LIMIT = 5;
+
+/**
+ * The last found sheet on this page — module state, so a remount of the
+ * scanner remembers where the page was a moment ago.
+ */
+let lastFoundSheet: { quad: NormalizedQuad; at: number } | null = null;
+
+/**
+ * To become a found sheet, every side the frame shows must have at least
+ * this share of its profiles stepping on one line (`sideSupport`,
+ * `lib/paper-evidence.ts`). On the bench's scenes this keeps 182 of 186
+ * right model quads (and 83 of 94 real ones) while turning away a quarter
+ * more of the wrong ones than the evidence alone.
+ */
+const ENTRY_SIDE_SUPPORT = 0.3;
+
+/**
+ * On the worker lane the viewfinder's hint chip (focus, light —
+ * `lib/hints.ts`) is read by the worker from the live loop's own frames, at
+ * most this often: the same rate the capture screen's own timer reads it at
+ * on the main-thread lane, without a second draw of the video on this thread.
+ */
+const HINT_EVERY_MS = 200;
 
 /**
  * The bench's view of the overlay (`lib/probe.ts`) is sampled, not streamed: a
@@ -200,10 +347,22 @@ export interface FrameBox {
   height: number;
 }
 
+/**
+ * The paper evidence of one pass: read and found (`PaperEvidence`), not read
+ * this pass (`null`), or not readable at all on this device
+ * (`"unavailable"` — the pixels could not be read back, and the loop then
+ * behaves as it did before evidence existed: a tracked quad is a found sheet).
+ */
+type EvidenceReading = PaperEvidence | null | "unavailable";
+
 interface Runtime {
-  /** The newest accepted detection. */
+  /** The newest accepted detection, raw — what the stale horizon retires. */
   target: NormalizedQuad | null;
-  /** What is drawn: eased toward `target`, and what a capture warps with. */
+  /** The newest accepted detection as drawn (refined onto the paper's edges), before the display filter. */
+  shown: NormalizedQuad | null;
+  /** The display filter's answer for it: what the drawn quad glides toward. */
+  displayTarget: NormalizedQuad | null;
+  /** What is drawn this frame. */
   current: NormalizedQuad | null;
   opacity: number;
   /**
@@ -224,11 +383,14 @@ interface Runtime {
    * then burns up to its whole budget on top. This is the buffer that survives
    * both, and {@link CAPTURE_GRACE_MS} is the only thing keeping it honest.
    *
-   * It is the accepted `target` rather than the eased `current`: `current` is a
-   * frame of an animation on its way somewhere, and a capture wants the
-   * measurement, not the tween. It is cleared by {@link clearTracking} like
-   * everything else — corners from a paused or torn-down viewfinder never travel
-   * with a photo.
+   * It is the accepted detection as measured on its frame — the model's
+   * answer refined onto the paper's edges there, what the brackets were
+   * drawn from — never the display filter's answer or the eased `current`:
+   * those are frames of an animation on its way somewhere, and a capture
+   * wants the measurement. It carries whether it was a found sheet; one that
+   * was not never travels. It is cleared by
+   * {@link clearTracking} like everything else — corners from a paused or
+   * torn-down viewfinder never travel with a photo.
    *
    * Who measured it and how sure it was are stored **with** the quad, never
    * looked up in `tracked` at capture time: the floor a capture holds the
@@ -236,23 +398,40 @@ interface Runtime {
    * whatever the loop happens to be tracking by then.
    */
   lastAccepted: AcceptedQuad | null;
+  /** The tracked quad has paper evidence behind it: it is drawn, and it is a found sheet. */
+  locked: boolean;
+  /** Consecutive "not paper" readings of a found sheet. */
+  evidenceMisses: number;
+  /** Consecutive "paper" readings of a quad not yet found. */
+  evidenceHits: number;
+  /** Pixels cannot be read on this device: evidence is not required. */
+  evidenceUnavailable: boolean;
+  /** Consecutive worker passes that timed out, and that could not grab or read their frame. */
+  workerTimeouts: number;
+  workerGrabFailures: number;
   lastFrameAt: number;
   loopStartedAt: number;
   detecting: boolean;
   /** Which detector the chain is currently running, and measuring. */
   passSource: DetectionSource;
+  /** Which lane it was measuring it on. */
+  passLane: DetectLaneKind;
+  /** The lane generation the chain last saw (`detectLaneGeneration`). */
+  laneGeneration: number;
   intervalMs: number;
+  cadence: CadenceController;
   averageMs: number | null;
   warmupLeft: number;
   /**
-   * The eager ML warm-up has been launched this page-session.
+   * The eager ML warm-up has been launched this page-session (main-thread
+   * lane; the worker warms its own).
    *
    * Per session rather than per attempt: the download and the WASM compile are
    * facts about the page, not about this camera start or this capture.
    */
   mlWarmUpStarted: boolean;
-  /** Removes adjacent-frame edge toggles before they reach the animation. */
-  smoother: QuadDetectionSmoother;
+  /** The overlay's display filter. */
+  filter: QuadOneEuro;
   /**
    * The detection loop is running right now.
    *
@@ -263,55 +442,73 @@ interface Runtime {
    */
   live: boolean;
   /**
-   * The question the detached ML warm-up is answering, bumped whenever it
-   * changes — a new page, a loop restart, a fail-closed handover. A pass that
-   * answers into a different epoch is describing a question nobody is asking
-   * any more.
+   * The question the detached ML warm-up (and every worker pass) is
+   * answering, bumped whenever it changes — a new page, a loop restart, a
+   * fail-closed handover. A pass that answers into a different epoch is
+   * describing a question nobody is asking any more.
    */
   mlEpoch: number;
   /**
-   * The previous pass's motion probe (`lib/frame-motion.ts`), compared against
-   * each new pass's to tell a detection dropout on a still scene (keep the
-   * hold) from one on a moved scene (end it). Reset on loop start so a
-   * pause never pairs two probes that are minutes apart.
+   * The recent passes' motion probes (`lib/frame-motion.ts`), compared
+   * against each new pass's to tell a detection dropout on a still scene
+   * (keep the hold) from one on a moved scene (end it). Reset on loop start
+   * so a pause never pairs two probes that are minutes apart.
    */
-  motionProbe: Uint8ClampedArray | null;
+  motionHistory: { at: number; luma: Uint8ClampedArray }[];
 }
 
 function freshRuntime(): Runtime {
   return {
     target: null,
+    shown: null,
+    displayTarget: null,
     current: null,
     opacity: 0,
     tracked: null,
     lastAccepted: null,
+    locked: false,
+    evidenceMisses: 0,
+    evidenceHits: 0,
+    evidenceUnavailable: false,
+    workerTimeouts: 0,
+    workerGrabFailures: 0,
     lastFrameAt: 0,
     loopStartedAt: 0,
     detecting: false,
     passSource: "classical",
-    intervalMs: PASS_PROFILES.classical.intervalMs,
+    passLane: "main",
+    laneGeneration: -1,
+    intervalMs: CADENCE.main.classical.initialMs,
+    cadence: new CadenceController(CADENCE.main.classical, true),
     averageMs: null,
     warmupLeft: WARMUP_PASSES,
     mlWarmUpStarted: false,
-    smoother: new QuadDetectionSmoother(),
+    filter: new QuadOneEuro(),
     live: false,
     mlEpoch: 0,
-    motionProbe: null,
+    motionHistory: [],
   };
 }
 
 /**
- * Move the chain onto a detector, throwing away what was measured of the other.
+ * Move the chain onto a detector (or a lane), throwing away what was measured
+ * of the other.
  *
  * A rolling average that spans a handover describes neither workload, and the
  * first pass of the detector being handed to carries its own warm-up (an ORT
- * session on the way up, a cold contour trace on the way back down).
+ * session on the way up, a cold contour trace on the way back down). The
+ * display filter starts over too: two detectors answer a corner a little
+ * differently, and filtering one into the other would draw the difference as
+ * motion.
  */
-function switchDetector(runtime: Runtime, source: DetectionSource): void {
+function switchDetector(runtime: Runtime, source: DetectionSource, lane: DetectLaneKind): void {
   runtime.passSource = source;
-  runtime.intervalMs = PASS_PROFILES[source].intervalMs;
+  runtime.passLane = lane;
+  runtime.cadence = new CadenceController(CADENCE[lane][source], lane === "main");
+  runtime.intervalMs = runtime.cadence.intervalMs;
   runtime.averageMs = null;
   runtime.warmupLeft = WARMUP_PASSES;
+  runtime.filter.reset();
 }
 
 /**
@@ -329,15 +526,43 @@ function switchDetector(runtime: Runtime, source: DetectionSource): void {
  */
 function clearTracking(runtime: Runtime, overlay: LiveOverlayRefs): void {
   runtime.target = null;
+  runtime.displayTarget = null;
   runtime.current = null;
   runtime.opacity = 0;
   runtime.tracked = null;
   runtime.lastAccepted = null;
-  runtime.smoother.reset();
+  runtime.locked = false;
+  runtime.evidenceMisses = 0;
+  runtime.evidenceHits = 0;
+  runtime.filter.reset();
   overlay.bracketsHalo.current?.setAttribute("d", "");
   overlay.brackets.current?.setAttribute("d", "");
   const group = overlay.group.current;
   if (group !== null) group.style.opacity = "0";
+}
+
+/**
+ * How foreshortened a quad is: over its two pairs of opposite sides, the
+ * smallest ratio of the shorter to the longer (1: a parallelogram).
+ */
+function foreshortening(quad: NormalizedQuad, aspect: number): number {
+  const side = (a: NormalizedQuad["topLeft"], b: NormalizedQuad["topLeft"]): number =>
+    Math.hypot(a.x - b.x, (a.y - b.y) * aspect);
+  const top = side(quad.topLeft, quad.topRight);
+  const right = side(quad.topRight, quad.bottomRight);
+  const bottom = side(quad.bottomRight, quad.bottomLeft);
+  const left = side(quad.bottomLeft, quad.topLeft);
+  const ratio = (a: number, b: number): number => (Math.max(a, b) <= 0 ? 1 : Math.min(a, b) / Math.max(a, b));
+  return Math.min(ratio(top, bottom), ratio(left, right));
+}
+
+/** Largest corner move between two quads, as a share of the frame's diagonal. */
+function quadJump(a: NormalizedQuad, b: NormalizedQuad, aspect: number): number {
+  let largest = 0;
+  for (const key of CORNER_KEYS) {
+    largest = Math.max(largest, Math.hypot(a[key].x - b[key].x, (a[key].y - b[key].y) * aspect));
+  }
+  return largest / Math.hypot(1, aspect);
 }
 
 export interface UseLiveDetectOptions {
@@ -374,7 +599,6 @@ export interface LiveOverlayRefs {
   brackets: React.MutableRefObject<SVGPathElement | null>;
 }
 
-/** The capture buffer as a capture receives it. */
 /** An accepted quad, with the detection that produced it. */
 interface AcceptedQuad {
   quad: NormalizedQuad;
@@ -382,8 +606,16 @@ interface AcceptedQuad {
   capturedAt: number;
   source: DetectionSource;
   confidence: number | null;
+  /**
+   * It was a found sheet — drawn, with paper evidence behind it — when it was
+   * accepted. Only such a quad may travel with a capture: the buffer exists
+   * to carry what the user was looking at, and an unconvincing quad (the
+   * laptop lid the model is sure of) was never on screen.
+   */
+  found: boolean;
 }
 
+/** The capture buffer as a capture receives it. */
 export interface BufferedQuad {
   quad: NormalizedQuad;
   ageMs: number;
@@ -394,7 +626,7 @@ export interface BufferedQuad {
 export interface LiveDetect {
   /** False once the device proved too slow — the brackets take over. */
   available: boolean;
-  /** A page is being tracked right now. */
+  /** A sheet is found and drawn right now. */
   hasQuad: boolean;
   /** Nothing has been found for a couple of seconds. */
   searching: boolean;
@@ -411,6 +643,49 @@ export interface LiveDetect {
   takeQuadForCapture: () => BufferedQuad | null;
   /** A capture just happened: the next page is a new question for the ML policy. */
   noteCapture: () => void;
+  /**
+   * The hint chip's reading, when the live loop takes it (the worker lane) —
+   * then the capture screen runs no hint timer of its own. `null` otherwise.
+   */
+  hint: FrameHint | null;
+}
+
+/** One pass, whichever lane ran it. */
+interface PassOutcome {
+  detection: FrameDetection | null;
+  /** The detection refined onto the paper's edges (pixels), when that moved it. */
+  refined: CornerPoints | null;
+  refineMs: number | null;
+  /** On a miss: the evidence for the quad the overlay was holding, on this frame (`null`: not read). */
+  heldEvidence: PaperEvidence | null;
+  width: number;
+  height: number;
+  /** When the frame was sampled (main thread's clock). */
+  frameAt: number;
+  luma: Uint8ClampedArray | null;
+  evidence: EvidenceReading;
+  /** What the cadence is charged: the main thread's pass, or the worker's compute. */
+  costMs: number;
+  /**
+   * The detector's own share of it — the pass without the edge refinement and
+   * the paper evidence that ride on it. The hopeless verdict reads this: those
+   * extras have budgets of their own, and on a slow phone they were enough to
+   * push a classical loop the device could run over the line before the model
+   * was ready to take over.
+   */
+  detectMs: number;
+  /** The main thread's own time on it. */
+  mainMs: number;
+  computeMs: number | null;
+  queueMs: number | null;
+  /** The model's call failed at runtime (worker lane): the lane moves. */
+  mlFailed: boolean;
+  /**
+   * Worker lane: why the pass got no answer — `timeout` (the worker is busy
+   * or stuck), `grab` (the frame could not be grabbed, drawn or read), or
+   * null when it was answered.
+   */
+  miss: "timeout" | "grab" | null;
 }
 
 export function useLiveDetect({
@@ -447,7 +722,7 @@ export function useLiveDetect({
   /** The 24×24 scratch the motion probe redraws every pass. */
   const motionScratchRef = React.useRef<HTMLCanvasElement | null>(null);
   /**
-   * The warm-up pass gets its own copy of the frame.
+   * The warm-up pass gets its own copy of the frame (main-thread lane).
    *
    * It is the one ML pass that runs detached from the detection chain — it
    * carries the multi-megabyte download, and the classical detector has to keep
@@ -459,12 +734,23 @@ export function useLiveDetect({
   const reducedRef = React.useRef(false);
   /** The measured frame box, for the bracket cap — the state copy is for React. */
   const frameBoxRef = React.useRef<FrameBox | null>(null);
+  /** The video's own size at the last measure: a change is a new sensor frame (a rotation). */
+  const videoSizeRef = React.useRef<{ width: number; height: number } | null>(null);
 
   const [available, setAvailable] = React.useState(true);
   const [hasQuad, setHasQuad] = React.useState(false);
   const [searching, setSearching] = React.useState(false);
   const [frameBox, setFrameBox] = React.useState<FrameBox | null>(null);
   const [tabHidden, setTabHidden] = React.useState(false);
+  const [hint, setHint] = React.useState<FrameHint | null>(null);
+  /** When the worker last read the hint, and what it said (state updates only on change). */
+  const hintRef = React.useRef<{ at: number; hint: FrameHint | null }>({ at: Number.NEGATIVE_INFINITY, hint: null });
+
+  // Start deciding where detection runs — and, on the worker lane, the
+  // model's download — the moment the capture screen mounts, whether or not
+  // the camera is live yet. The lane is the page's, not this mount's: held
+  // while mounted, released (after an idle grace) when the last holder goes.
+  React.useEffect(() => holdDetectLane(assetsRef.current), []);
 
   // A hidden tab still ticks timers on some Androids; detecting into a frozen
   // preview would burn battery for nothing.
@@ -503,17 +789,28 @@ export function useLiveDetect({
       width,
       height,
     };
-    frameBoxRef.current = next;
-    setFrameBox((previous) =>
+    const previous = frameBoxRef.current;
+    const same =
       previous !== null &&
       Math.abs(previous.left - next.left) < 0.5 &&
       Math.abs(previous.top - next.top) < 0.5 &&
       Math.abs(previous.width - next.width) < 0.5 &&
-      Math.abs(previous.height - next.height) < 0.5
-        ? previous
-        : next,
-    );
-  }, [containerRef, videoRef]);
+      Math.abs(previous.height - next.height) < 0.5;
+    // A new frame box is a new geometry under the overlay: the display filter
+    // must not glide from where the brackets were drawn in the old one.
+    if (!same && previous !== null) runtimeRef.current.filter.reset();
+    // A new video size is a new frame altogether — the phone rotated, the
+    // camera renegotiated — and every quad held describes the old one: drop
+    // them (overlay and capture buffer) rather than draw old corners into
+    // the new geometry until the next detection lands.
+    const videoSize = videoSizeRef.current;
+    if (videoSize !== null && (videoSize.width !== video.videoWidth || videoSize.height !== video.videoHeight)) {
+      clearTracking(runtimeRef.current, overlay);
+    }
+    videoSizeRef.current = { width: video.videoWidth, height: video.videoHeight };
+    frameBoxRef.current = next;
+    setFrameBox((current) => (same && current !== null ? current : next));
+  }, [containerRef, overlay, videoRef]);
 
   React.useEffect(() => {
     if (!active) return;
@@ -547,6 +844,11 @@ export function useLiveDetect({
     runtime.mlEpoch += 1;
     setHasQuad(false);
     setSearching(false);
+    // The worker's hint reading stops with the loop: the capture screen's own
+    // timer takes the chip back (a stale "low light" must not stay up, nor
+    // keep that timer off, for the rest of the session).
+    hintRef.current = { at: Number.NEGATIVE_INFINITY, hint: null };
+    setHint(null);
   }, [loopLive, overlay]);
 
   const noteCapture = React.useCallback(() => {
@@ -559,8 +861,9 @@ export function useLiveDetect({
   /**
    * The corners a capture may fall back on, and how old they already are.
    *
-   * Only a loop that is running right now can vouch for these corners, and the
-   * quad must cover enough of the frame to be a page. The overlay's stale
+   * Only a loop that is running right now can vouch for these corners, the
+   * quad must have been a found sheet when it was accepted (drawn, paper
+   * evidence behind it), and it must cover enough of the frame to be a page. The overlay's stale
    * horizon is replaced by {@link CAPTURE_GRACE_MS}, because that horizon is about what may
    * still be *drawn* and this is about what the user was looking at when they
    * tapped. The age travels with the quad rather than being resolved here: the
@@ -571,7 +874,8 @@ export function useLiveDetect({
   const takeQuadForCapture = React.useCallback((): BufferedQuad | null => {
     const runtime = runtimeRef.current;
     const buffered = runtime.lastAccepted;
-    if (!runtime.live || buffered === null) return null;
+    // Only corners the viewfinder was showing as a found sheet travel.
+    if (!runtime.live || buffered === null || !buffered.found) return null;
     const ageMs = performance.now() - buffered.capturedAt;
     if (ageMs < 0 || ageMs > CAPTURE_GRACE_MS) return null;
     // The buffer was accepted by `accept`, so it is judged by the same
@@ -607,28 +911,37 @@ export function useLiveDetect({
     runtime.live = true;
     // A probe kept across a pause would pair two frames minutes apart and read
     // the difference as a swing; the loop re-learns stillness from scratch.
-    runtime.motionProbe = null;
-    // Whichever detector the session is on, this loop starts measuring it from
-    // scratch: a camera that was just restarted is not the device the last
-    // attempt's rolling average describes.
-    switchDetector(
-      runtime,
-      primaryDetector({
-        ready: isMlDetectionReady(),
-        disabled: isMlDetectionDisabled(),
-      }),
-    );
+    runtime.motionHistory = [];
+    runtime.locked = false;
+    runtime.evidenceMisses = 0;
+    runtime.evidenceHits = 0;
 
     // ── 1. detection chain ───────────────────────────────────────────────────
 
-    /** The reused sample canvas, redrawn from the preview on every pass. */
-    function sample(video: HTMLVideoElement): HTMLCanvasElement | null {
+    /**
+     * The quad the overlay is showing as a found sheet, in the pixels of a
+     * `width`×`height` sample — what a missed pass checks is still there.
+     */
+    function heldQuad(width: number, height: number): CornerPoints | null {
+      if (!runtime.locked || runtime.displayTarget === null || runtime.evidenceUnavailable) return null;
+      return denormalizeQuad(runtime.displayTarget, width, height);
+    }
+
+    /** The sample size for this video: its long edge at {@link SAMPLE_LONG_EDGE}. */
+    function sampleSize(video: HTMLVideoElement): { width: number; height: number } {
       const scale = Math.min(
         1,
         SAMPLE_LONG_EDGE / Math.max(video.videoWidth, video.videoHeight),
       );
-      const width = Math.max(1, Math.round(video.videoWidth * scale));
-      const height = Math.max(1, Math.round(video.videoHeight * scale));
+      return {
+        width: Math.max(1, Math.round(video.videoWidth * scale)),
+        height: Math.max(1, Math.round(video.videoHeight * scale)),
+      };
+    }
+
+    /** The reused sample canvas, redrawn from the preview on every main-lane pass. */
+    function sample(video: HTMLVideoElement): HTMLCanvasElement | null {
+      const { width, height } = sampleSize(video);
       const canvas = sampleRef.current ?? document.createElement("canvas");
       sampleRef.current = canvas;
       if (canvas.width !== width) canvas.width = width;
@@ -660,26 +973,28 @@ export function useLiveDetect({
     function fallBackToClassical(): void {
       disableMlDetection();
       runtime.mlEpoch += 1;
-      switchDetector(runtime, "classical");
+      switchDetector(runtime, "classical", runtime.passLane);
     }
 
     /**
-     * Slow devices lose rate; hopeless ones lose the detector.
-     *
-     * What "lose the detector" means is the one thing that differs between the
-     * two: the model hands back to the classical loop, while a classical loop
-     * measured as hopeless is the end of live detection on this device and the
-     * screen falls back to the static framing brackets.
+     * Whether this device can run this detector live at all. The model being
+     * hopeless hands back to the classical loop; a classical loop measured as
+     * hopeless is the end of live detection on this device and the screen
+     * falls back to the static framing brackets. The verdict averages the
+     * detector's own time (`detectMs`); the cadence is charged the whole pass.
+     * How often a detector that *can* run is polled is the cadence's business
+     * ({@link CadenceController}).
      */
-    function adapt(elapsedMs: number, profile: PassProfile): boolean {
+    function adapt(costMs: number, detectMs: number, profile: PassProfile): boolean {
       if (runtime.warmupLeft > 0) {
         runtime.warmupLeft -= 1;
         return true;
       }
+      runtime.intervalMs = runtime.cadence.record(costMs);
       runtime.averageMs =
         runtime.averageMs === null
-          ? elapsedMs
-          : runtime.averageMs * 0.7 + elapsedMs * 0.3;
+          ? detectMs
+          : runtime.averageMs * 0.7 + detectMs * 0.3;
       if (runtime.averageMs > profile.hopelessMs) {
         if (runtime.passSource === "ml") {
           fallBackToClassical();
@@ -688,26 +1003,204 @@ export function useLiveDetect({
         setAvailable(false);
         return false;
       }
-      if (
-        runtime.averageMs > profile.slowMs &&
-        runtime.intervalMs < profile.slowestIntervalMs
-      ) {
-        runtime.intervalMs = Math.min(
-          profile.slowestIntervalMs,
-          runtime.intervalMs * 2,
-        );
-        // Re-measure at the new cadence instead of doubling again immediately.
-        runtime.averageMs = null;
-      }
       return true;
     }
 
+    /** The luma probe of about {@link MOTION_SPAN_MS} ago, for this pass to compare with. */
+    function motionAgainst(frameAt: number, luma: Uint8ClampedArray | null): number | null {
+      if (luma === null) return null;
+      const history = runtime.motionHistory;
+      let reference: { at: number; luma: Uint8ClampedArray } | null = null;
+      for (const entry of history) {
+        if (frameAt - entry.at <= MOTION_SPAN_MS + 100) {
+          reference = entry;
+          break;
+        }
+      }
+      reference ??= history[history.length - 1] ?? null;
+      history.push({ at: frameAt, luma });
+      while (history.length > 0 && frameAt - history[0].at > MOTION_SPAN_MS * 2) history.shift();
+      return frameMotionScore(reference?.luma ?? null, luma);
+    }
+
+    /** One pass on the main thread: the path that shipped before the worker, plus the evidence. */
+    async function mainPass(video: HTMLVideoElement, source: DetectionSource, profile: PassProfile): Promise<PassOutcome | null> {
+      const started = performance.now();
+      const canvas = sample(video);
+      if (canvas === null) return null;
+      // The motion probe reads the same frame the detector is about to —
+      // probed before the await so the comparison is between what the two
+      // passes actually saw, not whatever the preview shows afterwards.
+      const scratch = motionScratchRef.current ?? document.createElement("canvas");
+      motionScratchRef.current = scratch;
+      const luma = probeLuma(canvas, scratch);
+      // The chain's own frame is safe to hand either detector directly:
+      // nothing redraws it until this pass has answered.
+      const detection =
+        source === "ml"
+          ? await detectOnCanvasMl(canvas, profile.budgetMs, assetsRef.current)
+          : await detectOnCanvas(canvas, profile.budgetMs, assetsRef.current);
+      const detectMs = performance.now() - started;
+      let evidence: EvidenceReading = null;
+      let refined: CornerPoints | null = null;
+      let refineMs: number | null = null;
+      if (detection !== null) {
+        let pixels: ImageData | null = null;
+        try {
+          pixels = canvas.getContext("2d", { willReadFrequently: true })?.getImageData(0, 0, canvas.width, canvas.height) ?? null;
+        } catch {
+          pixels = null;
+        }
+        let corners = detection.corners;
+        const quad = pixels === null ? null : normalizeQuad(corners, canvas.width, canvas.height);
+        if (pixels !== null && quad !== null) {
+          const result = refineQuad(pixels, quad, { mode: detection.source === "ml" ? "full" : "local", budgetMs: LIVE_REFINE_BUDGET_MS });
+          refineMs = result.ms;
+          if (result.changed) {
+            corners = denormalizeQuad(result.quad, canvas.width, canvas.height);
+            refined = corners;
+          }
+        }
+        if (!runtime.evidenceUnavailable) {
+          evidence = pixels === null ? "unavailable" : paperEvidence(pixels.data, canvas.width, canvas.height, corners);
+        }
+      }
+      let heldEvidence: PaperEvidence | null = null;
+      const held = heldQuad(canvas.width, canvas.height);
+      if (detection === null && held !== null) {
+        try {
+          const pixels = canvas.getContext("2d", { willReadFrequently: true })?.getImageData(0, 0, canvas.width, canvas.height) ?? null;
+          heldEvidence = pixels === null ? null : paperEvidence(pixels.data, canvas.width, canvas.height, held);
+        } catch {
+          heldEvidence = null;
+        }
+      }
+      const elapsed = performance.now() - started;
+      return {
+        detection,
+        refined,
+        refineMs,
+        heldEvidence,
+        width: canvas.width,
+        height: canvas.height,
+        frameAt: started,
+        luma,
+        evidence,
+        costMs: elapsed,
+        detectMs,
+        mainMs: elapsed,
+        computeMs: null,
+        queueMs: null,
+        mlFailed: false,
+        miss: null,
+      };
+    }
+
     /**
-     * One pass, with whichever detector this session is on. Answers the delay
-     * before the next one, or null to stop the loop for good — which only the
-     * classical detector may say: a device measured as hopeless, and a pass that
-     * blew its budget (the same conclusion, sooner). The model saying either
-     * hands the loop back rather than ending it.
+     * One pass in the worker: the frame grabbed at the sample size (the
+     * browser's default resize quality — a finer one changes the model's
+     * answers) and handed over; the worker answers corners, the motion probe
+     * and the evidence of the same frame.
+     */
+    async function workerPass(video: HTMLVideoElement, source: DetectionSource, profile: PassProfile): Promise<PassOutcome | null> {
+      const { width, height } = sampleSize(video);
+      const frameAt = performance.now();
+      const missed = (miss: "timeout" | "grab", mainMs: number): PassOutcome => ({
+        detection: null,
+        refined: null,
+        refineMs: null,
+        heldEvidence: null,
+        width,
+        height,
+        frameAt,
+        luma: null,
+        evidence: null,
+        costMs: performance.now() - frameAt,
+        detectMs: performance.now() - frameAt,
+        mainMs,
+        computeMs: null,
+        queueMs: null,
+        mlFailed: false,
+        miss,
+      });
+      let frame: ImageBitmap;
+      try {
+        frame = await createImageBitmap(video, { resizeWidth: width, resizeHeight: height });
+      } catch {
+        return missed("grab", performance.now() - frameAt);
+      }
+      // A browser that hands back an empty bitmap for a video has grabbed nothing.
+      if (frame.width === 0 || frame.height === 0) {
+        frame.close();
+        return missed("grab", performance.now() - frameAt);
+      }
+      const mainMs = performance.now() - frameAt;
+      const reply = await laneDetect(
+        {
+          frame,
+          width,
+          height,
+          plan: source,
+          priority: "live",
+          capturedAt: frameAt,
+          epoch: runtime.mlEpoch,
+          luma: true,
+          refineMs: LIVE_REFINE_BUDGET_MS,
+          evidence: !runtime.evidenceUnavailable,
+          held: heldQuad(width, height),
+          hint: frameAt - hintRef.current.at >= HINT_EVERY_MS,
+        },
+        profile.budgetMs,
+      );
+      if (reply.type === "miss") {
+        // Dropped for a newer frame, or no worker any more: nothing to hold
+        // against the lane. A worker that could not draw the frame, or did
+        // not answer in time, is counted by the caller.
+        return reply.why === "timeout" ? missed("timeout", mainMs) : reply.why === "error" ? missed("grab", mainMs) : null;
+      }
+      if (reply.hint) {
+        hintRef.current.at = frameAt;
+        if (reply.hint.hint !== hintRef.current.hint) {
+          hintRef.current.hint = reply.hint.hint;
+          setHint(reply.hint.hint);
+        }
+      }
+      const detection: FrameDetection | null =
+        reply.success && reply.corners !== null && reply.detector !== null
+          ? { corners: reply.corners, confidence: reply.confidence, source: reply.detector }
+          : null;
+      return {
+        detection,
+        refined: detection === null ? null : reply.refined,
+        refineMs: reply.refineMs,
+        heldEvidence: reply.heldEvidence,
+        width,
+        height,
+        frameAt,
+        luma: reply.luma,
+        // `null` — nothing read this pass (or a quad too degenerate to read):
+        // the found state stays as it was. A worker that cannot read its own
+        // pixels answers no detection at all.
+        evidence: detection === null ? null : reply.evidence,
+        costMs: reply.computeMs,
+        // The detector's own time: the draw, refinement, evidence and hint
+        // reading riding on the job have budgets of their own.
+        detectMs: reply.detectMs,
+        mainMs,
+        computeMs: reply.computeMs,
+        queueMs: reply.queueMs,
+        mlFailed: reply.mlFailed,
+        miss: null,
+      };
+    }
+
+    /**
+     * One pass, with whichever detector this session is on, on whichever lane
+     * it runs. Answers the delay before the next one, or null to stop the loop
+     * for good — which only the classical detector may say: a device measured
+     * as hopeless, and a pass that blew its budget (the same conclusion,
+     * sooner). The model saying either hands the loop back rather than ending
+     * it.
      */
     async function runPass(): Promise<number | null> {
       const video = videoRef.current;
@@ -716,69 +1209,88 @@ export function useLiveDetect({
       if (runtime.detecting || video === null || video.videoWidth === 0) {
         return runtime.intervalMs;
       }
+      const lane: DetectLaneKind = detectLane() ?? "main";
+      if (runtime.laneGeneration !== detectLaneGeneration()) {
+        // The lane moved (the worker died, stalled or lost its model): the
+        // main thread warms its own model if it needs one, everything is
+        // measured afresh, and the capture screen takes the hint chip back.
+        runtime.laneGeneration = detectLaneGeneration();
+        runtime.workerTimeouts = 0;
+        runtime.workerGrabFailures = 0;
+        if (lane === "main") {
+          runtime.mlWarmUpStarted = false;
+          hintRef.current = { at: Number.NEGATIVE_INFINITY, hint: null };
+          setHint(null);
+          // scanic never loaded on this thread while the worker had it: pay
+          // its import and WASM compile now, outside any measured pass — the
+          // same reason the loop's start does on the main lane.
+          runtime.detecting = true;
+          try {
+            await loadScanic(assetsRef.current);
+          } finally {
+            runtime.detecting = false;
+          }
+          if (cancelled) return null;
+          return 0;
+        }
+      }
       // The handover, in one place: the warm-up settling promotes the model, a
       // latched failure demotes it, and the throttle starts measuring the
-      // detector it is actually running.
+      // detector it is actually running, where it runs.
       const source = primaryDetector({
         ready: isMlDetectionReady(),
         disabled: isMlDetectionDisabled(),
       });
-      if (source !== runtime.passSource) switchDetector(runtime, source);
+      if (source !== runtime.passSource || lane !== runtime.passLane) switchDetector(runtime, source, lane);
       const profile = PASS_PROFILES[source];
+      // The question this pass answers: a capture or a restart that moves it
+      // on while the pass is out makes the answer nobody's.
+      const epoch = runtime.mlEpoch;
       runtime.detecting = true;
       const started = performance.now();
-      let detection: FrameDetection | null = null;
-      let canvasWidth = 0;
-      let canvasHeight = 0;
-      let motionScore: number | null = null;
+      let outcome: PassOutcome | null = null;
       try {
-        const canvas = sample(video);
-        if (canvas !== null) {
-          canvasWidth = canvas.width;
-          canvasHeight = canvas.height;
-          // The motion probe reads the same frame the detector is about to —
-          // probed before the await so the comparison is between what the two
-          // passes actually saw, not whatever the preview shows afterwards.
-          const scratch =
-            motionScratchRef.current ?? document.createElement("canvas");
-          motionScratchRef.current = scratch;
-          const luma = probeLuma(canvas, scratch);
-          if (luma !== null) {
-            motionScore = frameMotionScore(runtime.motionProbe, luma);
-            runtime.motionProbe = luma;
-          }
-          // The chain's own frame is safe to hand either detector directly:
-          // nothing redraws it until this pass has answered.
-          detection =
-            source === "ml"
-              ? await detectOnCanvasMl(canvas, profile.budgetMs, assetsRef.current)
-              : await detectOnCanvas(canvas, profile.budgetMs, assetsRef.current);
-        }
+        outcome = lane === "worker" ? await workerPass(video, source, profile) : await mainPass(video, source, profile);
       } finally {
         runtime.detecting = false;
       }
       if (cancelled) return null;
       const elapsed = performance.now() - started;
+      if (outcome === null) return runtime.intervalMs;
+      if (runtime.mlEpoch !== epoch) return runtime.intervalMs;
+      if (lane === "worker") {
+        // The worker runs one job at a time, so a pass it did not answer in
+        // time is a pass behind another job (a capture's), not two
+        // detections overlapping: a missed pass, never a verdict on the
+        // detector. Only a worker that keeps missing — stuck, suspended, or
+        // unable to take this browser's frames — hands the lane back.
+        if (outcome.miss !== null) {
+          reportPass(source, false, null, outcome, elapsed, false, null, outcome.miss === "timeout", false, null);
+          if (outcome.miss === "timeout") runtime.workerTimeouts += 1;
+          else runtime.workerGrabFailures += 1;
+          if (runtime.workerTimeouts >= WORKER_STALL_LIMIT) demoteDetectLane("worker-stalled");
+          else if (runtime.workerGrabFailures >= WORKER_GRAB_LIMIT) demoteDetectLane("frame-grab-failed");
+          return runtime.intervalMs;
+        }
+        runtime.workerTimeouts = 0;
+        runtime.workerGrabFailures = 0;
+        if (outcome.mlFailed) {
+          // The model failed in the worker: the page may still run it.
+          demoteDetectLane("worker-ml-failed");
+          return runtime.intervalMs;
+        }
+      } else if (outcome.mlFailed) {
+        fallBackToClassical();
+        return runtime.intervalMs;
+      }
       // The pass blew through its budget, so its real work is still running
       // somewhere behind us — the ONE way two detections could overlap. For the
       // classical detector that is also proof this device has no business doing
       // live detection, and ending the loop keeps the single-flight guarantee
       // absolute; for the model, the same guarantee is kept by never running it
       // again this session.
-      if (elapsed >= profile.budgetMs) {
-        reportPass(
-          source,
-          false,
-          null,
-          canvasWidth,
-          canvasHeight,
-          started,
-          elapsed,
-          false,
-          motionScore,
-          true,
-          false,
-        );
+      if (lane === "main" && elapsed >= profile.budgetMs) {
+        reportPass(source, false, null, outcome, elapsed, false, null, true, false, null);
         if (source !== "ml") {
           setAvailable(false);
           return null;
@@ -786,46 +1298,47 @@ export function useLiveDetect({
         fallBackToClassical();
         return runtime.intervalMs;
       }
-      // The frame this describes is the one `sample` drew, not the moment the
-      // detector got round to answering.
-      const accepted = accept(detection, canvasWidth, canvasHeight, started);
+      const motionScore = motionAgainst(outcome.frameAt, outcome.luma);
+      // The frame this describes is the one the pass sampled, not the moment
+      // the detector got round to answering.
+      const { accepted, rejected } = accept(outcome.detection, outcome.width, outcome.height, outcome.frameAt, outcome.evidence, outcome.refined);
       // A missed detection on a moved scene ends the hold: the stale
       // horizon exists to carry a stationary page through a flicker, and the
       // probe is what proves the page was not stationary. The capture buffer
       // goes with it — corners measured before a swing must not travel with a
       // photo taken after it. A missed detection on a *still* scene changes
       // nothing; that is the flicker the hold was built for.
-      const holdBroken = detection === null && motionBreaksHold(motionScore);
+      // A missed pass on a found sheet looks at where the sheet was: a page
+      // slid away (on a white table the motion probe barely notices) leaves
+      // no edges there, and two such readings end the hold — the overlay, the
+      // found state and the capture buffer with it.
+      const heldGone = outcome.detection === null && heldLost(outcome.heldEvidence);
+      const holdBroken = (outcome.detection === null && motionBreaksHold(motionScore)) || heldGone;
       if (holdBroken) {
         runtime.target = null;
+        runtime.displayTarget = null;
         runtime.tracked = null;
         runtime.lastAccepted = null;
+        runtime.locked = false;
+        runtime.evidenceMisses = 0;
+        runtime.evidenceHits = 0;
+        runtime.filter.reset();
       }
-      const keepGoing = adapt(elapsed, profile);
-      reportPass(
-        source,
-        false,
-        detection,
-        canvasWidth,
-        canvasHeight,
-        started,
-        elapsed,
-        accepted,
-        motionScore,
-        false,
-        holdBroken,
-      );
+      const keepGoing = adapt(outcome.costMs, outcome.detectMs, profile);
+      reportPass(source, false, outcome.detection, outcome, elapsed, accepted, motionScore, false, holdBroken, rejected);
       if (!keepGoing) return null;
       // Deliberately after `adapt`: the warm-up is detached and carries a
       // multi-megabyte download, so nothing it costs may reach the average that
       // decides whether live detection is possible on this device at all.
-      try {
-        maybeWarmUpMl(video);
-      } catch {
-        // An ML-only failure — the frame copy, the launch — is a fact about
-        // this device or this deploy, exactly like a runtime that will not
-        // load. The classical loop is untouched by it, which is the point.
-        fallBackToClassical();
+      if (lane === "main") {
+        try {
+          maybeWarmUpMl(video);
+        } catch {
+          // An ML-only failure — the frame copy, the launch — is a fact about
+          // this device or this deploy, exactly like a runtime that will not
+          // load. The classical loop is untouched by it, which is the point.
+          fallBackToClassical();
+        }
       }
       return runtime.intervalMs - elapsed;
     }
@@ -838,22 +1351,23 @@ export function useLiveDetect({
       source: DetectionSource,
       warmUp: boolean,
       detection: FrameDetection | null,
-      width: number,
-      height: number,
-      frameAt: number,
+      outcome: Pick<PassOutcome, "width" | "height" | "frameAt" | "mainMs" | "computeMs" | "queueMs" | "evidence"> &
+        Partial<Pick<PassOutcome, "refined" | "refineMs">> & { lane?: DetectLaneKind },
       passMs: number,
       accepted: boolean,
       motion: number | null,
       timedOut: boolean,
       holdBroken: boolean,
+      rejected: string | null,
     ): void {
       if (!probing()) return;
+      const { width, height } = outcome;
       const quad =
         detection === null ? null : normalizeQuad(detection.corners, width, height);
       probe({
         type: "detect",
         t: performance.now(),
-        frameAt,
+        frameAt: outcome.frameAt,
         source,
         warmUp,
         ok: detection !== null,
@@ -876,6 +1390,18 @@ export function useLiveDetect({
         motion,
         timedOut,
         holdBroken,
+        lane: outcome.lane ?? runtime.passLane,
+        mainMs: outcome.mainMs,
+        computeMs: outcome.computeMs,
+        queueMs: outcome.queueMs,
+        evidence: outcome.evidence === "unavailable" ? null : outcome.evidence,
+        refinedQuad:
+          detection === null || outcome.refined === null || outcome.refined === undefined
+            ? null
+            : normalizeQuad(outcome.refined, width, height),
+        refineMs: outcome.refineMs ?? null,
+        locked: runtime.locked,
+        rejected,
       });
     }
 
@@ -895,13 +1421,101 @@ export function useLiveDetect({
     }
 
     /**
-     * Take a detection the loop is willing to track. True when it was accepted.
+     * A missed pass's reading of the held sheet. Answers true once
+     * {@link LOCK_RELEASE_MISSES} readings in a row say it is no longer there.
+     */
+    function heldLost(evidence: PaperEvidence | null): boolean {
+      if (evidence === null || !runtime.locked) return false;
+      if (evidence.ok) {
+        runtime.evidenceMisses = 0;
+        return false;
+      }
+      runtime.evidenceMisses += 1;
+      return runtime.evidenceMisses >= LOCK_RELEASE_MISSES;
+    }
+
+    /**
+     * The found-sheet state after an accepted detection. "Found" needs
+     * {@link LOCK_CONFIRM_READINGS} readings in a row that say paper with
+     * every visible side on some edge; a found sheet survives one bad reading
+     * (a shadow, a glare on an edge) and is let go after
+     * {@link LOCK_RELEASE_MISSES}. A pass that did not read the
+     * evidence changes nothing; a device that cannot read it has every
+     * tracked quad found, as before evidence existed.
+     *
+     * Two exceptions, both about a sheet this page has just seen: a quad
+     * where a sheet was found within {@link RECALL_MS} is found again on one
+     * reading, and a found sheet whose sides all still stand on edges
+     * ({@link KEEP_SIDE_SUPPORT}) does not lose a reading to its surface
+     * alone.
+     */
+    function updateLock(evidence: EvidenceReading, shown: NormalizedQuad, aspect: number): void {
+      if (evidence === "unavailable") {
+        runtime.evidenceUnavailable = true;
+        runtime.locked = true;
+        return;
+      }
+      if (runtime.evidenceUnavailable) {
+        runtime.locked = true;
+        return;
+      }
+      if (evidence === null) return;
+      const now = performance.now();
+      // To become found, every side the frame shows must lie on some edge: a
+      // quad with a corner pulled onto the text or the desk has a side across
+      // the page with no step under it at all, and drawing it would put
+      // brackets off the page. (A weak side — a thumb over it, a faint white
+      // table — still has steps along part of it.) A found sheet keeps its
+      // lock with one side lost, as the evidence itself allows.
+      const convincing = runtime.locked
+        ? evidence.ok
+        : evidence.ok && evidence.sideSupport.every((support) => support === null || support >= ENTRY_SIDE_SUPPORT);
+      if (convincing) {
+        runtime.evidenceMisses = 0;
+        runtime.evidenceHits += 1;
+        // Only a reading with every side the frame shows standing on its
+        // edges: the model flipping between a page and a corner pulled
+        // onto the table must not be drawn on every other flip.
+        const recalled =
+          evidence.sideSupport.every((support) => support === null || support >= KEEP_SIDE_SUPPORT) &&
+          lastFoundSheet !== null &&
+          now - lastFoundSheet.at <= RECALL_MS &&
+          quadJump(lastFoundSheet.quad, shown, aspect) <= JUMP_RESET_DIAG;
+        if (runtime.evidenceHits >= (recalled ? 1 : LOCK_CONFIRM_READINGS)) runtime.locked = true;
+        if (runtime.locked) lastFoundSheet = { quad: shown, at: now };
+        return;
+      }
+      runtime.evidenceHits = 0;
+      if (!runtime.locked) return;
+      // Steeply tilted and still on its edges, all round: the surface
+      // reading is what failed, not the sheet. Neither a hit nor a miss.
+      const onEdges =
+        foreshortening(shown, aspect) <= KEEP_FORESHORTENING &&
+        evidence.sidesKnown >= 3 &&
+        evidence.sideSupport.every((support) => support === null || support >= KEEP_SIDE_SUPPORT);
+      if (onEdges) {
+        lastFoundSheet = { quad: shown, at: now };
+        return;
+      }
+      runtime.evidenceMisses += 1;
+      if (runtime.evidenceMisses >= LOCK_RELEASE_MISSES) {
+        runtime.locked = false;
+        runtime.evidenceMisses = 0;
+        runtime.evidenceHits = 0;
+      }
+    }
+
+    /**
+     * Take a detection the loop is willing to track. `accepted` when it was;
+     * `rejected` names why an answer was turned away.
      *
      * A miss is not a loss: the animation loop retires a quad on staleness, so
      * one dropped detection doesn't make the overlay blink. Only capture-worthy
-     * page candidates are drawn — smaller contours are usually text blocks and
-     * made the overlay jump — and the coverage gate is also the ONLY thing
+     * page candidates are tracked — smaller contours are usually text blocks
+     * and made the overlay jump — and the coverage gate is also the ONLY thing
      * bounding an ML quad, whose detector ignores `minDocumentCoverageRatio`.
+     * A classical quad must also pass its sanity checks, and none is taken
+     * once the model is ready.
      *
      * `capturedAt` is when the *frame* was sampled. Everything downstream — the
      * stale horizon, `takeQuadForCapture`, the arbitration between the two detectors —
@@ -913,8 +1527,10 @@ export function useLiveDetect({
       width: number,
       height: number,
       capturedAt: number,
-    ): boolean {
-      if (detection === null) return false;
+      evidence: EvidenceReading,
+      refined: CornerPoints | null = null,
+    ): { accepted: boolean; rejected: string | null } {
+      if (detection === null) return { accepted: false, rejected: null };
       const quad = normalizeQuad(detection.corners, width, height);
       // Conditioned like the capture path: a page that fills the visible
       // object-cover window can still be well under 0.35 of the full 16:9 frame
@@ -926,7 +1542,15 @@ export function useLiveDetect({
         MIN_QUAD_AREA_FRACTION,
       );
       if (quad === null || normalizedCoverage(quad) < floor) {
-        return false;
+        return { accepted: false, rejected: "floor" };
+      }
+      if (detection.source === "classical") {
+        // Honest classical: the model is the better detector, and the
+        // classical one's confident failures — the desk, the frame's edge, a
+        // text block, a sliver — are exactly what a user must not be shown.
+        if (isMlDetectionReady() && !isMlDetectionDisabled()) return { accepted: false, rejected: "ml-ready" };
+        const read = evidence === "unavailable" ? null : evidence;
+        if (!classicalQuadSane(detection.corners, width, height, read)) return { accepted: false, rejected: "classical-sanity" };
       }
       const now = performance.now();
       const candidate: DetectionCandidate = {
@@ -936,20 +1560,44 @@ export function useLiveDetect({
       };
       const authorityMs = staleHorizonMs("ml", runtime.intervalMs);
       if (!supersedesDetection(candidate, runtime.tracked, now, authorityMs)) {
-        return false;
+        return { accepted: false, rejected: "superseded" };
       }
-      runtime.target = runtime.smoother.update(quad, now);
+      const aspect = height / width;
+      // Drawn: the answer moved onto the paper's edges on this very frame,
+      // when the refinement could; tracked and buffered: the detector's own.
+      const shown = refined === null ? quad : (normalizeQuad(refined, width, height) ?? quad);
+      // "Another page" is judged on where the page is — the refined quads.
+      // The model's own answer can swing between two readings of one page (a
+      // corner pulled onto the print on every other frame) that its
+      // refinement puts back on the same edges.
+      const previous = runtime.target === null ? null : runtime.shown;
+      const jumped =
+        previous === null || runtime.tracked?.source !== detection.source || quadJump(previous, shown, aspect) > JUMP_RESET_DIAG;
+      if (jumped) {
+        // Another page, or the same one somewhere else: nothing to smooth
+        // from, and "found" is earned again.
+        runtime.filter.reset();
+        runtime.locked = false;
+        runtime.evidenceMisses = 0;
+        runtime.evidenceHits = 0;
+      }
+      runtime.target = quad;
+      runtime.shown = shown;
+      runtime.displayTarget = runtime.filter.update(shown, capturedAt, aspect);
       runtime.tracked = candidate;
-      // The capture buffer takes the accepted target, dated by the frame it
-      // describes — the same clock the stale horizon reads, so an age computed
-      // against it means what a capture thinks it means.
+      // The capture buffer takes the accepted quad as drawn — the model's
+      // answer on the paper's edges, never the display filter's — dated by
+      // the frame it describes: the same clock the stale horizon reads, so an
+      // age computed against it means what a capture thinks it means.
+      updateLock(evidence, shown, aspect);
       runtime.lastAccepted = {
-        quad: runtime.target,
+        quad: shown,
         capturedAt,
         source: candidate.source,
         confidence: candidate.confidence,
+        found: runtime.locked,
       };
-      return true;
+      return { accepted: true, rejected: null };
     }
 
     /**
@@ -973,7 +1621,9 @@ export function useLiveDetect({
     }
 
     /**
-     * Start the model, on the first frame this screen ever sampled.
+     * Start the model on the main thread, on the first frame this screen ever
+     * sampled — the main-thread lane only: on the worker lane the worker
+     * warmed its own the moment the screen mounted.
      *
      * Eager: nothing has to go wrong first, because the model is the
      * primary detector and the only reason it is not already running is that
@@ -1014,19 +1664,19 @@ export function useLiveDetect({
         if (cancelled || runtime.mlEpoch !== epoch) return;
         if (!isMlResultFresh(now, performance.now())) return;
         if (video.videoWidth === 0) return;
-        const accepted = accept(detection, width, height, now);
+        const { accepted, rejected } = accept(detection, width, height, now, null);
+        const ms = performance.now() - now;
         reportPass(
           "ml",
           true,
           detection,
-          width,
-          height,
-          now,
-          performance.now() - now,
+          { width, height, frameAt: now, mainMs: ms, computeMs: null, queueMs: null, evidence: null, lane: "main" },
+          ms,
           accepted,
           null,
           false,
           false,
+          rejected,
         );
       });
       // `detectOnCanvasMl` never rejects — it answers null and latches itself
@@ -1079,14 +1729,24 @@ export function useLiveDetect({
             staleHorizonMs(detected.source, runtime.intervalMs))
       ) {
         runtime.target = null;
+        runtime.displayTarget = null;
+        runtime.locked = false;
+        runtime.evidenceMisses = 0;
+        runtime.evidenceHits = 0;
+        runtime.filter.reset();
       }
-      const tracking = runtime.target !== null;
+      // Drawn only once found: a tracked quad without paper behind it is a
+      // candidate, and the brackets are a claim. A classical quad still held
+      // from before the model came up stops being drawn the moment it has.
+      const classicalAfterMl =
+        detected?.source === "classical" && isMlDetectionReady() && !isMlDetectionDisabled();
+      const tracking = runtime.displayTarget !== null && runtime.locked && !classicalAfterMl;
 
-      if (runtime.target !== null) {
+      if (tracking && runtime.displayTarget !== null) {
         runtime.current =
           runtime.current === null || reducedRef.current
-            ? runtime.target
-            : lerpQuad(runtime.current, runtime.target, LERP_FACTOR);
+            ? runtime.displayTarget
+            : lerpQuad(runtime.current, runtime.displayTarget, 1 - Math.exp(-deltaMs / DISPLAY_EASE_MS));
       }
       if (reducedRef.current) {
         runtime.opacity = tracking ? 1 : 0;
@@ -1129,6 +1789,7 @@ export function useLiveDetect({
           opacity: runtime.opacity,
           hasQuad: tracking,
           searching: isSearching,
+          locked: runtime.locked,
         });
       }
 
@@ -1138,12 +1799,32 @@ export function useLiveDetect({
     runtime.lastFrameAt = 0;
     runtime.loopStartedAt = performance.now();
     frameHandle = window.requestAnimationFrame(frame);
-    // Pay the WASM load BEFORE the first measured pass: a slow module fetch is
-    // not a slow device, and letting it into the average would switch the
-    // feature off on a perfectly capable phone with a bad connection.
-    void loadScanic(assetsRef.current)
-      .then(() => scheduleDetect(0))
-      .catch(() => setAvailable(false));
+    // Decide the lane first (the mount already started deciding it), and pay
+    // the WASM load BEFORE the first measured pass: a slow module fetch is not
+    // a slow device, and letting it into the average would switch the feature
+    // off on a perfectly capable phone with a bad connection. On the worker
+    // lane the worker loads its own, and says when it has.
+    void (async () => {
+      let lane = await startDetectLane(assetsRef.current);
+      if (cancelled) return;
+      if (lane === "worker") {
+        await detectLaneReady();
+        if (cancelled) return;
+        lane = detectLane() ?? "main";
+      }
+      runtime.laneGeneration = detectLaneGeneration();
+      switchDetector(
+        runtime,
+        primaryDetector({ ready: isMlDetectionReady(), disabled: isMlDetectionDisabled() }),
+        lane,
+      );
+      // The hint chip rides on the worker's frames; on the main-thread lane
+      // the capture screen keeps its own timer.
+      hintRef.current = { at: Number.NEGATIVE_INFINITY, hint: null };
+      setHint(lane === "worker" ? "good" : null);
+      if (lane === "main") await loadScanic(assetsRef.current);
+      scheduleDetect(0);
+    })().catch(() => setAvailable(false));
 
     return () => {
       cancelled = true;
@@ -1161,5 +1842,6 @@ export function useLiveDetect({
     overlay,
     takeQuadForCapture,
     noteCapture,
+    hint,
   };
 }

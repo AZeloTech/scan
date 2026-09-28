@@ -5,12 +5,8 @@ import {
   cornerBracketPath,
   cornerList,
   denormalizeQuad,
-  frameDiagonal,
   FULL_FRAME_QUAD,
-  lerpQuad,
-  maxCornerShift,
   normalizedCoverage,
-  QuadDetectionSmoother,
   type BracketCap,
   type NormalizedQuad,
 } from "./quad.ts";
@@ -51,80 +47,12 @@ function viewBoxCap(length: number): BracketCap {
   return { length, width: 1, height: 1 };
 }
 
-const ASPECT = 9 / 16;
 const BASE: NormalizedQuad = {
   topLeft: { x: 0.15, y: 0.08 },
   topRight: { x: 0.85, y: 0.08 },
   bottomRight: { x: 0.85, y: 0.92 },
   bottomLeft: { x: 0.15, y: 0.92 },
 };
-
-function shifted(x: number): NormalizedQuad {
-  return {
-    topLeft: { x: BASE.topLeft.x + x, y: BASE.topLeft.y },
-    topRight: { x: BASE.topRight.x + x, y: BASE.topRight.y },
-    bottomRight: { x: BASE.bottomRight.x + x, y: BASE.bottomRight.y },
-    bottomLeft: { x: BASE.bottomLeft.x + x, y: BASE.bottomLeft.y },
-  };
-}
-
-test("a still document does not visibly chase alternating edge candidates", () => {
-  const detections = Array.from({ length: 17 }, (_, index) =>
-    shifted(index % 2 === 0 ? -0.006 : 0.006),
-  );
-  const smoother = new QuadDetectionSmoother();
-  let target = smoother.update(detections[0], 0);
-  let current = target;
-  let detectorTravel = 0;
-  let displayedTravel = 0;
-
-  for (let frame = 1; frame <= 120; frame += 1) {
-    if (frame % 8 === 0) {
-      const raw = detections[frame / 8];
-      detectorTravel += maxCornerShift(
-        detections[frame / 8 - 1],
-        raw,
-        ASPECT,
-      );
-      target = smoother.update(raw, frame * (125 / 8));
-    }
-    const next = lerpQuad(current, target, 0.35);
-    if (frame > 15) {
-      displayedTravel += maxCornerShift(current, next, ASPECT);
-    }
-    current = next;
-  }
-
-  assert.ok(
-    displayedTravel / detectorTravel <= 0.35,
-    "the rendered outline should remove most stationary detector flicker",
-  );
-});
-
-test("a real page move settles after the next confirming detection", () => {
-  const smoother = new QuadDetectionSmoother();
-  const before = shifted(0);
-  const after = shifted(0.08);
-
-  smoother.update(before, 0);
-  const first = smoother.update(after, 125);
-  const confirmed = smoother.update(after, 250);
-
-  assert.ok(maxCornerShift(first, after, ASPECT) > 0);
-  assert.ok(maxCornerShift(confirmed, after, ASPECT) < 1e-9);
-});
-
-test("a slow detector does not add a half-second of smoothing lag", () => {
-  const smoother = new QuadDetectionSmoother();
-  const after = shifted(0.08);
-
-  smoother.update(BASE, 0);
-  const result = smoother.update(after, 500);
-
-  assert.ok(
-    maxCornerShift(result, after, ASPECT) / frameDiagonal(ASPECT) < 1e-9,
-  );
-});
 
 test("corner brackets are capped, and never longer than the edge allows", () => {
   // A quad wide enough that 12 % of an edge exceeds the cap on one axis and

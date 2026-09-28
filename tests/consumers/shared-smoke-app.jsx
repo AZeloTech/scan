@@ -105,6 +105,7 @@ export default function SmokeApp() {
         if (!alive) return;
         report({
           mlReady: result.mlReady,
+          detectWorker: result.detectWorker,
           pdfBytes: result.pdfBytes,
           pages: result.pages,
           pdfImportReady: result.pdfImportReady,
