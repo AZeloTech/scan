@@ -51,7 +51,7 @@ the person holding the phone — can make.
 
 | | |
 |---|---|
-| **Capture** | The camera opens, a neural corner detector finds the page in the frame, and a person confirms or drags the four corners. No camera? It falls back to picking image files on its own. |
+| **Capture** | The camera opens, a neural corner detector finds the page in the frame and guides the aim — one short hint at a time ("Aproxime", "Afaste um pouco", "Pouca luz", "Reflexo — incline o celular", "Segure firme"), a ready cue on the corner brackets, the torch where the phone has one — and a person confirms or drags the four corners. The shutter always works. Auto-capture (taking the photo once the page has been ready for a moment, still through the corner confirmation) is experimental and offered only when the host sets `experimentalAutoCapture`. No camera? It falls back to picking image files on its own. |
 | **Flatten** | A Rust/WebAssembly dewarp straightens curved paper — the bend of a page held in one hand — and falls back gracefully when the geometry is not trustworthy. |
 | **Review** | Pages as thumbnails: reorder, retake, remove. Blur and small-text warnings before it is too late to re-shoot. |
 | **Build** | One PDF, assembled in the browser. Given `maxBytes`, quality steps down a fixed ladder until the exact size fits — and refuses rather than exceed it. |
@@ -156,6 +156,7 @@ Full types ship with the package (`ScanFlowProps`). In short:
 | `onPagesChange` | how many pages are held, so you can ask before discarding. |
 | `onEvent` | step, capture, quality, size and error events. Numbers and enums only — never image data, never a file name. Safe to forward straight to analytics. |
 | `className` | applied to the library's root element, for layout only. |
+| `experimentalAutoCapture` | **experimental**, default `false`. Offers an auto-capture toggle on the capture screen (off in every new flow): switched on, the page is taken by itself once framed, sharp and still for about half a second, once per page, through the confirm screen. It still fires on some page-less scenes on the bench (a screen showing a page, two overlapping sheets), so leave it off for people who will not look at the confirm screen. |
 
 ### Theming
 
@@ -244,6 +245,17 @@ does not.
 **Browsers.** Chrome/Edge 91+, Firefox 90+, Safari 16+. Safari 15 works if your
 CSP includes `'unsafe-eval'`. Where there is no camera, the component falls back
 to the file intake on its own.
+
+**The torch and haptics.** The torch toggle appears only when the camera track
+advertises `torch` in `getCapabilities()` (Chrome on Android does; Safari on
+iOS does not, so an iPhone shows no toggle), and it is switched with
+`applyConstraints`. If your page sets a `Permissions-Policy`, nothing extra is
+needed for either. The ready cue's haptic tick uses `navigator.vibrate`, which
+iOS does not have — there it is silently skipped (the cue is also announced
+once per page to screen readers). Auto-capture is experimental: its toggle
+appears only with `experimentalAutoCapture`, it is off in every new flow, the
+flow keeps the choice while it is open, and the library writes nothing to
+storage for it. Retakes are always manual.
 
 **React.** 18.3 or 19, StrictMode-safe.
 

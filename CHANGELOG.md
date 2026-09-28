@@ -72,6 +72,63 @@ freezes at 1.0.
   - `selfTest()` also reports `detectWorker`: whether the worker could start
     on this page (a 404 or a CSP header on its response are the usual
     reasons it could not).
+- **The viewfinder guides the aim** (`src/lib/guidance.ts`), the way a
+  phone's own document scanner does:
+  - **One hint at a time**, in a slot of fixed height at the top of the frame
+    (announced politely to screen readers; the frame never moves or resizes):
+    "Procurando documento", then after a few seconds "Não achei a folha —
+    toque para capturar"; "Afaste um pouco" when a corner is at or past the
+    edge of what the viewfinder shows (also when the model drew the page
+    short of the edge but its paper runs on past it); "Aproxime" when the page
+    is small in the view (also a page too small for the detector's own floor);
+    "Pouca luz" when nothing in the frame is bright; "Reflexo — incline o
+    celular" when a reflection washes out part of the page; "Segure firme"
+    while the found page keeps moving. A hint has to hold 300 ms to appear
+    and stays at least a second. They replace the old chips ("folha
+    encontrada", "aponte para o documento", "encaixe a página inteira", "não
+    achei as bordas") and the stuck-detector tip box.
+  - **A ready cue on the brackets**: heavier and a saturated green (3:1 on
+    white paper and on the dark halo) once the page is found, framed, sharp
+    and still, on a detection pass of a recent frame that found it where the
+    brackets are. It rides out a wobble shorter than 300 ms and drops at once
+    when the page is lost or another hint is owed. It comes on only once the
+    hint slot is empty, and the slot stays empty while it is on. Once per page it gives one haptic tick (where the browser
+    has `navigator.vibrate`) and says "Pronto" to screen readers.
+  - **A torch toggle**, only where the camera track advertises one; the
+    low-light hint offers it ("Acender lanterna", a 44 px target that hands
+    focus to the toggle). Changes are applied one at a time, re-applied to a
+    new track, and the torch is off while the viewfinder is covered or the
+    page limit is reached. A refusal costs only the light, and the toggle
+    then shows it off.
+  - **Experimental auto-capture**, behind a new `<ScanFlow>` prop,
+    `experimentalAutoCapture` (default `false`: no toggle at all). When the
+    host sets it, a toggle ("auto", "auto ✓" when on, announced) is offered,
+    off in every new flow; the flow keeps the choice while it is open and
+    nothing is written to storage. Retakes are always manual. Switched on,
+    once the ready conditions have held half a second — a countdown grows
+    along the brackets — and a detection pass on a frame from within that
+    half second found the page where it was, and a last look at the camera
+    at that instant shows the same scene, the photo is taken through exactly
+    the path a tap takes (still photo, refinement, the confirm-corners
+    screen), once per page. It then waits for another page (a page somewhere
+    else, the page gone for a second, the scene changed) or two seconds and
+    the phone moving — counted from when the confirm screen closed — before
+    it fires again. Moving the page enough to lose the ready conditions, or
+    the camera leaving the page, cancels the countdown. The shutter and the
+    frame tap work in every state. It is experimental because it has not met
+    its bar: on the bench it still fires on a screen showing a page and on
+    two overlapping sheets the detector takes as one (see the bench README).
+- The live loop lets a page that was slid away go sooner: one reading that
+  finds no paper where the page was is enough when the scene moved or the
+  model sees a quad elsewhere, and the overlay fades out in 100 ms (instead
+  of 300) once the page is known to have gone.
+- "Sheet found" is harder for a black keyboard to earn: on a sheet whose
+  interior is under three-quarters background, ink must make up at least
+  0.22 of the rest. It is harder for a woven place mat too: under 0.04 ink
+  spread over more than three-quarters of the sheet is a texture, not print.
+- With no live detection on the device (it could not start, or the phone is
+  too slow for it), the hint slot says "Não achei a folha — toque para
+  capturar" rather than nothing.
 
 ### Changed before first publish — host integration
 Found by embedding 0.1.0 in a host page. None of these is on npm yet, so they
@@ -191,3 +248,12 @@ land in 0.1.0 itself; each is a behaviour a host can observe.
   page, which a static export cannot arrange for itself.
 - Copy is built in: `lang` chooses pt-BR or en-US and a host cannot reword a
   string.
+- The hints and auto-capture were tuned on the bench's synthetic sessions,
+  whose camera has no auto-exposure: "Pouca luz" reads the frame's
+  highlights, and on an emulated black keyboard on a dark desk it says so
+  there too. How a real phone's exposure, torch and tremor behave is still
+  to be checked on devices; iOS Safari has no torch constraint and no
+  `navigator.vibrate`, so an iPhone shows no torch toggle and feels no tick.
+- Auto-capture cannot tell a page swapped in at exactly the same place (with
+  the phone not moving) from the page it just took; the shutter is there for
+  that case.

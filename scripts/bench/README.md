@@ -17,6 +17,7 @@ npm run bench -- --suite session --session page-swap --seeds 3 --cpu 4
 npm run bench -- --suite session --session sustained-hold --seeds 3 --cpu 4   # 75 s, remounts, leaks
 npm run bench -- --suite session --seeds 3 --lane main     # force the main-thread detection lane
 npm run bench -- --suite session --session regression --seeds 5   # the adversarial sessions (fast pans, steep tilts…)
+npm run bench -- --suite session --session guidance --seeds 5     # hints, the ready cue, auto-capture (Phase 4)
 npm run bench:webkit                                       # the flow end to end in WebKit, both lanes
 npm run bench -- --suite emulator --seeds 10               # the emulator's own GT check
 npm run bench:play                                         # the playground, in a Chromium window
@@ -294,6 +295,18 @@ what the session suite measures. In order of a pass:
    passes in 10-seed session runs, the empty-desk readings passing as paper
    fell from 35 of 676 to 12, with none of the hold sessions' 7896 readings,
    the synthetic pages or the real stills lost (3 of the 55 F6 scenes pass).
+   The same keyboard still passed at 0.68–0.71 with little ink (0.03–0.05:
+   0.09–0.15 of the non-background share), so a sheet under 0.75 background
+   must hold ink of at least 0.22 of the rest (`marginalBackground`,
+   `minInkOfRest`): every real and synthetic page there holds 0.31 or more.
+   Over the Phase 3 session runs (cpu 1 and 4) the page-less readings passing
+   as paper fell from 30 of 1165 to 4, and not one reading of a page changed
+   (8064 hold-session readings, the 186 synthetic pages, the 94 real stills,
+   the replayed clips). The evidence also reports, outside its verdict, the
+   interior's share clipped white on paper that is not itself clipped (the
+   "reflection" hint's `glare`) and how many edgeless sides have the page's
+   own paper running on past them to the frame's edge (`open`: a page cut
+   off whose quad the model drew short of the edge).
 6. **Found**: two readings in a row that say paper, with every visible side
    at least 30 % supported (a quad with a corner pulled onto the text has a
    side with no edge under it at all); let go after two readings that do not
@@ -315,7 +328,11 @@ what the session suite measures. In order of a pass:
    evidence where the found sheet was drawn: a page slid away — on a white
    table the motion probe barely sees it go — leaves no edges there, and two
    such readings end the hold (on `page-swap` the stale overlay's p95 went
-   from ~950 to ~590 ms). Only a found quad is drawn, says "sheet found", and
+   from ~950 to ~590 ms) — one, when the scene moved (motion score 0.05 and
+   up) or the model answered a quad elsewhere that the loop did not take (the
+   worker then reads the evidence at the held place too). A sheet known to
+   have gone — a hold broken so, or a jump to another page — fades out in
+   100 ms instead of 300. Only a found quad is drawn, says "sheet found", and
    may travel with a capture as its buffered corners (an unconvincing quad
    the model was sure of — a laptop lid — was never on screen, and on the
    empty desk it had been carried into captures).
@@ -552,11 +569,78 @@ events and locks:
 | `slide-across` | camera still; the page slides in from half out of frame (turning 12°) over 2.5 s, rests, is slid quickly (0.8 s) elsewhere, rests; shutter at 8.5 s |
 | `paper-lookalikes` | no document: a closed white laptop, a white place mat, a white box and a cream book, each framed 1.8 s; shutter at 10 s over the last |
 
+**The `guidance` group** — **not in a plain run**; `--session guidance` runs
+all ten (Phase 4: the hint engine, the ready cue and auto-capture,
+`src/lib/guidance.ts`). The scripted user switches the auto-capture toggle on
+as the camera goes live wherever a script says `autoCapture`, confirms every
+confirm screen that opens (its own taps' and auto-capture's) 1.1 s after it
+opens, never taps while one is open, and at the end waits for any capture
+still owed its confirmation. Besides the usual marks each carries
+`marks.hints` (windows where a named hint is owed), `marks.ready` (where the
+ready cue is owed), `marks.stable` (when the scene became still with a page
+framed — an automatic capture's latency is counted from the last one before
+it), `marks.tremor` (no automatic capture may fire inside) and, page-less,
+`marks.pageless` (every automatic capture is a false fire):
+
+| session | what happens |
+|---|---|
+| `too-far` | held still far from the page (7–10 % of the frame: under the model's own coverage floor) for 4.5 s — "Aproxime" owed; comes in over 1.5 s and holds; shutter at 9 s |
+| `cut-off` | held still too close, one or two corners outside the frame, 4.5 s — "Afaste um pouco" owed; backs off, holds; shutter at 9 s |
+| `low-light` | framed in a dim room (exposure ×0.06–0.1) for 6 s — "Pouca luz" owed, no automatic capture; the light comes back, holds; shutter at 9.5 s |
+| `glare` | framed with a lamp's hot spot washing out part of the page until 5.5 s — "Reflexo — incline o celular" owed, no automatic capture; tilted out of it, holds; shutter at 9 s |
+| `shaky-hold` | framed with a 1.5 % tremor for 4.5 s — "Segure firme" owed, no automatic capture; the hand steadies (0.3 %); shutter at 9 s |
+| `tremor-hold-auto` | `tremor-hold` with auto-capture on: none may fire |
+| `page-swap-auto` | `page-swap` with auto-capture on: one automatic capture per page |
+| `empty-desk-auto`, `lookalikes-auto`, `desk-hold-auto` | `empty-desk-sweep`, `paper-lookalikes` and `desk-hold` (an F6 desk with no page held still 9 s — not in any group on its own) with auto-capture on: "Procurando documento" / "Não achei a folha" owed, and every automatic capture is a false fire |
+
+**The `breaker` group** — **not in a plain run**; `--session breaker` runs
+all thirteen (Phase 4's adversarial sessions, kept as a permanent group).
+Every one has auto-capture on (the scripted page mounts `<ScanFlow>` with
+`experimentalAutoCapture` whenever a script says `autoCapture`); besides the
+guidance marks, each may carry `marks.noFire` — windows where an automatic
+capture would take a bad image (the page cut off, a hot spot on it, still
+moving) — scored as "not owed" fires:
+
+| session | what happens |
+|---|---|
+| `still-lookalikes-auto` | no document: a closed white laptop, a white woven place mat, a white box, a cream book, a white cutting board and a white plastic folder, each held still (0.25 % tremor) 3.6 s — every automatic capture is a false fire |
+| `screen-page-auto` | a phone and then a tablet lying screen up, each showing a page, held still 4.5 s — scored page-less (a screen is not the paper); whether a person means to scan a document on a screen is an owner's call |
+| `half-out-auto` | about half of the page outside the view (two corners gone), still 6.5 s — "Afaste um pouco" owed, no automatic capture; backs off and holds |
+| `overlap-auto` | a second page laid over the first (offset 15–50 %), both in view, still 9 s; the top page is the scan — a capture of the bottom page or of both is wrong |
+| `slow-drift-auto` | the camera panning steadily across the page for 6 s at 0.8–3.2 % of the diagonal a second — `noFire` while it moves |
+| `hand-rest-auto` | a hand and thumb resting on the page |
+| `dim-page-auto`, `dim-desk-auto` | a page (exposure ×0.12–0.26), and an F6 desk with none (×0.15–0.3, page-less), held still 9 s |
+| `glare-sweep-auto` | a lamp's hot spot on the page from the start, sliding off it by 7.5 s — `noFire` while it is on the page |
+| `hover-far`, `hover-edge`, `hover-light` | the page's size, its corner margin and the exposure swinging across the too-far, cut-off and low-light thresholds — the hint's churn |
+| `whip-off-auto` | six times: held on the page 0.9–1.9 s (the countdown under way), then whipped off to bare desk in 200 ms and kept off 1.5 s — a capture off the page, or on the way, is a false fire |
+
+The report's **Guidance** table gives, per session: each hint window's share
+with the owed hint / another hint (wrong) / none, and the time from the
+condition's start to the first right hint; the hint's churn (changes per
+second of live viewfinder, and changes within 1.5 s of the one before); the
+share of the default sessions' framed holds with a hint up; the ready cue's
+precision (cue-on time with the overlay on the page, within 2 % of the
+diagonal) and recall (over `marks.ready`) and its time over a frame with no
+page; automatic captures, false fires, fires in a tremor window, pages that
+got one, repeat fires, fires where none is owed (a `noFire` window, or a
+hint window other than "searching") and their latency from stable; failed/severe of
+automatic against manual captures in the same sessions; and whether the
+viewfinder's box ever moved (the scripted page samples it every 100 ms and
+on every hint change). One hint replaced by another is one change, not two
+(`hintSeries`). A build from before the single hint slot is scored
+too: its chips are mapped onto the nearest key (`hintSeries`,
+`session-score.mjs`). The overlay samples carry `watch`: the last look at
+the camera between passes while the cue was on (its motion score against
+the confirmed frame, `hooks/useLiveDetect.ts`).
+
 **The camera.** `app/fake-camera.js` answers `getUserMedia` with a stream the
 player feeds, `permissions.query({ name: "camera" })` with `prompt` until the
 app has asked (then `granted`), `ImageCapture` with a 4000×3000 sensor whose
-`takePhoto()` answers with the pose at the moment of exposure, and the pointer
-queries with a coarse pointer — so the phone flow mounts. Each run gets a
+`takePhoto()` answers with the pose at the moment of exposure, the pointer
+queries with a coarse pointer — so the phone flow mounts — and its track
+advertises a **torch** (`getCapabilities().torch`; `applyConstraints` switches
+it and the run records when, as `record.torch`: the frames were rendered
+ahead, so the light proves the control, not the photo). Each run gets a
 fresh 390×844 @ DPR 3 touch context with an Android user agent. Asked for the
 camera again after the app stopped it (a remounted flow), it answers a new
 track on the same clock.
@@ -578,9 +662,12 @@ depend only on the script, the stream size, the emulator's source and the
 browser build — so the first run of a session writes its JPEGs and their
 truth to `.bench-out/frame-cache/<key>/` (`PUT /frame-cache/…`, synthetic only)
 and every later run with the same key reads them back (`--no-frame-cache`
-renders anyway). The key hashes `emulator/*.js`, the player's
-`FRAME_CACHE_VERSION` (bump it when rendering or encoding changes there) and
-the browser version, so a stale frame is never replayed.
+renders anyway). The key hashes the script itself (as `buildSession` builds
+it), `emulator/*.js` — of `session.js` only the part before the first
+`registerSession`, the code that plays a script: a script's own change is
+already in the script, so editing one session re-renders that session only —
+the player's `FRAME_CACHE_VERSION` (bump it when rendering or encoding changes
+there) and the browser version, so a stale frame is never replayed.
 
 **A camera the page's main thread cannot slow down.** Where the browser has
 `MediaStreamTrackGenerator` (Chromium), frames are pumped by a worker
@@ -676,15 +763,19 @@ better under `--cpu 4` than it is.
 ## WebKit (`npm run bench:webkit`)
 
 The flow end to end in Playwright's WebKit — primer, a live viewfinder that
-finds the page, a capture, the confirm screen — on one session
-(`--session tremor-hold --seed 1` by default), twice: on the lane the app picks
+finds the page and guides the aim, auto-capture switched on and firing, a
+tap, the confirm screens — on one session (`--session too-far --seed 1` by
+default: "Aproxime" owed while the page is far, then the ready cue and an
+automatic capture once it is framed), twice: on the lane the app picks
 by itself (and the reason it gives) and on the main-thread lane forced.
 Chromium renders the session's frames into the frame cache first; WebKit plays
 them from the page (no `MediaStreamTrackGenerator` there) with no still
 pipeline (Safari has no `ImageCapture`), so every capture is a preview frame.
 It checks the camera went live, the lane was reported, the model answered,
-the overlay found the page, every tap made a capture whose confirm screen
-opened, and the page threw nothing; it writes
+the overlay found the page, the owed hint was shown, the ready cue came on
+over the page, the auto-capture toggle was found and an automatic capture
+fired, every tap made a capture, every confirm screen opened, and the page
+threw nothing; it writes
 `.bench-out/webkit-smoke-<stamp>/results.json` and exits non-zero on any
 failure. Linux WebKit is not iOS Safari: it proves the paths run, not how a
 phone feels.
@@ -883,6 +974,23 @@ counts, the frame cache, the worker camera and stills rendered ahead, the
 cost report (long tasks, heap, cadence, lanes, start-up), `--lane`, the
 worker slowdown, the `ml+live` variant, the evidence and live-refinement
 APIs, the paired capture-policy scoring and the WebKit smoke.
+
+Phase 4 (guidance) added the `guidance` session group, the hint / ready-cue
+/ auto-capture scoring (`scoreGuidance`, the report's **Guidance** table),
+the scripted user's auto-capture toggle and confirm watcher, the viewfinder
+box samples, the bench camera's torch, the frame cache keyed by the script,
+and the WebKit smoke's hint, ready-cue and auto-capture checks. Over 5 seeds
+at `--cpu 1` (Phase 4 final): hint right 80 % of `too-far`, 79 % of
+`cut-off`, 100 % of `low-light`, 60 % of `glare`, 88 % of `shaky-hold`, 75–95 %
+of the page-less windows (a dark F6 desk says "Pouca luz" — the frame is as
+dark as the low-light session's; this camera has no auto-exposure); ready cue
+on the page 99.4 % of its on-time, never on a page-less frame; 31 automatic
+captures, none on a page-less session, none in a tremor window, none failed
+(manual taps in the same sessions: 12 of 50, most of them the page-less
+sessions' own taps), latency from the scene steadying p50 0.93 s (1.0 s
+p75); no viewfinder box change in 12,265 samples. Under `--cpu 4`: no false
+fire and no fire in a tremor window either, latency p50 2.3 s (the ready cue
+waits for five readings of a still page).
 
 Implemented: probe, server, bench page, the `detector`, `session`,
 `real-stills`, `real-video` and `emulator` suites, metrics, report,
