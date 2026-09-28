@@ -328,7 +328,25 @@ export function sessionAt(script, t, { frame = script.frame, focalPixels } = {})
   params.effects = [script.finger, ...(script.fingers ?? [])]
     .map((finger) => fingerAt({ finger }, t, view))
     .filter((effect) => effect !== null);
+  const glares = glareAt(script, t);
+  if (glares.length > 0) params.blobs = [...(script.scene.blobs ?? []), ...glares];
   return params;
+}
+
+/**
+ * A lamp's hot spot on the page at `t` (`script.glare`: `{ from, to, fadeMs,
+ * blob }` windows, the blob in screen pixels as `kit.glare` makes them),
+ * faded in and out over `fadeMs` — the phone tilting into and out of the
+ * reflection.
+ */
+function glareAt(script, t) {
+  return (script.glare ?? [])
+    .filter((g) => t >= g.from && t <= g.to)
+    .map((g) => {
+      const fade = g.fadeMs > 0 ? smootherstep(Math.min(t - g.from, g.to - t) / g.fadeMs) : 1;
+      return { ...g.blob, strength: g.blob.strength * fade };
+    })
+    .filter((blob) => blob.strength > 0.01);
 }
 
 /** Which page (index among the scene's pages) the scan is about at `t`. */
@@ -1338,8 +1356,932 @@ registerSession({
   },
 });
 
+/* ── guidance sessions (Phase 4: hints, the ready cue, auto-capture) ───── */
+
+/*
+ * Each puts the viewfinder in one condition the hint engine names, long
+ * enough to judge it, then resolves it and holds still — where the ready cue
+ * and, with `autoCapture` (the scripted user turns the toggle on as the
+ * camera goes live), an automatic capture are owed. Besides the usual marks:
+ *
+ * - `marks.hints` — `[{ name, from, to, expect, conditionFrom }]`: over
+ *   `[from, to]` the hint shown should be one of `expect` (`null` = none);
+ *   `conditionFrom` is when the condition began (time to the first correct
+ *   hint is counted from it). Windows open a little after the condition
+ *   starts: the app has to see it and a hint has to hold 300 ms to appear.
+ * - `marks.ready` — `[{ from, to }]`: the page whole, big enough, lit, still:
+ *   where the ready cue is owed (its recall).
+ * - `marks.stable` — moments the scene became still with a page framed: an
+ *   automatic capture's latency is counted from the last one before it.
+ * - `marks.tremor` — `[{ from, to }]`: a trembling hand; no automatic capture
+ *   may fire inside.
+ * - `marks.pageless` — the whole session has no page: every automatic
+ *   capture is a false fire.
+ */
+
+/** The hint keys a session expects (the app's probe names them the same). */
+const SEARCHING = ["searching", "not-found"];
+
+/** A page scene held still over the page from the start, whole with room to spare. */
+function framedScene(seed, size, family, margin = 0.08) {
+  return roomyScene(seed, size, family, margin);
+}
+
+registerSession({
+  id: "too-far",
+  title: "the page small in the frame, then closer",
+  inDefault: false,
+  group: "guidance",
+  describe:
+    "held still far from the page (it covers 7–10 % of the frame) for 4.5 s; comes in over 1.5 s, holds; auto-capture on; shutter at 9 s (F1 on odd seeds, F2 on even)",
+  build(rng, { seed, size, family }) {
+    const { scene, found } = framedScene(seed, size, family, 0.06);
+    const rest = scene.camera;
+    const far = framingCamera(rng.fork("far"), scene.frame, found.layer, { coverage: rng.range(0.07, 0.1), tilt: [0, 12] });
+    return {
+      scene,
+      duration: 10000,
+      autoCapture: true,
+      camera: [
+        { t: 0, pose: far },
+        { t: 4500, pose: far },
+        { t: 6000, pose: rest },
+      ],
+      tremor: [{ t: 0, amplitude: 0.003 }],
+      actions: [{ at: 9000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        tapAt: 9000,
+        hints: [{ name: "too far", from: 900, to: 4450, expect: ["move-closer"], conditionFrom: 0 }],
+        ready: [{ from: 6000, to: 8950 }],
+        stable: [6000],
+        tremor: [],
+      },
+    };
+  },
+});
+
+registerSession({
+  id: "cut-off",
+  title: "part of the page outside the frame, then backing off",
+  inDefault: false,
+  group: "guidance",
+  describe:
+    "held still too close, one or two corners outside the frame, for 4.5 s; backs off over 1.5 s until the page is whole, holds; auto-capture on; shutter at 9 s",
+  build(rng, { seed, size, family }) {
+    const { scene, found } = framedScene(seed, size, family, 0.06);
+    const cut = rng.fork("cut");
+    const close = partialCamera(cut, scene.frame, found.layer, { coverage: cut.range(0.5, 0.7), cut: cut.chance(0.5) ? 1 : 2 });
+    return {
+      scene,
+      duration: 10000,
+      autoCapture: true,
+      camera: [
+        { t: 0, pose: close },
+        { t: 4500, pose: close },
+        { t: 6000, pose: scene.camera },
+      ],
+      tremor: [{ t: 0, amplitude: 0.003 }],
+      actions: [{ at: 9000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        tapAt: 9000,
+        partialFrom: 500,
+        partialTo: 4450,
+        hints: [{ name: "cut off", from: 900, to: 4450, expect: ["move-back"], conditionFrom: 0 }],
+        ready: [{ from: 6000, to: 8950 }],
+        stable: [6000],
+        tremor: [],
+      },
+    };
+  },
+});
+
+registerSession({
+  id: "low-light",
+  title: "the light goes down on a framed page",
+  inDefault: false,
+  group: "guidance",
+  describe:
+    "framed and held still in a dim room (exposure ×0.06–0.1) for 6 s — auto-capture on, and none is owed while the hint is up; the light comes back over 0.5 s and the page is held; shutter at 9.5 s",
+  build(rng, { seed, size, family }) {
+    const { scene } = framedScene(seed, size, family, 0.06);
+    const dim = rng.fork("dim").range(0.06, 0.1);
+    return {
+      scene,
+      duration: 10500,
+      autoCapture: true,
+      camera: [{ t: 0, pose: scene.camera }],
+      tremor: [{ t: 0, amplitude: 0.003 }],
+      light: [
+        { t: 0, exposure: dim, gradient: 0.05 },
+        { t: 6000, exposure: dim, gradient: 0.05 },
+        { t: 6500, exposure: 1, gradient: 0 },
+      ],
+      actions: [{ at: 9500, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        tapAt: 9500,
+        lightAt: 6000,
+        hints: [{ name: "low light", from: 900, to: 5950, expect: ["low-light"], conditionFrom: 0 }],
+        ready: [{ from: 6800, to: 9450 }],
+        stable: [6500],
+        tremor: [],
+      },
+    };
+  },
+});
+
+registerSession({
+  id: "glare",
+  title: "a lamp's reflection on the page, then tilted away",
+  inDefault: false,
+  group: "guidance",
+  describe:
+    "framed and held still with a lamp's hot spot washing out part of the page (auto-capture on: none is owed while the hint is up) until 5.5 s, when the phone is tilted out of it (it fades over 0.3 s); holds; shutter at 9 s",
+  build(rng, { seed, size, family }) {
+    const { scene, found } = framedScene(seed, size, family, 0.06);
+    const lamp = rng.fork("lamp");
+    const camera = cameraFromPose(scene.camera, scene.frame);
+    const c = project(camera, [found.layer.center[0], found.layer.center[1], -(found.layer.height ?? 0)]);
+    const reach = Math.min(scene.frame.width, scene.frame.height);
+    const blob = {
+      kind: "glare",
+      center: [c.u + lamp.range(-0.12, 0.12) * reach, c.v + lamp.range(-0.12, 0.12) * reach],
+      radius: [reach * lamp.range(0.14, 0.2), reach * lamp.range(0.1, 0.16)],
+      angle: lamp.range(0, 180),
+      strength: lamp.range(1.1, 1.4),
+      softness: lamp.range(0.3, 0.5),
+    };
+    return {
+      scene,
+      duration: 10000,
+      autoCapture: true,
+      camera: [{ t: 0, pose: scene.camera }],
+      tremor: [{ t: 0, amplitude: 0.003 }],
+      glare: [{ from: -300, to: 5500, fadeMs: 300, blob }],
+      actions: [{ at: 9000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        tapAt: 9000,
+        glareTo: 5500,
+        hints: [{ name: "glare", from: 900, to: 5450, expect: ["glare"], conditionFrom: 0 }],
+        ready: [{ from: 5800, to: 8950 }],
+        stable: [5800],
+        tremor: [],
+      },
+    };
+  },
+});
+
+registerSession({
+  id: "shaky-hold",
+  title: "a shaking hand, then a steady one",
+  inDefault: false,
+  group: "guidance",
+  describe:
+    "framed; a strong handheld tremor (1.5 % RMS) for 4.5 s, then the hand steadies (0.3 %) and holds; auto-capture on (none may fire while it shakes); shutter at 9 s",
+  build(rng, { seed, size, family }) {
+    const { scene } = framedScene(seed, size, family, 0.1);
+    return {
+      scene,
+      duration: 10000,
+      autoCapture: true,
+      camera: [{ t: 0, pose: scene.camera }],
+      tremor: [
+        { t: 0, amplitude: 0.015 },
+        { t: 4500, amplitude: 0.015 },
+        { t: 5000, amplitude: 0.003 },
+      ],
+      actions: [{ at: 9000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        tapAt: 9000,
+        lockFrom: 0,
+        hints: [{ name: "shaking", from: 900, to: 4450, expect: ["hold-still"], conditionFrom: 0 }],
+        ready: [{ from: 5300, to: 8950 }],
+        stable: [5000],
+        tremor: [{ from: 0, to: 4700 }],
+      },
+    };
+  },
+});
+
+registerSession({
+  id: "tremor-hold-auto",
+  title: "tremor-hold with auto-capture on",
+  inDefault: false,
+  group: "guidance",
+  describe: "tremor-hold (a 1.2 % tremor, a thumb, the light dropping) with auto-capture on: no automatic capture may fire",
+  build(rng, { seed, size, family }) {
+    const base = sessions.get("tremor-hold").build(rng, { seed, size, family });
+    return { ...base, autoCapture: true, marks: { ...base.marks, hints: [], ready: [], stable: [], tremor: [{ from: 0, to: base.duration }] } };
+  },
+});
+
+registerSession({
+  id: "page-swap-auto",
+  title: "page-swap with auto-capture on",
+  inDefault: false,
+  group: "guidance",
+  describe: "page-swap with auto-capture on: one automatic capture of each page, and the shutter on the new one",
+  build(rng, { seed, size, family }) {
+    const base = sessions.get("page-swap").build(rng, { seed, size, family });
+    // The swap's own measures (stale overlay, the hold after it) are page-swap's:
+    // here the first page's automatic capture puts its confirm screen over the swap.
+    const { swapAt, swapDoneAt, lockFrom2, holdTo2, holdFrom, lockFrom, holdTo, ...marks } = base.marks;
+    return {
+      ...base,
+      autoCapture: true,
+      marks: {
+        ...marks,
+        hints: [],
+        ready: [
+          { from: lockFrom, to: holdTo },
+          { from: lockFrom2, to: holdTo2 },
+        ],
+        stable: [lockFrom, lockFrom2],
+        tremor: [],
+        pages: 2,
+      },
+    };
+  },
+});
+
+/** A page-less session with auto-capture on: the hint owed is "searching", and every automatic capture is a false fire. */
+function pagelessAuto(id, base, title, describe) {
+  registerSession({
+    id,
+    title,
+    inDefault: false,
+    group: "guidance",
+    describe,
+    build(rng, options) {
+      const built = sessions.get(base).build(rng, options);
+      return {
+        ...built,
+        autoCapture: true,
+        marks: {
+          ...built.marks,
+          hints: [{ name: "no page", from: 600, to: built.marks.negativeTo, expect: SEARCHING, conditionFrom: 0 }],
+          ready: [],
+          stable: [],
+          tremor: [],
+          pageless: true,
+        },
+      };
+    },
+  });
+}
+
+pagelessAuto("empty-desk-auto", "empty-desk-sweep", "empty-desk-sweep with auto-capture on", "empty-desk-sweep with auto-capture on: no automatic capture may fire");
+pagelessAuto("lookalikes-auto", "paper-lookalikes", "paper-lookalikes with auto-capture on", "paper-lookalikes (a white laptop, place mat, box and book, each framed 1.8 s) with auto-capture on: no automatic capture may fire");
+
+registerSession({
+  id: "desk-hold",
+  title: "held still over a desk with no page",
+  inDefault: false,
+  describe: "an F6 scene (a laptop, a notebook, a place mat, a keyboard or clutter, no document) held still with a light tremor for 9 s; shutter at 9 s",
+  build(rng, { seed, size }) {
+    const scene = buildScene("F6", seed, { size });
+    return {
+      scene,
+      duration: 10000,
+      camera: [{ t: 0, pose: scene.camera }],
+      tremor: [{ t: 0, amplitude: 0.003 }],
+      primary: [{ t: 0, page: 0 }],
+      actions: [{ at: 9000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: { negativeFrom: 0, negativeTo: 8950, tapAt: 9000 },
+    };
+  },
+});
+
+pagelessAuto("desk-hold-auto", "desk-hold", "desk-hold with auto-capture on", "an F6 desk with no page held still for 9 s with auto-capture on: no automatic capture may fire");
+
 /** A pose at `t` as a camera, for code that needs the matrices. */
 export function cameraAt(script, t, frame = script.frame, focalPixels) {
   const pose = poseAt(script, t);
   return cameraFromPose(focalPixels === undefined ? pose : { ...pose, focalPixels }, frame);
 }
+
+/* ── breaker sessions (Phase 4 adversarial: auto-capture and hint churn) ── */
+
+/*
+ * The `breaker` group — **not in a plain run**; `--session breaker` runs it.
+ * Every session has auto-capture on. Besides the guidance marks
+ * (`scoreGuidance`), each may carry `marks.noFire` —
+ * `[{ name, from, to }]`: windows where an automatic capture would take a
+ * bad image (a page cut off, a hot spot on it, the page still moving) — read
+ * by the analysis that goes with the group (the guidance table counts only
+ * `marks.tremor`, used here for motion).
+ */
+
+/**
+ * The viewfinder's crop of the 720×1280 portrait stream on the bench's
+ * 390×844 phone (object-cover: 7.5 % hidden top and bottom), as the app
+ * measures it (`camera-live`'s `visible`).
+ */
+const VIEW_CROP = { x: 0, y: 0.075, width: 1, height: 0.85 };
+
+/** A layer as the viewfinder shows it from `pose`: its nearest corner's margin and its share of the view. */
+function inView(pose, frame, layer) {
+  const camera = cameraFromPose(pose, frame);
+  const pts = projectRect(camera, layer).map((p) => [
+    (p.u / frame.width - VIEW_CROP.x) / VIEW_CROP.width,
+    (p.v / frame.height - VIEW_CROP.y) / VIEW_CROP.height,
+  ]);
+  const margin = Math.min(...pts.map(([x, y]) => Math.min(x, 1 - x, y, 1 - y)));
+  const inside = clipPolygon(pts, [
+    [0, 0],
+    [1, 0],
+    [1, 1],
+    [0, 1],
+  ]);
+  const area = inside.length >= 3 ? polygonArea(inside) : 0;
+  const whole = polygonArea(pts);
+  return { margin, area, inShare: whole > 0 ? area / whole : 0, center: pts.reduce((s, [x, y]) => [s[0] + x / 4, s[1] + y / 4], [0, 0]) };
+}
+
+/** Bisect `f` in [0, 1] so that `measure(f)` (monotonic) meets `target`. */
+function solveFor(measure, target, increasing) {
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 40; i += 1) {
+    const mid = (lo + hi) / 2;
+    const v = measure(mid);
+    if ((v < target) === increasing) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+/** Keyframes that hold `hold` until `from`, then swing `x`, `y`, `x`, … one every `halfMs` until `to`. */
+function swing(hold, x, y, from, to, halfMs, key = "pose") {
+  const keys = [{ t: 0, [key]: hold }, { t: from, [key]: hold }];
+  let at = from;
+  let flip = true;
+  while (at + halfMs <= to) {
+    at += halfMs;
+    keys.push({ t: at, [key]: flip ? x : y });
+    flip = !flip;
+  }
+  return keys;
+}
+
+const NO_GUIDANCE = { hints: [], ready: [], stable: [], tremor: [], noFire: [] };
+
+registerSession({
+  id: "still-lookalikes-auto",
+  title: "white things that are not paper, each held still 3.6 s",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "no document: a closed white laptop, a white place mat, a white box, a cream book and a white cutting board, then a white plastic folder, each framed and held still (0.25 % tremor) 3.6 s on one desk; auto-capture on: every automatic capture is a false fire",
+  build(rng, { seed, size }) {
+    const base = buildScene("F6", seed, { size });
+    const deskRng = rng.fork("desk");
+    const kind = deskRng.pick(["wood", "granite", "grey", "fabric"]);
+    const background =
+      kind === "wood" ? lightWood(deskRng) : kind === "granite" ? darkGranite(deskRng) : kind === "grey" ? paleTable(deskRng, { grey: true }) : fabric(deskRng);
+    const extra = rng.fork("extra");
+    const props = [
+      ...lookalikes(rng.fork("props")),
+      prop("board", { material: "laminate", color: extra.pick(["#f2f2ee", "#ececea", "#f4f3ef"]), mottle: 0.02, speckle: 0.01, streak: 0.02, streakAngle: extra.range(0, 180), sheen: 0.03, seed: extra.seed32() }, {
+        center: [0, 0], rotation: 0, size: [extra.range(280, 320), extra.range(200, 230)], radius: extra.range(4, 10), height: 3, shadowStrength: 0.3,
+      }),
+      prop("folder", { material: "plastic", body: extra.pick(["#e9e9e6", "#f0efeb"]), sheen: extra.range(0.2, 0.6), spine: "#dcdcd8", spineWidth: 0, sheenAngle: extra.range(0, 180), peel: 0.08, crease: 10, seed: extra.seed32() }, {
+        center: [0, 0], rotation: 0, size: [235, 320], radius: 3, height: 1.5, shadowStrength: 0.3,
+      }),
+    ];
+    const spots = props.map((_, i) => [(i - 2.5) * 560, (i % 2) * 120]);
+    const placed = props.map((p, i) => ({ ...p, center: spots[i], rotation: rng.range(-20, 20) }));
+    const scene = { ...base, setting: "still-lookalikes", desk: kind, background, layers: placed };
+    const cameraRng = rng.fork("camera");
+    const keys = [];
+    const hold = 3600;
+    const move = 800;
+    placed.forEach((layer, i) => {
+      const pose = framingCamera(cameraRng, scene.frame, layer, { coverage: cameraRng.range(0.25, 0.5), tilt: [0, 15], marginFraction: 0.1 });
+      const arrive = i * (hold + move);
+      keys.push({ t: arrive, pose }, { t: arrive + hold, pose });
+    });
+    scene.camera = keys[0].pose;
+    const duration = placed.length * (hold + move);
+    return {
+      scene,
+      duration,
+      autoCapture: true,
+      camera: keys,
+      tremor: [{ t: 0, amplitude: 0.0025 }],
+      primary: [{ t: 0, page: 0 }],
+      actions: [{ at: duration - 700, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        ...NO_GUIDANCE,
+        negativeFrom: 0,
+        negativeTo: duration - 750,
+        tapAt: duration - 700,
+        hints: [{ name: "no page", from: 600, to: duration - 750, expect: SEARCHING, conditionFrom: 0 }],
+        pageless: true,
+        objects: placed.map((p, i) => ({ name: p.name, from: i * (hold + move), to: i * (hold + move) + hold })),
+      },
+    };
+  },
+});
+
+registerSession({
+  id: "screen-page-auto",
+  title: "a page shown on a phone and on a tablet",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "a phone and then a tablet lying screen up, each showing a document page (fit to the screen's width, black around it), each framed and held still 4.5 s; auto-capture on; counted page-less (a screen is not the paper): every automatic capture is a false fire",
+  build(rng, { seed, size }) {
+    const base = buildScene("F6", seed, { size });
+    const deskRng = rng.fork("desk");
+    const kind = deskRng.pick(["wood", "granite", "grey", "fabric"]);
+    const background =
+      kind === "wood" ? lightWood(deskRng) : kind === "granite" ? darkGranite(deskRng) : kind === "grey" ? paleTable(deskRng, { grey: true }) : fabric(deskRng);
+    const dev = rng.fork("devices");
+    const device = (name, center, bodySize) =>
+      prop(name, { material: "phone", body: dev.pick(["#101114", "#2b2d31"]), screenUp: true, reflection: dev.range(0.1, 0.4), reflectionAngle: dev.range(0, 180), seed: dev.seed32() }, {
+        center, rotation: 0, size: bodySize, radius: name === "phone" ? 9 : 12, height: name === "phone" ? 8.5 : 7, shadowStrength: 0.5,
+      });
+    const shown = (center, width, deviceHeight) => {
+      const p = page(dev.fork(`page-${center[0]}`), { type: dev.pick(["lab-report", "letter", "form"]), center, curl: 0 });
+      const height = width * (p.size[1] / p.size[0]);
+      return {
+        ...p,
+        size: [width, height],
+        material: { ...p.material, tint: dev.pick(["#f7f9ff", "#fbfbff", "#f4f6fb"]), fibre: 0, edge: 0 },
+        height: deviceHeight + 0.2,
+        shadowHeight: 0,
+        shadowStrength: 0,
+        wobble: 0,
+      };
+    };
+    const rot = rng.range(-20, 20);
+    const phoneAt = [-400, 0];
+    const tabletAt = [400, 0];
+    const layers = [
+      device("phone", phoneAt, [72, 150]),
+      { ...shown(phoneAt, 66, 8.5), rotation: 0 },
+      device("tablet", tabletAt, [178, 250]),
+      { ...shown(tabletAt, 162, 7), rotation: 0 },
+    ].map((l) => ({ ...l, rotation: rot }));
+    const scene = { ...base, setting: "screen-page", desk: kind, background, layers };
+    const cameraRng = rng.fork("camera");
+    const p1 = framingCamera(cameraRng, scene.frame, layers[0], { coverage: cameraRng.range(0.2, 0.35), tilt: [0, 12], marginFraction: 0.1 });
+    const p2 = framingCamera(cameraRng, scene.frame, layers[2], { coverage: cameraRng.range(0.3, 0.5), tilt: [0, 12], marginFraction: 0.1 });
+    scene.camera = p1;
+    return {
+      scene,
+      duration: 10000,
+      autoCapture: true,
+      camera: [
+        { t: 0, pose: p1 },
+        { t: 4500, pose: p1 },
+        { t: 5300, pose: p2 },
+      ],
+      tremor: [{ t: 0, amplitude: 0.0025 }],
+      primary: [
+        { t: 0, page: 0 },
+        { t: 4900, page: 1 },
+      ],
+      actions: [{ at: 9300, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        ...NO_GUIDANCE,
+        tapAt: 9300,
+        hints: [
+          { name: "phone screen", from: 600, to: 4450, expect: SEARCHING, conditionFrom: 0 },
+          { name: "tablet screen", from: 5900, to: 9250, expect: SEARCHING, conditionFrom: 5300 },
+        ],
+        pageless: true,
+      },
+    };
+  },
+});
+
+registerSession({
+  id: "half-out-auto",
+  title: "a printed page half out of the frame, held still",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "held still with about half of the page outside the view (two corners gone) for 6.5 s — \"Afaste um pouco\" owed and no automatic capture; backs off over 1 s, holds; shutter at 10 s",
+  build(rng, { seed, size, family }) {
+    const { scene, found } = framedScene(seed, size, family, 0.06);
+    const rest = scene.camera;
+    const cut = rng.fork("cut");
+    const bearing = cut.range(0, Math.PI * 2);
+    const share = cut.range(0.4, 0.65);
+    const reach = Math.max(...found.layer.size) * 1.2;
+    const shifted = (f) => ({ ...rest, target: [rest.target[0] + Math.cos(bearing) * reach * f, rest.target[1] + Math.sin(bearing) * reach * f] });
+    const f = solveFor((x) => inView(shifted(x), scene.frame, found.layer).inShare, share, false);
+    const out = shifted(f);
+    return {
+      scene,
+      duration: 11000,
+      autoCapture: true,
+      camera: [
+        { t: 0, pose: out },
+        { t: 6500, pose: out },
+        { t: 7500, pose: rest },
+      ],
+      tremor: [{ t: 0, amplitude: 0.003 }],
+      actions: [{ at: 10000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        ...NO_GUIDANCE,
+        tapAt: 10000,
+        inShare: share,
+        hints: [{ name: "half out", from: 900, to: 6450, expect: ["move-back"], conditionFrom: 0 }],
+        ready: [{ from: 7800, to: 9950 }],
+        stable: [7500],
+        noFire: [{ name: "half out", from: 0, to: 7200 }],
+      },
+    };
+  },
+});
+
+registerSession({
+  id: "overlap-auto",
+  title: "two pages overlapping, the top one is the scan",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "a second page laid over the first, offset 15–50 % of its size, both in view, held still 9 s; the top page is the one being scanned — an automatic capture of the bottom page or of both together is wrong; shutter at 9 s",
+  build(rng, { seed, size, family }) {
+    const { scene, found } = framedScene(seed, size, family, 0.06);
+    const under = found.layer;
+    const lay = rng.fork("overlap");
+    const bearing = lay.range(0, Math.PI * 2);
+    const offset = lay.range(0.15, 0.5) * Math.min(...under.size);
+    const top = page(lay.fork("page"), {
+      type: lay.pick(["lab-report", "lab-report", "form", "letter", "note"]),
+      center: [under.center[0] + Math.cos(bearing) * offset, under.center[1] + Math.sin(bearing) * offset],
+      rotation: (under.rotation ?? 0) + lay.range(-15, 15),
+      height: under.height,
+      curl: 0,
+    });
+    const docsBefore = scene.layers.filter((l) => l.document !== undefined).length;
+    scene.layers = [...scene.layers, top];
+    // Framed on both pages together (their outline's bounding box), then backed off until each is whole.
+    const corners = [under, top].flatMap((l) => {
+      const a = ((l.rotation ?? 0) * Math.PI) / 180;
+      return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => {
+        const x = (sx * l.size[0]) / 2;
+        const y = (sy * l.size[1]) / 2;
+        return [l.center[0] + Math.cos(a) * x - Math.sin(a) * y, l.center[1] + Math.sin(a) * x + Math.cos(a) * y];
+      });
+    });
+    const xs = corners.map((c) => c[0]);
+    const ys = corners.map((c) => c[1]);
+    const both = { center: [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2], size: [Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)], rotation: 0 };
+    let pose = framingCamera(lay.fork("camera"), scene.frame, both, { coverage: 0.6, tilt: [0, 12], aimSpread: 5, marginFraction: 0.04 });
+    pose = withMargin(pose, scene.frame, under, 0.04);
+    pose = withMargin(pose, scene.frame, top, 0.04);
+    scene.camera = pose;
+    return {
+      scene,
+      duration: 10000,
+      autoCapture: true,
+      camera: [{ t: 0, pose }],
+      tremor: [{ t: 0, amplitude: 0.003 }],
+      primary: [{ t: 0, page: docsBefore }],
+      actions: [{ at: 9000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: { ...NO_GUIDANCE, tapAt: 9000, stable: [0], ready: [{ from: 1500, to: 8950 }], offset: offset / Math.min(...under.size) },
+    };
+  },
+});
+
+registerSession({
+  id: "slow-drift-auto",
+  title: "the page never quite stops: a slow, steady pan",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "framed; from 0.6 s the camera pans steadily across the page for 6 s at 0.8–3.2 % of the diagonal a second (by seed), then stops and holds; any automatic capture during the pan is a fire during motion; shutter at 9.5 s",
+  build(rng, { seed, size, family }) {
+    const { scene, found } = framedScene(seed, size, family, 0.2);
+    const rest = scene.camera;
+    const speeds = [0.008, 0.012, 0.018, 0.025, 0.032];
+    const want = speeds[(seed - 1 + speeds.length * 10) % speeds.length];
+    const drift = rng.fork("drift");
+    const bearing = drift.range(0, Math.PI * 2);
+    const at = (mm) => ({ ...rest, target: [rest.target[0] + Math.cos(bearing) * mm, rest.target[1] + Math.sin(bearing) * mm] });
+    const diag = Math.hypot(1, (scene.frame.height * VIEW_CROP.height) / scene.frame.width);
+    const moveMs = 6000;
+    // Travel (mm) for the wanted speed: measured on the view, not assumed.
+    const c0 = inView(rest, scene.frame, found.layer).center;
+    const c1 = inView(at(10), scene.frame, found.layer).center;
+    const perMm = Math.hypot(c1[0] - c0[0], (c1[1] - c0[1]) * ((scene.frame.height * VIEW_CROP.height) / scene.frame.width)) / 10 / diag;
+    let travel = (want * moveMs) / 1000 / perMm;
+    while (travel > 1 && (inView(at(-travel / 2), scene.frame, found.layer).margin < 0.03 || inView(at(travel / 2), scene.frame, found.layer).margin < 0.03)) travel *= 0.95;
+    const speed = (travel * perMm * 1000) / moveMs;
+    const keys = [{ t: 0, pose: at(-travel / 2) }, { t: 600, pose: at(-travel / 2) }];
+    const frames = Math.round(moveMs / SESSION_FRAME_MS);
+    for (let i = 1; i <= frames; i += 1) keys.push({ t: 600 + i * SESSION_FRAME_MS, pose: at(-travel / 2 + (travel * i) / frames) });
+    scene.camera = keys[0].pose;
+    return {
+      scene,
+      duration: 10500,
+      autoCapture: true,
+      camera: keys,
+      tremor: [{ t: 0, amplitude: 0.002 }],
+      actions: [{ at: 9500, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        ...NO_GUIDANCE,
+        tapAt: 9500,
+        driftSpeed: speed,
+        stable: [0, 6600],
+        ready: [{ from: 7000, to: 9450 }],
+        tremor: [{ from: 700, to: 6600 }],
+        noFire: [{ name: "drifting", from: 700, to: 6600 }],
+      },
+    };
+  },
+});
+
+registerSession({
+  id: "hand-rest-auto",
+  title: "a hand resting on the page, held still",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "framed and held still 9 s with a hand resting on the page the whole time (fingertip 20–45 % of the short side in from an edge) and a thumb holding a corner; auto-capture on; shutter at 9 s",
+  build(rng, { seed, size, family }) {
+    const { scene, found } = roomyScene(seed, size, family, 0.08);
+    const hand = handOver(rng.fork("hand"), found.layer, { reach: [0.2, 0.45] });
+    const thumb = thumbOn(rng.fork("thumb"), found.layer);
+    return {
+      scene,
+      duration: 10000,
+      autoCapture: true,
+      camera: [{ t: 0, pose: scene.camera }],
+      tremor: [{ t: 0, amplitude: 0.003 }],
+      finger: { ...thumb, enterAt: -2000, leaveAt: 60000, slideMs: 300 },
+      fingers: [{ ...hand, enterAt: -2000, leaveAt: 60000, slideMs: 300 }],
+      actions: [{ at: 9000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: { ...NO_GUIDANCE, tapAt: 9000, stable: [0], ready: [{ from: 1500, to: 8950 }] },
+    };
+  },
+});
+
+registerSession({
+  id: "dim-page-auto",
+  title: "a page in a dim room, just above the low-light line",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "framed and held still 9 s in a dim room (exposure ×0.12–0.26 by seed: around the low-light hint's threshold); auto-capture on; the hint may be \"Pouca luz\" or none, nothing else; shutter at 9 s",
+  build(rng, { seed, size, family }) {
+    const { scene } = framedScene(seed, size, family, 0.06);
+    const levels = [0.12, 0.15, 0.18, 0.22, 0.26];
+    const dim = levels[(seed - 1 + levels.length * 10) % levels.length];
+    return {
+      scene,
+      duration: 10000,
+      autoCapture: true,
+      camera: [{ t: 0, pose: scene.camera }],
+      tremor: [{ t: 0, amplitude: 0.003 }],
+      light: [{ t: 0, exposure: dim, gradient: 0.05 }],
+      actions: [{ at: 9000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        ...NO_GUIDANCE,
+        tapAt: 9000,
+        exposure: dim,
+        hints: [{ name: "dim page", from: 900, to: 8950, expect: ["low-light", null], conditionFrom: 0 }],
+        stable: [0],
+      },
+    };
+  },
+});
+
+registerSession({
+  id: "dim-desk-auto",
+  title: "a desk with no page in a dim room, held still",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "an F6 desk (a laptop, notebook, place mat, keyboard or clutter, no document) held still 9 s in a dim room (exposure ×0.15–0.3); auto-capture on: every automatic capture is a false fire",
+  build(rng, { seed, size }) {
+    const scene = buildScene("F6", seed + 100, { size });
+    const dim = rng.fork("dim").range(0.15, 0.3);
+    return {
+      scene,
+      duration: 10000,
+      autoCapture: true,
+      camera: [{ t: 0, pose: scene.camera }],
+      tremor: [{ t: 0, amplitude: 0.003 }],
+      light: [{ t: 0, exposure: dim, gradient: 0.05 }],
+      primary: [{ t: 0, page: 0 }],
+      actions: [{ at: 9000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        ...NO_GUIDANCE,
+        negativeFrom: 0,
+        negativeTo: 8950,
+        tapAt: 9000,
+        exposure: dim,
+        hints: [{ name: "no page (dim)", from: 600, to: 8950, expect: [...SEARCHING, "low-light"], conditionFrom: 0 }],
+        pageless: true,
+      },
+    };
+  },
+});
+
+registerSession({
+  id: "glare-sweep-auto",
+  title: "a lamp's reflection sweeping across a still page",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "framed and held still with a lamp's hot spot on the page from the start (a third of the way in from one side); it slides across and off the page by 7.5 s; then no glare; auto-capture on — any automatic capture while the spot is on the page took it; shutter at 10 s",
+  build(rng, { seed, size, family }) {
+    const { scene, found } = framedScene(seed, size, family, 0.06);
+    const lamp = rng.fork("lamp");
+    const camera = cameraFromPose(scene.camera, scene.frame);
+    const quad = projectRect(camera, found.layer).map((p) => [p.u, p.v]);
+    const c = quad.reduce((s, [u, v]) => [s[0] + u / 4, s[1] + v / 4], [0, 0]);
+    const reach = Math.min(scene.frame.width, scene.frame.height);
+    const bearing = lamp.range(0, Math.PI * 2);
+    const span = Math.max(...quad.map(([u, v]) => Math.hypot(u - c[0], v - c[1]))) * 1.25;
+    // It starts on the page (a third of the way in from one side), so the ready cue and the countdown meet it.
+    const from = [c[0] - Math.cos(bearing) * span * 0.35, c[1] - Math.sin(bearing) * span * 0.35];
+    const to = [c[0] + Math.cos(bearing) * span, c[1] + Math.sin(bearing) * span];
+    const shape = {
+      kind: "glare",
+      radius: [reach * lamp.range(0.1, 0.16), reach * lamp.range(0.08, 0.13)],
+      angle: lamp.range(0, 180),
+      strength: lamp.range(1.1, 1.5),
+      softness: lamp.range(0.3, 0.5),
+    };
+    const startMs = -300;
+    const endMs = 7500;
+    const steps = Math.round((endMs - startMs) / SESSION_FRAME_MS);
+    const glare = [];
+    const inside = (p) => {
+      let sign = 0;
+      for (let i = 0; i < 4; i += 1) {
+        const a = quad[i];
+        const b = quad[(i + 1) % 4];
+        const s = Math.sign((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]));
+        if (sign === 0) sign = s;
+        else if (s !== 0 && s !== sign) return false;
+      }
+      return true;
+    };
+    let onFrom = null;
+    let onTo = null;
+    for (let i = 0; i < steps; i += 1) {
+      const f = i / (steps - 1);
+      const center = [from[0] + (to[0] - from[0]) * f, from[1] + (to[1] - from[1]) * f];
+      const t = startMs + i * SESSION_FRAME_MS;
+      glare.push({ from: t, to: t + SESSION_FRAME_MS - 0.001, fadeMs: 0, blob: { ...shape, center } });
+      if (inside(center)) {
+        onFrom ??= t;
+        onTo = t + SESSION_FRAME_MS;
+      }
+    }
+    onFrom = Math.max(0, onFrom ?? 0);
+    onTo ??= endMs;
+    return {
+      scene,
+      duration: 11000,
+      autoCapture: true,
+      camera: [{ t: 0, pose: scene.camera }],
+      tremor: [{ t: 0, amplitude: 0.003 }],
+      glare,
+      actions: [{ at: 10000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        ...NO_GUIDANCE,
+        tapAt: 10000,
+        hints: [{ name: "glare on page", from: onFrom + 500, to: onTo, expect: ["glare"], conditionFrom: onFrom }],
+        ready: [{ from: 8000, to: 9950 }],
+        stable: [0, endMs],
+        noFire: [{ name: "spot on page", from: onFrom, to: onTo }],
+      },
+    };
+  },
+});
+
+registerSession({
+  id: "hover-far",
+  title: "the page's size hovering at the too-far line",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "held 4 s with the page at 15.5 % of the view (inside the too-far hint's hysteresis band), then the distance swings between 11.5 % and 19.5 % every second until 12 s; the hint may be \"Aproxime\" or none, and should change seldom; auto-capture on",
+  build(rng, { seed, size, family }) {
+    const { scene, found } = framedScene(seed, size, family, 0.06);
+    const base = framingCamera(rng.fork("aim"), scene.frame, found.layer, { coverage: 0.14, tilt: [0, 10], aimSpread: 5, marginFraction: 0.1 });
+    const at = (f) => ({ ...base, distance: base.distance * Math.exp(lerp(Math.log(0.6), Math.log(2.2), f)) });
+    const pose = (share) => at(solveFor((f) => inView(at(f), scene.frame, found.layer).area, share, false));
+    const mid = pose(0.155);
+    return {
+      scene,
+      duration: 13000,
+      autoCapture: true,
+      camera: swing(mid, pose(0.115), pose(0.195), 4000, 12000, 1000),
+      tremor: [{ t: 0, amplitude: 0.004 }],
+      actions: [],
+      marks: { ...NO_GUIDANCE, hints: [{ name: "hover far", from: 900, to: 12000, expect: ["move-closer", null], conditionFrom: 0 }] },
+    };
+  },
+});
+
+registerSession({
+  id: "hover-edge",
+  title: "a corner hovering at the cut-off line",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "held 4 s with the nearest corner 2.2 % inside the view's edge (inside the cut-off hint's hysteresis band), then swings between 0.4 % and 4 % inside every 0.9 s until 12 s; the page is whole throughout; the hint may be \"Afaste um pouco\" or none; auto-capture on",
+  build(rng, { seed, size, family }) {
+    const { scene, found } = framedScene(seed, size, family, 0.06);
+    const whole = scene.camera;
+    const close = partialCamera(rng.fork("cut"), scene.frame, found.layer, { coverage: 0.4, cut: 1 });
+    const pose = (m) => lerpPose(whole, close, solveFor((f) => inView(lerpPose(whole, close, f), scene.frame, found.layer).margin, m, false));
+    const mid = pose(0.022);
+    const keys = swing(mid, pose(0.004), pose(0.04), 4000, 12000, 900);
+    return {
+      scene,
+      duration: 13000,
+      autoCapture: true,
+      camera: keys,
+      tremor: [{ t: 0, amplitude: 0.004 }],
+      actions: [],
+      marks: { ...NO_GUIDANCE, hints: [{ name: "hover edge", from: 900, to: 12000, expect: ["move-back", null], conditionFrom: 0 }] },
+    };
+  },
+});
+
+registerSession({
+  id: "hover-light",
+  title: "the light hovering at the low-light line",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "framed and held still; the exposure swings between ×0.12 and ×0.3 every 1.2 s until 6 s, then flickers between ×0.13 and ×0.28 every 150–300 ms until 12 s — across the low-light hint's threshold; the hint may be \"Pouca luz\" or none, and should change seldom; auto-capture on",
+  build(rng, { seed, size, family }) {
+    const { scene } = framedScene(seed, size, family, 0.06);
+    const flick = rng.fork("flicker");
+    const lo = { exposure: 0.12, gradient: 0.05 };
+    const light = swing(lo, { exposure: 0.3, gradient: 0.05 }, lo, 0, 6000, 1200, "value").map((k) => ({ t: k.t, ...k.value }));
+    let t = 6000;
+    let hi = false;
+    while (t < 12000) {
+      t += flick.range(150, 300);
+      light.push({ t, exposure: hi ? 0.28 : 0.13, gradient: 0.05 });
+      hi = !hi;
+    }
+    return {
+      scene,
+      duration: 13000,
+      autoCapture: true,
+      camera: [{ t: 0, pose: scene.camera }],
+      tremor: [{ t: 0, amplitude: 0.003 }],
+      light,
+      actions: [],
+      marks: { ...NO_GUIDANCE, hints: [{ name: "hover light", from: 900, to: 12000, expect: ["low-light", null], conditionFrom: 0 }] },
+    };
+  },
+});
+
+registerSession({
+  id: "whip-off-auto",
+  title: "pulled off the page just as the countdown runs",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "six times: framed on the page and held 0.9–1.9 s (so the ready cue and the auto-capture countdown are under way), then whipped off to bare desk in 200 ms and kept off 1.5 s; auto-capture on — a capture fired while off the page (or on the way) is a false fire / a fire in motion; shutter at the end on the page",
+  build(rng, { seed, size, family }) {
+    const { scene, found } = roomyScene(seed, size, family, 0.08);
+    const rest = scene.camera;
+    const whip = rng.fork("whip");
+    const keys = [{ t: 0, pose: rest }];
+    const tremor = [];
+    const noFire = [];
+    let t = 0;
+    const holds = [900, 1100, 1300, 1500, 1700, 1900];
+    holds.forEach((hold, i) => {
+      const bearing = whip.range(0, Math.PI * 2);
+      const away = Math.max(...found.layer.size) * whip.range(1.4, 1.8);
+      const off = { ...rest, target: [rest.target[0] + Math.cos(bearing) * away, rest.target[1] + Math.sin(bearing) * away] };
+      if (i > 0) {
+        keys.push({ t: t + 250, pose: rest });
+        t += 250;
+      }
+      keys.push({ t: t + hold, pose: rest });
+      t += hold;
+      noFire.push({ name: `whip ${i + 1}`, from: t, to: t + 1700 });
+      keys.push({ t: t + 200, pose: off }, { t: t + 1700, pose: off });
+      t += 1700;
+    });
+    keys.push({ t: t + 250, pose: rest });
+    t += 250;
+    const tapAt = t + 1500;
+    return {
+      scene,
+      duration: tapAt + 1000,
+      autoCapture: true,
+      camera: keys,
+      tremor: [{ t: 0, amplitude: 0.003 }],
+      actions: [{ at: tapAt, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: { ...NO_GUIDANCE, tapAt, stable: keys.filter((k, i) => i > 0 && k.pose === rest && keys[i - 1].pose !== rest).map((k) => k.t), tremor: noFire.map(({ from, to }) => ({ from, to })), noFire },
+    };
+  },
+});

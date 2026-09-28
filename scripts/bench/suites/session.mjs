@@ -32,7 +32,7 @@ import {
   percentile,
   quadDistance,
 } from "../metrics.mjs";
-import { CAPTURE_FAILURES, PAGELESS_CAPTURE, scoreSession, toPoints, UNSCORED_CAPTURE } from "../session-score.mjs";
+import { CAPTURE_FAILURES, hintSeries, PAGELESS_CAPTURE, scoreSession, toPoints, UNSCORED_CAPTURE } from "../session-score.mjs";
 import { COLORS } from "../app/sheets.js";
 
 /** What the bench's phone looks like to the page. */
@@ -49,17 +49,23 @@ export const PHONE = {
 export const DEFAULT_STREAM = "720x1280";
 
 /**
- * The frame-cache key of a session's pre-rendered frames: the script, the
- * stream size, and everything that decides their pixels — the emulator's
- * source, the player's render settings and the browser build. Any change to
- * any of them is another key, so a stale frame is never replayed.
+ * The frame-cache key of a session's pre-rendered frames: the script itself
+ * (as `buildSession` builds it, JSON), the stream size, and everything that
+ * turns a script into pixels — the emulator's source except the session
+ * registry's own scripts (`session.js` up to its first `registerSession`: the
+ * code that plays a script, not the code that writes one — a script change
+ * is already in the script), the player's render settings and the browser
+ * build. Any change to any of them is another key, so a stale frame is never
+ * replayed — and editing one session's script re-renders that session only.
  */
 export function frameCacheKey(id, seed, stream, browserVersion) {
   const hash = createHash("sha256");
   const dir = join(BENCH_DIR, "emulator");
   for (const name of readdirSync(dir).filter((n) => n.endsWith(".js")).sort()) {
-    hash.update(name).update(readFileSync(join(dir, name)));
+    const source = readFileSync(join(dir, name), "utf8");
+    hash.update(name).update(name === "session.js" ? source.slice(0, source.indexOf("registerSession({")) : source);
   }
+  hash.update(JSON.stringify(buildSession(id, seed, { size: stream })));
   hash.update(FRAME_CACHE_VERSION).update(browserVersion);
   return `${id}-${seed}-${stream}-${hash.digest("hex").slice(0, 16)}`;
 }
@@ -201,6 +207,37 @@ function render(results) {
       }
       out.push("");
     }
+    const guided = Object.entries(results.summary).filter(([, { all: a }]) => a.guidance);
+    if (guided.length > 0) {
+      out.push("## Guidance");
+      out.push("");
+      out.push(
+        "The single hint over the viewfinder, the ready cue on the brackets and auto-capture. **Hint windows**: time-weighted share of each scripted " +
+          "condition's window with the expected hint shown / another hint shown (wrong) / none, and the time from the condition's start to the first " +
+          "correct hint (p50; never = not within the window). **Churn**: hint changes per second of live viewfinder, and changes within 1.5 s of the " +
+          "previous one. **Hold hints**: share of the default sessions' framed holds with a hint up. **Ready**: precision = share of cue-on time with " +
+          "the overlay on the page (≤ 2 % diag); recall = share of the scripted ready windows with the cue on; on no page = cue-on ms over a frame with " +
+          "no page. **Auto**: automatic captures, false fires (a page-less session, or no page in the image), fires inside a tremor window, pages that " +
+          "got one, repeat fires on a page, fires where none is owed (a `noFire` window of the breaker sessions — the page cut off, a hot spot on it, still moving — or a window where a hint other than \"searching\" is owed), latency from the scene becoming stable (p50); failed / severe of automatic vs manual captures. **Layout**: " +
+          "viewfinder box samples that moved or resized.",
+      );
+      out.push("");
+      out.push("| session | hint windows: correct / wrong / none (first correct p50 ms) | churn /s (fast) | hold hints | ready precision / recall / on no page ms | auto: fires / false / tremor / pages fired of / repeat / not owed / latency p50 ms | auto failed/severe of n · manual failed/severe of n | layout shifts |");
+      out.push("|---|---|---:|---:|---:|---:|---:|---:|");
+      for (const [session, { all: a }] of guided) {
+        const g = a.guidance;
+        const windows = Object.entries(g.windows)
+          .map(([name, w]) => `${name}: ${pct(w.share, 0)} / ${pct(w.wrongShare, 0)} / ${pct(w.noneShare, 0)} (${w.firstCorrectP50 === null ? "never" : ms(w.firstCorrectP50)}${w.neverCorrect ? `, ${w.neverCorrect} never` : ""})`)
+          .join("<br>");
+        out.push(
+          `| ${session} | ${windows || "–"} | ${g.changesPerSecond === null ? "–" : g.changesPerSecond.toFixed(2)} (${g.fastChanges}) | ${pct(g.holdHintShare, 0)} | ` +
+            `${pct(g.readyPrecision, 0)} / ${pct(g.readyRecall, 0)} / ${ms(g.readyNoPageMs)} | ` +
+            `${g.fires} / ${g.falseFires} / ${g.firesDuringTremor} / ${g.pagesFired} of ${g.pages} / ${g.repeatFires} / ${(g.firesInNoFire ?? 0) + (g.firesInHintWindow ?? 0)} / ${ms(g.fireLatencyP50)} | ` +
+            `${g.autoCaptures.failed}/${g.autoCaptures.severe} of ${g.autoCaptures.captures} · ${g.manualCaptures.failed}/${g.manualCaptures.severe} of ${g.manualCaptures.captures} | ${g.layoutShifts} of ${g.layoutSamples} |`,
+        );
+      }
+      out.push("");
+    }
     out.push("## What it cost");
     out.push("");
     out.push(
@@ -272,6 +309,9 @@ function render(results) {
       out.push(`- hold: shown corners p50 ${diag(s.hold.errorP50)} / p95 ${diag(s.hold.errorP95)} % diag from the page`);
     }
     out.push(`- hints: ${s.hints.map((h) => `${(h.t / 1000).toFixed(1)} s ${h.change}`).join(" · ") || "–"}`);
+    if (s.guidance?.auto.fires.length > 0) {
+      out.push(`- automatic captures: ${s.guidance.auto.fires.map((f) => `${(f.tapAt / 1000).toFixed(2)} s page ${f.page} ${f.verdict}${f.latencyMs === null ? "" : ` (${ms(f.latencyMs)} ms after stable)`}${f.inTremor ? " **in tremor**" : ""}${f.falseFire ? " **false fire**" : ""}`).join(" · ")}`);
+    }
     out.push("");
     if (s.captures.length > 0) {
       out.push(
@@ -305,9 +345,14 @@ function overlayFor(record, n) {
     if (e.type === "overlay" && e.t <= at + 50) overlay = e;
     if (e.type === "detect" && e.accepted && e.frameAt <= at) detect = e;
   }
+  let hint = null;
+  for (const e of hintSeries(record)) if (e.t <= at) hint = e.key;
   return {
     overlay: overlay !== null && overlay.quad !== null && overlay.opacity >= 0.5 ? toPoints(overlay.quad) : null,
     detect: detect === null ? null : { quad: toPoints(detect.quad), source: detect.source },
+    hint,
+    ready: overlay?.ready === true,
+    countdown: overlay?.countdown ?? null,
   };
 }
 
@@ -315,6 +360,9 @@ function filmStrip(script, record, score) {
   const frame = script.frame;
   const times = new Set();
   for (const value of Object.values(script.marks)) if (Number.isFinite(value)) times.add(value + 200);
+  // Guidance sessions: the hint windows' edges and the moments after the scene steadies (the ready cue, a fire).
+  for (const w of script.marks.hints ?? []) times.add(w.from).add(w.to - 100);
+  for (const t of script.marks.stable ?? []) [400, 800, 1200, 1600].forEach((d) => times.add(t + d));
   const step = script.duration > 20000 ? 5000 : 1500;
   for (let t = 500; t < script.duration; t += step) times.add(t);
   // Camera frames; a looped session shows rendered frame `loopedFrame(n)` at camera frame n.
@@ -326,7 +374,7 @@ function filmStrip(script, record, score) {
     .map((n) => {
       const k = script.loop === undefined ? n : loopedFrame(script, n);
       const truth = { ...record.frames[k], t: (n * 1000) / 30 };
-      const { overlay, detect } = overlayFor(record, n);
+      const { overlay, detect, hint, ready, countdown } = overlayFor(record, n);
       const error = overlay !== null && truth.quad !== null ? quadDistance(overlay, truth.quad, frame) : null;
       return {
         frame: k,
@@ -334,6 +382,7 @@ function filmStrip(script, record, score) {
           `${script.id} t ${(truth.t / 1000).toFixed(1)} s`,
           overlay === null ? "overlay: none" : `overlay err ${error === null ? "(no page)" : `${(error * 100).toFixed(1)}%`}`,
           detect === null ? "no accepted pass yet" : `last pass: ${detect.source}`,
+          `hint: ${hint ?? "none"}${ready ? ` · READY${countdown !== null ? ` ${Math.round(countdown * 100)}%` : ""}` : ""}`,
         ],
         quads: [
           { quad: truth.quad ?? null, color: COLORS.truth },
@@ -551,6 +600,28 @@ export function summarize(rows) {
       remountMl: [],
       leaks: [],
       lanes: {},
+      guidance: {
+        windows: {},
+        changes: 0,
+        liveSeconds: 0,
+        fastChanges: 0,
+        holdMs: 0,
+        holdHintMs: 0,
+        ready: { onMs: 0, judgedMs: 0, onPageMs: 0, noPageMs: 0, eligibleMs: 0, eligibleOnMs: 0 },
+        fires: [],
+        falseFires: 0,
+        firesDuringTremor: 0,
+        firesInNoFire: 0,
+        firesInHintWindow: 0,
+        pages: 0,
+        pagesFired: 0,
+        repeatFires: 0,
+        autoOn: 0,
+        manual: { captures: 0, failed: 0, severe: 0 },
+        auto: { captures: 0, failed: 0, severe: 0 },
+        layoutShifts: 0,
+        layoutSamples: 0,
+      },
     });
     entry.runs += 1;
     const pool = (target, window) => {
@@ -631,6 +702,41 @@ export function summarize(rows) {
         if (failed(c.verdict) || c.contentClipped === true) entry.policy.severeWith += 1;
         if (failed(c.alternativeVerdict) || c.alternativeContentClipped === true) entry.policy.severeWithout += 1;
       }
+    }
+    const g = row.score.guidance;
+    if (g) {
+      const G = entry.guidance;
+      for (const w of g.windows) {
+        const W = (G.windows[w.name] ??= { ms: 0, correct: 0, wrong: 0, none: 0, first: [], expect: w.expect });
+        W.ms += w.ms;
+        W.correct += (w.share ?? 0) * w.ms;
+        W.wrong += (w.wrongShare ?? 0) * w.ms;
+        W.none += (w.noneShare ?? 0) * w.ms;
+        W.first.push(w.firstCorrectMs);
+      }
+      G.changes += g.changes;
+      G.liveSeconds += g.liveSeconds ?? 0;
+      G.fastChanges += g.fastChanges;
+      G.holdMs += g.holdMs;
+      G.holdHintMs += Object.values(g.holdHintMs).reduce((a, b) => a + b, 0);
+      for (const k of Object.keys(G.ready)) G.ready[k] += g.ready[k] ?? 0;
+      G.fires.push(...g.auto.fires);
+      G.falseFires += g.auto.falseFires;
+      G.firesDuringTremor += g.auto.firesDuringTremor;
+      G.firesInNoFire += g.auto.firesInNoFire ?? 0;
+      G.firesInHintWindow += g.auto.firesInHintWindow ?? 0;
+      G.pages += g.auto.pages;
+      G.pagesFired += g.auto.pagesFired;
+      G.repeatFires += g.auto.repeatFires;
+      if (g.auto.on) G.autoOn += 1;
+      for (const c of row.score.captures) {
+        const bucket = c.trigger === "auto" ? G.auto : G.manual;
+        bucket.captures += 1;
+        if (CAPTURE_FAILURES.has(c.verdict)) bucket.failed += 1;
+        if (CAPTURE_FAILURES.has(c.verdict) || c.contentClipped === true) bucket.severe += 1;
+      }
+      G.layoutShifts += g.layout.shifts;
+      G.layoutSamples += g.layout.samples;
     }
     if (row.score.staleAfterSwap === "stuck") entry.stuck += 1;
     if (Number.isFinite(row.score.staleAfterSwapMs)) entry.stale.push(row.score.staleAfterSwapMs);
@@ -725,6 +831,7 @@ export function summarize(rows) {
           remountToMlMsP50: e.remountMl.length > 0 ? percentile(e.remountMl, 50) : null,
           remountToLockP50: p50Never(e.remountLock),
           remountNeverLocked: e.remountLock.filter((v) => v === null).length,
+          guidance: summarizeGuidance(e.guidance),
           leaks:
             e.leaks.length === 0
               ? null
@@ -739,4 +846,56 @@ export function summarize(rows) {
       },
     ]),
   );
+}
+
+/** A session's guidance numbers, pooled over its runs (time-weighted where they are times). */
+function summarizeGuidance(G) {
+  const share = (a, b) => (b > 0 ? a / b : null);
+  const latencies = G.fires.filter((f) => !f.falseFire && Number.isFinite(f.latencyMs)).map((f) => f.latencyMs);
+  return {
+    windows: Object.fromEntries(
+      Object.entries(G.windows).map(([name, W]) => [
+        name,
+        {
+          expect: W.expect,
+          ms: W.ms,
+          share: share(W.correct, W.ms),
+          wrongShare: share(W.wrong, W.ms),
+          noneShare: share(W.none, W.ms),
+          firstCorrectP50: W.first.length > 0 ? percentileNever(W.first) : null,
+          neverCorrect: W.first.filter((v) => v === null).length,
+        },
+      ]),
+    ),
+    changes: G.changes,
+    changesPerSecond: share(G.changes, G.liveSeconds),
+    fastChanges: G.fastChanges,
+    holdHintShare: share(G.holdHintMs, G.holdMs),
+    readyPrecision: share(G.ready.onPageMs, G.ready.judgedMs),
+    readyRecall: share(G.ready.eligibleOnMs, G.ready.eligibleMs),
+    readyOnMs: G.ready.onMs,
+    readyNoPageMs: G.ready.noPageMs,
+    fires: G.fires.length,
+    falseFires: G.falseFires,
+    firesDuringTremor: G.firesDuringTremor,
+    firesInNoFire: G.firesInNoFire,
+    firesInHintWindow: G.firesInHintWindow,
+    fireLatencyP50: latencies.length > 0 ? percentile(latencies, 50) : null,
+    fireLatencies: latencies,
+    pages: G.pages,
+    pagesFired: G.pagesFired,
+    repeatFires: G.repeatFires,
+    autoOnRuns: G.autoOn,
+    manualCaptures: G.manual,
+    autoCaptures: G.auto,
+    layoutShifts: G.layoutShifts,
+    layoutSamples: G.layoutSamples,
+  };
+}
+
+/** p50 where null (never) counts as infinitely late. */
+function percentileNever(values) {
+  const sorted = values.map((v) => (v === null ? Infinity : v)).sort((a, b) => a - b);
+  const value = sorted[Math.floor((sorted.length - 1) / 2)];
+  return Number.isFinite(value) ? value : null;
 }

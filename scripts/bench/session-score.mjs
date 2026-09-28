@@ -527,6 +527,7 @@ export function scoreSession(script, record) {
     stillRenderMs: mean((record.stills ?? []).map((s) => s.renderMs)),
   };
   out.hints = hintTimeline(record);
+  out.guidance = scoreGuidance(script, record, gtAt, out.captures);
   out.captureDetects = scoreCaptureDetects(record);
   out.perf = scorePerf(record);
   out.startup = scoreStartup(record, series, frame);
@@ -730,4 +731,248 @@ export function hintTimeline(record) {
   return record.events
     .filter((e) => e.type === "hint")
     .map((e) => ({ t: e.t - record.startedAt, change: `${e.shown ? "+" : "-"}${e.key}` }));
+}
+
+/* ── guidance: the hint, the ready cue, auto-capture (Phase 4) ─────────── */
+
+/**
+ * The hint keys the viewfinder's single hint slot names (`hint` probe events,
+ * one shown at a time). Builds before it had one showed several chips at
+ * once under other names; those are mapped to the nearest key so a baseline
+ * can be scored on the same windows ("sheet-found" and the prose tip are not
+ * hints and are ignored).
+ */
+export const HINT_KEYS = ["searching", "not-found", "move-back", "move-closer", "low-light", "glare", "hold-still"];
+const LEGACY_HINTS = { "aim-at-document": "searching", "edges-not-found": "not-found", "fit-whole-page": "fit-whole-page", "low-light": "low-light" };
+const LEGACY_ORDER = ["low-light", "not-found", "searching", "fit-whole-page"];
+
+/**
+ * The hint on screen over time: `[{ t, key }]` (page time; `key` null = none),
+ * one entry per change. Legacy builds' several chips are reduced to one by
+ * {@link LEGACY_ORDER}.
+ */
+export function hintSeries(record) {
+  const shown = new Set();
+  const series = [];
+  let current = null;
+  for (const e of record.events) {
+    if (e.type !== "hint") continue;
+    const key = HINT_KEYS.includes(e.key) ? e.key : (LEGACY_HINTS[e.key] ?? null);
+    if (key === null) continue;
+    if (e.shown) shown.add(key);
+    else shown.delete(key);
+    const next = HINT_KEYS.find((k) => shown.has(k) && !LEGACY_ORDER.includes(k)) ?? LEGACY_ORDER.find((k) => shown.has(k)) ?? null;
+    if (next !== current) {
+      current = next;
+      // One hint replaced by another is one change: the old one's "gone"
+      // and the new one's "shown" share their moment.
+      const last = series[series.length - 1];
+      if (last !== undefined && last.t === e.t) {
+        series.pop();
+        const before = series[series.length - 1];
+        if (before === undefined ? next !== null : before.key !== next) series.push({ t: e.t, key: next });
+      } else series.push({ t: e.t, key: next });
+    }
+  }
+  return series;
+}
+
+/** The hint in force at page time `t` (null before any was shown). */
+function hintAt(series, t) {
+  let key = null;
+  for (const entry of series) {
+    if (entry.t > t) break;
+    key = entry.key;
+  }
+  return key;
+}
+
+/**
+ * Time-weighted over `[from, to]` (page time): the share the hint was one of
+ * `expect` (`null` in it = no hint), the share it was another hint (wrong),
+ * and none at all.
+ */
+export function hintWindow(series, { from, to, expect, conditionFrom }) {
+  const cuts = [from, ...series.filter((e) => e.t > from && e.t < to).map((e) => e.t), to];
+  let correct = 0;
+  let wrong = 0;
+  let none = 0;
+  for (let i = 0; i < cuts.length - 1; i += 1) {
+    const span = cuts[i + 1] - cuts[i];
+    const key = hintAt(series, cuts[i]);
+    if (expect.includes(key)) correct += span;
+    else if (key === null) none += span;
+    else wrong += span;
+  }
+  const total = to - from;
+  const first = series.find((e) => e.t >= conditionFrom && expect.includes(e.key));
+  const already = expect.includes(hintAt(series, conditionFrom));
+  return {
+    ms: total,
+    share: rate(correct, total),
+    wrongShare: rate(wrong, total),
+    noneShare: rate(none, total),
+    firstCorrectMs: already ? 0 : first === undefined || first.t > to ? null : first.t - conditionFrom,
+  };
+}
+
+/** The overlay's ready cue over time, from the overlay samples (`ready`; absent = off). */
+function readySeries(record, gtAt) {
+  return record.events
+    .filter((e) => e.type === "overlay")
+    .map((e) => ({
+      t: e.t,
+      ready: e.ready === true,
+      countdown: e.countdown ?? null,
+      quad: e.quad !== null && e.opacity >= OVERLAY_SHOWN_OPACITY ? toPoints(e.quad) : null,
+      gt: gtAt(e.t),
+    }));
+}
+
+/** Which page of the script is the one being scanned at camera time `t`. */
+function pageAt(script, t) {
+  let page = script.primary?.[0]?.page ?? 0;
+  for (const step of script.primary ?? []) if (t >= step.t) page = step.page;
+  return page;
+}
+
+/**
+ * The guidance a session showed: each scripted hint window (`marks.hints`),
+ * the hint's churn, hints shown over a framed hold, the ready cue's precision
+ * (cue-on time with the overlay on the page, within `LOCK_TOLERANCE`) and
+ * recall (over `marks.ready`), the cue on a page-less frame, every automatic
+ * capture (latency from the last `marks.stable` before it, the page it took,
+ * during a tremor, a false fire) and whether the viewfinder's box ever moved.
+ */
+export function scoreGuidance(script, record, gtAt, captures) {
+  const marks = script.marks ?? {};
+  const t0 = record.startedAt;
+  const at = (cameraMs) => t0 + cameraMs;
+  const frame = script.frame;
+  const series = hintSeries(record);
+  const windows = (marks.hints ?? []).map((w) => ({
+    name: w.name,
+    expect: w.expect,
+    ...hintWindow(series, { from: at(w.from), to: at(w.to), expect: w.expect, conditionFrom: at(w.conditionFrom ?? w.from) }),
+  }));
+  // Churn over the live viewfinder: from the camera going live to the end.
+  const liveFrom = record.actions?.find((a) => a.what === "camera-live")?.at ?? t0;
+  const liveTo = at(script.duration);
+  const changes = series.filter((e) => e.t >= liveFrom && e.t <= liveTo);
+  let fastChanges = 0;
+  let minGapMs = null;
+  for (let i = 1; i < changes.length; i += 1) {
+    const gap = changes[i].t - changes[i - 1].t;
+    minGapMs = minGapMs === null ? gap : Math.min(minGapMs, gap);
+    if (gap < 1500) fastChanges += 1;
+  }
+  const liveSeconds = Math.max(0.001, (liveTo - liveFrom) / 1000);
+  // Hints over framed holds, where none is owed (the default sessions' hold windows).
+  const holds = [];
+  if (marks.holdFrom !== undefined && marks.holdTo !== undefined) holds.push([marks.holdFrom, marks.holdTo]);
+  if (marks.lockFrom2 !== undefined && marks.holdTo2 !== undefined) holds.push([marks.lockFrom2, marks.holdTo2]);
+  let holdMs = 0;
+  const holdShown = {};
+  for (const [from, to] of holds) {
+    const w = { from: at(from), to: at(to) };
+    holdMs += w.to - w.from;
+    const cuts = [w.from, ...series.filter((e) => e.t > w.from && e.t < w.to).map((e) => e.t), w.to];
+    for (let i = 0; i < cuts.length - 1; i += 1) {
+      const key = hintAt(series, cuts[i]);
+      if (key !== null) holdShown[key] = (holdShown[key] ?? 0) + cuts[i + 1] - cuts[i];
+    }
+  }
+  // The ready cue.
+  const cue = readySeries(record, gtAt);
+  const { intervals } = sampleTimeline(cue, { from: liveFrom, to: liveTo });
+  const ready = { onMs: 0, judgedMs: 0, onPageMs: 0, offPageMs: 0, noPageMs: 0, eligibleMs: 0, eligibleOnMs: 0, countdownMs: 0 };
+  const eligible = (marks.ready ?? []).map((w) => [at(w.from), at(w.to)]);
+  for (const { from, to, sample } of intervals) {
+    const span = to - from;
+    for (const [a, b] of eligible) {
+      const overlap = Math.max(0, Math.min(b, to) - Math.max(a, from));
+      ready.eligibleMs += overlap;
+      if (sample.ready) ready.eligibleOnMs += overlap;
+    }
+    if (!sample.ready) continue;
+    ready.onMs += span;
+    if (sample.countdown !== null) ready.countdownMs += span;
+    if (sample.gt === undefined) continue;
+    if (sample.gt === null) {
+      ready.noPageMs += span;
+      ready.judgedMs += span;
+      continue;
+    }
+    if (sample.quad === null) continue;
+    const error = visibleDistance(sample.quad, sample.gt, frame);
+    if (error === null) continue;
+    ready.judgedMs += span;
+    if (error <= LOCK_TOLERANCE) ready.onPageMs += span;
+    else ready.offPageMs += span;
+  }
+  // Automatic captures.
+  const stable = (marks.stable ?? []).slice().sort((a, b) => a - b);
+  const tremor = marks.tremor ?? [];
+  // Where an automatic capture would take a bad image (the breaker
+  // sessions' `noFire`: the page cut off, a hot spot on it, still moving),
+  // and where a hint is owed (the hint windows): no capture is owed there.
+  const noFire = marks.noFire ?? [];
+  const hinted = marks.hints ?? [];
+  const fires = captures
+    .filter((c) => c.trigger === "auto")
+    .map((c) => {
+      const since = stable.filter((s) => s <= c.tapAt).pop();
+      return {
+        tapAt: c.tapAt,
+        page: pageAt(script, c.tapAt),
+        verdict: c.verdict,
+        severe: c.severe,
+        latencyMs: since === undefined ? null : c.tapAt - since,
+        inTremor: tremor.some((w) => c.tapAt >= w.from && c.tapAt <= w.to),
+        inNoFire: noFire.find((w) => c.tapAt >= w.from && c.tapAt <= w.to)?.name ?? null,
+        inHintWindow: hinted.find((w) => !w.expect.some((k) => k === "searching" || k === "not-found") && c.tapAt >= w.from && c.tapAt <= w.to)?.name ?? null,
+        falseFire: marks.pageless === true || c.pagelessCapture === true || c.verdict === "false positive" || c.verdict === PAGELESS_CAPTURE,
+      };
+    });
+  const pages = marks.pageless ? 0 : (marks.pages ?? (marks.stable?.length > 0 ? 1 : 0));
+  const firedPages = new Set(fires.filter((f) => !f.falseFire).map((f) => f.page));
+  // The viewfinder's box while live.
+  const boxes = (record.boxes ?? []).filter((b) => b.at >= liveFrom && b.at <= liveTo);
+  let shiftPx = 0;
+  let shifts = 0;
+  if (boxes.length > 0) {
+    const b0 = boxes[0];
+    for (const b of boxes) {
+      const d = Math.max(Math.abs(b.x - b0.x), Math.abs(b.y - b0.y), Math.abs(b.width - b0.width), Math.abs(b.height - b0.height));
+      shiftPx = Math.max(shiftPx, d);
+      if (d > 0.5) shifts += 1;
+    }
+  }
+  return {
+    windows,
+    changes: changes.length,
+    changesPerSecond: changes.length / liveSeconds,
+    liveSeconds,
+    fastChanges,
+    minGapMs,
+    holdMs,
+    holdHintMs: holdShown,
+    ready: {
+      ...ready,
+      precision: rate(ready.onPageMs, ready.judgedMs),
+      recall: rate(ready.eligibleOnMs, ready.eligibleMs),
+    },
+    auto: {
+      on: (record.actions ?? []).some((a) => a.what === "auto-on"),
+      fires,
+      falseFires: fires.filter((f) => f.falseFire).length,
+      firesDuringTremor: fires.filter((f) => f.inTremor).length,
+      firesInNoFire: fires.filter((f) => f.inNoFire !== null).length,
+      firesInHintWindow: fires.filter((f) => f.inHintWindow !== null).length,
+      pages,
+      pagesFired: firedPages.size,
+      repeatFires: Math.max(0, fires.filter((f) => !f.falseFire).length - firedPages.size),
+    },
+    layout: { samples: boxes.length, shifts, maxShiftPx: shiftPx },
+  };
 }

@@ -2,7 +2,8 @@
 /**
  * `npm run bench:webkit` — the real `<ScanFlow>` on the bench camera in
  * **WebKit** (Playwright's build), end to end: permission primer, a live
- * viewfinder that finds the page, a capture, the confirm screen.
+ * viewfinder that finds the page and guides the aim (a hint, the ready cue),
+ * auto-capture switched on and firing, a tap, the confirm screens.
  *
  * WebKit is where the detection worker's features are least certain (Safari
  * before 16.4 has no 2-D `OffscreenCanvas` in a worker) and where the
@@ -15,8 +16,12 @@
  * frame, as it is on an iPhone.
  *
  * Exits 0 when every run passed: the camera went live, the lane was reported,
- * the model came up and answered passes, the overlay found the page, every
- * tap made a capture whose confirm screen opened, and the page threw nothing.
+ * the model came up and answered passes, the overlay found the page, the hint
+ * the script's condition owes was shown, the ready cue came on over the page,
+ * the auto-capture toggle was found and switched on and an automatic capture
+ * fired, every tap made a capture, every confirm screen opened, and the page
+ * threw nothing. The default session is `too-far` (the page small in the
+ * frame — "Aproxime" — then framed and held, with auto-capture on).
  * Writes `.bench-out/webkit-smoke-<stamp>/results.json`. Linux WebKit is not
  * iOS Safari: this proves the paths run, not how a phone feels.
  *
@@ -48,7 +53,7 @@ const IPHONE = {
 function parse() {
   const { values } = parseArgs({
     options: {
-      session: { type: "string", default: "tremor-hold" },
+      session: { type: "string", default: "too-far" },
       seed: { type: "string", default: "1" },
       out: { type: "string" },
     },
@@ -58,17 +63,31 @@ function parse() {
 }
 
 /** What a run must show to pass, as `[name, ok, detail]`. */
-function checks(record, score, errors) {
+function checks(record, score, errors, ready) {
   const events = record.events;
   const lane = events.find((e) => e.type === "lane");
   const ml = events.filter((e) => e.type === "detect" && e.source === "ml");
   const shown = events.filter((e) => e.type === "overlay" && e.quad !== null && e.opacity >= 0.5);
   const captures = score.captures;
+  const g = score.guidance;
+  const hintKeys = [...new Set(events.filter((e) => e.type === "hint" && e.shown).map((e) => e.key))];
+  const autoOn = record.actions.some((a) => a.what === "auto-on");
+  const scripted = (record.actions ?? []).length > 0 && g.windows.length > 0;
+  const fires = captures.filter((c) => c.trigger === "auto");
   return [
     ["camera live", record.actions.some((a) => a.what === "camera-live"), record.actions.map((a) => a.what).join(" → ")],
     ["lane reported", lane !== undefined, lane === undefined ? "no lane event" : `${lane.lane} (${lane.reason})`],
     ["model answered", ml.length > 0, `${ml.length} ML passes, ${events.filter((e) => e.type === "detect").length} in all`],
     ["overlay on the page", (score.hold?.lockedShare ?? 0) > 0 || shown.length > 0, `hold on page ${score.hold?.lockedShare?.toFixed(2) ?? "–"}, ${shown.length} overlay samples shown`],
+    [
+      "hint shown",
+      scripted ? g.windows.every((w) => (w.share ?? 0) > 0) : hintKeys.length > 0,
+      `${g.windows.map((w) => `${w.name}: ${w.expect.join("|")} ${w.share === null ? "–" : `${Math.round(w.share * 100)} %`}`).join(", ") || "–"}; keys shown: ${hintKeys.join(", ") || "none"}`,
+    ],
+    ["ready cue", g.ready.onMs > 0 && (g.ready.precision ?? 0) > 0, `on ${Math.round(g.ready.onMs)} ms, precision ${g.ready.precision === null ? "–" : g.ready.precision.toFixed(2)}`],
+    ...(ready.autoCapture
+      ? [["auto-capture", autoOn && fires.length > 0 && fires.every((f) => f.confirmOpened), `toggle ${autoOn ? "on" : "not found"}, ${fires.length} automatic capture(s): ${fires.map((f) => f.verdict).join(", ") || "none"}`]]
+      : []),
     ["every tap captured", score.missingCaptures === 0 && captures.length > 0, `${captures.length} capture(s), ${score.missingCaptures} missing`],
     ["confirm opened", captures.length > 0 && captures.every((c) => c.confirmOpened), captures.map((c) => `${c.verdict} (${c.cornersFrom ?? "none"}/${c.detector ?? "–"})`).join(", ")],
     ["no page errors", errors.length === 0, errors.slice(0, 3).join(" | ")],
@@ -121,7 +140,7 @@ async function main() {
       }));
       const record = await page.evaluate(() => window.__session.run());
       const score = scoreSession(ready.script, record);
-      const verdicts = checks(record, score, errors);
+      const verdicts = checks(record, score, errors, { autoCapture: ready.script.autoCapture === true });
       const ok = verdicts.every(([, pass]) => pass);
       failed ||= !ok;
       const lane = record.events.find((e) => e.type === "lane");
@@ -134,7 +153,8 @@ async function main() {
         passes: score.passes,
         hold: score.hold,
         timeToLockMs: score.timeToLockMs,
-        captures: score.captures.map((c) => ({ verdict: c.verdict, cornersFrom: c.cornersFrom, detector: c.detector, tapToConfirmMs: c.tapToConfirmMs, stillUsed: c.stillUsed })),
+        captures: score.captures.map((c) => ({ trigger: c.trigger, verdict: c.verdict, cornersFrom: c.cornersFrom, detector: c.detector, tapToConfirmMs: c.tapToConfirmMs, stillUsed: c.stillUsed })),
+        guidance: score.guidance,
         startup: score.startup,
         errors,
       });

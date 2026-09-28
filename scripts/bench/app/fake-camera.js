@@ -36,11 +36,38 @@ function override(target, name, value) {
 }
 
 /**
- * @param {{ player: import("./session-player.js").SessionPlayer, permission?: "prompt" | "granted", stills?: boolean }} options
- * `stills: false` is a camera with no still pipeline at all — no
- * `ImageCapture`, as on Safari — so every capture is a preview frame.
+ * The phone's torch on a bench track: `getCapabilities()` says `torch`,
+ * `applyConstraints({ advanced: [{ torch }] })` switches it (logged in
+ * `globalThis.__benchTorch` as `{ at, on }`, page time) and `getSettings()`
+ * reports it. The light itself changes nothing in the frames — they were
+ * rendered ahead — so a run proves the control, not the photo.
  */
-export function installFakeCamera({ player, permission = "prompt", stills = true }) {
+function withTorch(track) {
+  if (track === undefined || track.__benchTorch === true) return;
+  const log = (globalThis.__benchTorch ??= []);
+  let on = false;
+  const capabilities = typeof track.getCapabilities === "function" ? track.getCapabilities.bind(track) : () => ({});
+  const settings = typeof track.getSettings === "function" ? track.getSettings.bind(track) : () => ({});
+  const define = (name, value) => Object.defineProperty(track, name, { value, configurable: true, writable: true });
+  define("__benchTorch", true);
+  define("getCapabilities", () => ({ ...capabilities(), torch: true }));
+  define("getSettings", () => ({ ...settings(), torch: on }));
+  define("applyConstraints", async (constraints = {}) => {
+    const wanted = constraints.advanced?.find((c) => c !== null && typeof c === "object" && "torch" in c)?.torch ?? constraints.torch;
+    if (typeof wanted === "boolean" && wanted !== on) {
+      on = wanted;
+      log.push({ at: performance.now(), on });
+    }
+  });
+}
+
+/**
+ * @param {{ player: import("./session-player.js").SessionPlayer, permission?: "prompt" | "granted", stills?: boolean, torch?: boolean }} options
+ * `stills: false` is a camera with no still pipeline at all — no
+ * `ImageCapture`, as on Safari — so every capture is a preview frame;
+ * `torch: false` a camera without a torch (see {@link withTorch}).
+ */
+export function installFakeCamera({ player, permission = "prompt", stills = true, torch = true }) {
   let state = permission;
   const media = navigator.mediaDevices;
   if (media === undefined) throw new Error("navigator.mediaDevices is missing: the bench page must be served from 127.0.0.1");
@@ -62,6 +89,7 @@ export function installFakeCamera({ player, permission = "prompt", stills = true
       throw error;
     }
     state = "granted";
+    if (torch) withTorch(stream.getVideoTracks()[0]);
     return stream;
   });
   override(media, "enumerateDevices", async () => [

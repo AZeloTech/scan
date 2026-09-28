@@ -39,7 +39,8 @@ test("every session script is deterministic and plain JSON", () => {
     assert.deepEqual(a, buildSession(id, 1), id);
     assert.deepEqual(JSON.parse(JSON.stringify(a)), a, id);
     assert.ok(a.duration > 5000, id);
-    assert.ok(a.actions.some((step) => step.tap !== undefined), `${id}: never taps the shutter`);
+    // A session with auto-capture on may leave every capture to it.
+    assert.ok(a.autoCapture === true || a.actions.some((step) => step.tap !== undefined), `${id}: never taps the shutter`);
   }
   assert.notDeepEqual(buildSession("approach-hold", 1), buildSession("approach-hold", 2));
 });

@@ -41,6 +41,9 @@ const copy = copyFor("pt");
 /** How long the scripted user waits for a control before giving up on a step. */
 const STEP_TIMEOUT_MS = 8000;
 
+/** How long the scripted user looks at a confirm screen it did not open itself (auto-capture) — as `emulator/session.js` scripts its own. */
+const CONFIRM_AFTER_MS = 1100;
+
 /** After the script's last moment, how long the flow is left to finish. */
 const TAIL_MS = 1200;
 
@@ -127,6 +130,7 @@ function installProbe() {
     const entry = { ...event, at: performance.now(), st: player.now() };
     if (event.type === "grab") player.noteGrab(event.id, entry.at);
     if (event.type === "still-call") player.noteStillCall(event.attempt);
+    if (event.type === "hint") queueMicrotask(() => sampleBox("hint"));
     events.push(entry);
     if (listeners.size === 0) return;
     const k = player.presentedFrame();
@@ -214,9 +218,105 @@ async function cameraLive() {
     log("camera-missing");
     return false;
   }
-  log("camera-live", { videoW: video.videoWidth, videoH: video.videoHeight });
+  log("camera-live", { videoW: video.videoWidth, videoH: video.videoHeight, visible: visibleCrop(video) });
   player.watchVideo(video);
+  watchStage(video);
   return true;
+}
+
+/**
+ * The part of the camera frame the viewfinder shows — the `<video>`'s
+ * object-cover crop of its stage — as fractions of the frame: what "the page
+ * is cut off" means to the person holding the phone.
+ */
+function visibleCrop(video) {
+  const stage = video.parentElement;
+  if (stage === null || video.videoWidth === 0) return null;
+  const rect = stage.getBoundingClientRect();
+  const scale = Math.max(rect.width / video.videoWidth, rect.height / video.videoHeight);
+  const width = video.videoWidth * scale;
+  const height = video.videoHeight * scale;
+  return {
+    x: (width - rect.width) / 2 / width,
+    y: (height - rect.height) / 2 / height,
+    width: rect.width / width,
+    height: rect.height / height,
+  };
+}
+
+/**
+ * The viewfinder's box, sampled while it is live (every 100 ms, and on every
+ * hint change): a hint appearing or going away must never move or resize the
+ * frame the user is aiming through (`boxes`, scored as layout shifts).
+ */
+const boxes = [];
+let boxTimer = null;
+let stageVideo = null;
+function sampleBox(why) {
+  const stage = stageVideo?.parentElement;
+  if (!stage || !stage.isConnected) return;
+  const r = stage.getBoundingClientRect();
+  if (r.width === 0 || r.height === 0) return;
+  boxes.push({ at: performance.now(), why, x: r.left, y: r.top, width: r.width, height: r.height });
+}
+function watchStage(video) {
+  stageVideo = video;
+  if (boxTimer !== null) clearInterval(boxTimer);
+  sampleBox("live");
+  boxTimer = setInterval(() => sampleBox("tick"), 100);
+}
+
+/** Confirm screens open now (opened, not yet confirmed). */
+function confirmsOpen() {
+  let open = 0;
+  for (const e of events) {
+    if (e.type === "confirm-open") open += 1;
+    else if (e.type === "confirm-done") open = Math.max(0, open - 1);
+  }
+  return open;
+}
+
+/** Captures made whose confirm screen has not opened yet (an automatic one still taking its photo). */
+function capturesInFlight() {
+  const count = (type) => events.filter((e) => e.type === type).length;
+  return Math.max(0, count("capture") - count("confirm-open"));
+}
+
+/**
+ * With auto-capture on, confirm screens open without a tap: the scripted
+ * user confirms every one of them the way it confirms its own — a look,
+ * then "confirm" — and the script's taps wait until none is open.
+ */
+let confirming = false;
+async function confirmWatcher() {
+  let handled = 0;
+  while (confirming) {
+    const opens = events.filter((e) => e.type === "confirm-open");
+    if (opens.length <= handled) {
+      await sleep(40);
+      continue;
+    }
+    const opened = opens[handled];
+    handled += 1;
+    await sleep(Math.max(0, opened.at + CONFIRM_AFTER_MS - performance.now()));
+    const confirm = await waitFor(() => enabledButton((b) => b.textContent.includes(copy.confirm.confirmCta)));
+    if (confirm === null) {
+      log("confirm-button-missing");
+      continue;
+    }
+    confirm.click();
+    log("confirm", { auto: true });
+    const done = await waitFor(() => lastEvent("confirm-done", opened.at), 5000);
+    await waitFor(() => captureButton("shutter"), 8000);
+    log("confirm-closed", { done: done !== null });
+  }
+}
+
+/** The auto-capture toggle, by its accessible name — absent in a build without one. */
+function autoToggle() {
+  const label = copy.capture.autoCapture;
+  if (typeof label !== "string") return null;
+  return buttons().find((b) => b.getAttribute("aria-label") === label && !b.disabled) ?? null;
 }
 
 /** The scripted user, from the primer to the last confirm (unscripted: only the primer). */
@@ -237,11 +337,24 @@ async function act({ scripted = true } = {}) {
   }
   if (!(await cameraLive())) return;
   if (!scripted) return;
+  const auto = script.autoCapture === true;
+  if (auto) {
+    const toggle = await waitFor(autoToggle, 3000);
+    if (toggle === null) log("auto-toggle-missing");
+    else {
+      if (toggle.getAttribute("aria-pressed") !== "true") toggle.click();
+      log("auto-on");
+    }
+    confirming = true;
+    void confirmWatcher();
+  }
 
   for (const step of script.actions) {
     if (step.tap !== undefined) {
       const wait = step.at - player.now();
       if (wait > 0) await sleep(wait);
+      // Never under an open confirm screen: a person cannot reach the shutter there.
+      if (auto) await waitFor(() => confirmsOpen() === 0 && capturesInFlight() === 0 && captureButton(step.tap), 15000);
       const button = await waitFor(() => captureButton(step.tap));
       if (button === null) {
         log("tap-missing", { trigger: step.tap, due: step.at });
@@ -250,6 +363,8 @@ async function act({ scripted = true } = {}) {
       button.click();
       log("tap", { trigger: step.tap, due: step.at });
     } else if (step.confirmAfterMs !== undefined) {
+      // With auto-capture on, the watcher confirms every screen.
+      if (auto) continue;
       const since = actions[actions.length - 1]?.at ?? 0;
       const opened = await waitFor(() => lastEvent("confirm-open", since), 15000);
       if (opened === null) {
@@ -276,6 +391,9 @@ function flow() {
   return createElement(ScanFlow, {
     assetBaseUrl: "/assets/",
     lang: "pt-BR",
+    // The auto-capture toggle is experimental and off unless the host asks:
+    // only a script that switches it on asks.
+    experimentalAutoCapture: script?.autoCapture === true,
     onComplete: () => hostEvents.push({ name: "complete", at: performance.now() }),
     onCancel: (reason) => hostEvents.push({ name: "cancel", reason, at: performance.now() }),
     onEvent: (event) => hostEvents.push({ ...event, at: performance.now() }),
@@ -303,7 +421,26 @@ async function run({ scripted = true } = {}) {
   // Play the script out, then give the flow a moment.
   const rest = script.duration - player.now();
   if (rest > 0) await sleep(rest);
+  // With auto-capture on, the user switches it off as the script ends (the
+  // frames stop there), and a capture near the end still owes its confirm
+  // screen and its confirmation.
+  if (script.autoCapture === true) {
+    const toggle = autoToggle();
+    if (toggle !== null && toggle.getAttribute("aria-pressed") === "true") {
+      toggle.click();
+      log("auto-off");
+    }
+    // Settled: no photo being taken (the shutter enabled), none waiting for
+    // its confirm screen, none open — twice in a row, a beat apart.
+    const settled = () => captureButton("shutter") !== null && capturesInFlight() === 0 && confirmsOpen() === 0;
+    await waitFor(() => settled(), 10000);
+    await sleep(300);
+    await waitFor(() => settled(), 10000);
+  }
   await sleep(TAIL_MS);
+  confirming = false;
+  if (boxTimer !== null) clearInterval(boxTimer);
+  boxTimer = null;
   const liveFrom = actions.find((a) => a.what === "camera-live")?.at ?? mountedAt;
   const liveTo = performance.now();
   const perfLive = await perf.report({ from: liveFrom, to: liveTo });
@@ -341,6 +478,9 @@ async function run({ scripted = true } = {}) {
     perf: perfLive,
     perfEnd,
     remounts,
+    visible: actions.find((a) => a.what === "camera-live")?.visible ?? null,
+    boxes,
+    torch: globalThis.__benchTorch ?? [],
   };
 }
 

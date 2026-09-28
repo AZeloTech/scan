@@ -3,12 +3,15 @@ import test from "node:test";
 
 import {
   frameOnScreen,
+  hintSeries,
+  hintWindow,
   overlayAccuracy,
   overlaySeries,
   PAGELESS_CAPTURE,
   scoreCaptureDetects,
   scoreCaptures,
   scoreLeaks,
+  scoreGuidance,
   scorePasses,
   scorePerf,
   scoreSession,
@@ -543,3 +546,80 @@ test("what outlived the flow is counted after the last unmount", () => {
   );
 });
 
+
+test("guidance: the hint over time, one key at a time, legacy chips mapped", () => {
+  const record = {
+    events: [
+      { type: "hint", t: 100, key: "fit-whole-page", shown: true },
+      { type: "hint", t: 200, key: "sheet-found", shown: true },
+      { type: "hint", t: 300, key: "low-light", shown: true },
+      { type: "hint", t: 400, key: "low-light", shown: false },
+      { type: "hint", t: 500, key: "move-closer", shown: true },
+      { type: "hint", t: 900, key: "move-closer", shown: false },
+    ],
+  };
+  assert.deepEqual(hintSeries(record), [
+    { t: 100, key: "fit-whole-page" },
+    { t: 300, key: "low-light" },
+    { t: 400, key: "fit-whole-page" },
+    { t: 500, key: "move-closer" },
+    { t: 900, key: "fit-whole-page" },
+  ]);
+  const series = [
+    { t: 0, key: "searching" },
+    { t: 1000, key: "move-closer" },
+    { t: 3000, key: null },
+  ];
+  const w = hintWindow(series, { from: 500, to: 3500, expect: ["move-closer"], conditionFrom: 0 });
+  assert.ok(Math.abs(w.share - 2 / 3) < 1e-9 && Math.abs(w.wrongShare - 1 / 6) < 1e-9 && Math.abs(w.noneShare - 1 / 6) < 1e-9);
+  assert.equal(w.firstCorrectMs, 1000);
+  assert.equal(hintWindow(series, { from: 500, to: 900, expect: ["glare"], conditionFrom: 0 }).firstCorrectMs, null);
+});
+
+test("guidance: one hint replaced by another is one change, not two", () => {
+  const record = {
+    events: [
+      { type: "hint", t: 100, key: "searching", shown: true },
+      { type: "hint", t: 2000, key: "searching", shown: false },
+      { type: "hint", t: 2000, key: "move-closer", shown: true },
+      { type: "hint", t: 4000, key: "move-closer", shown: false },
+    ],
+  };
+  assert.deepEqual(hintSeries(record), [
+    { t: 100, key: "searching" },
+    { t: 2000, key: "move-closer" },
+    { t: 4000, key: null },
+  ]);
+});
+
+test("guidance: the ready cue's precision, auto-capture fires, latency, tremor and false fires", () => {
+  const t0 = 1000;
+  const frames = Array.from({ length: 400 }, () => ({ quad: PAGE }));
+  const overlay = (t, ready, quad = PAGE) => ({ type: "overlay", t: t0 + t, quad: quad === null ? null : { topLeft: { x: quad[0][0], y: quad[0][1] }, topRight: { x: quad[1][0], y: quad[1][1] }, bottomRight: { x: quad[2][0], y: quad[2][1] }, bottomLeft: { x: quad[3][0], y: quad[3][1] } }, opacity: 1, ready });
+  const off = PAGE.map(([x, y]) => [x + 0.1, y]);
+  const record = {
+    startedAt: t0,
+    frames,
+    presented: frames.map((_, k) => ({ k, at: t0 + (k * 1000) / 30 })),
+    actions: [{ what: "camera-live", at: t0 }, { what: "auto-on", at: t0 + 10 }],
+    boxes: [{ at: t0 + 1, x: 0, y: 0, width: 100, height: 200 }, { at: t0 + 2, x: 0, y: 0, width: 100, height: 200 }],
+    events: [0, 200, 400, 600, 800].map((t) => overlay(t, false)).concat([overlay(1000, true), overlay(1100, true), overlay(1200, true), overlay(1300, true), overlay(1400, true, off), overlay(1500, false), overlay(1700, false), overlay(1900, false), overlay(2100, false), overlay(2300, false), overlay(2500, false)]),
+  };
+  const script = { frame: FRAME, duration: 5000, primary: [{ t: 0, page: 0 }], marks: { ready: [{ from: 500, to: 2500 }], stable: [600], tremor: [{ from: 3000, to: 5000 }] } };
+  const captures = [
+    { trigger: "auto", tapAt: 1400, verdict: "good", severe: false, pagelessCapture: false },
+    { trigger: "auto", tapAt: 3500, verdict: "good", severe: false, pagelessCapture: false },
+    { trigger: "shutter", tapAt: 4000, verdict: "good", severe: false, pagelessCapture: false },
+  ];
+  const g = scoreGuidance(script, record, truthOnScreen(record), captures);
+  assert.ok(Math.abs(g.ready.precision - 0.8) < 1e-9, String(g.ready.precision));
+  assert.ok(Math.abs(g.ready.recall - 0.25) < 1e-9, String(g.ready.recall));
+  assert.equal(g.auto.fires.length, 2);
+  assert.equal(g.auto.fires[0].latencyMs, 800);
+  assert.equal(g.auto.firesDuringTremor, 1);
+  assert.equal(g.auto.repeatFires, 1);
+  assert.equal(g.auto.falseFires, 0);
+  assert.equal(g.layout.shifts, 0);
+  const pageless = scoreGuidance({ ...script, marks: { pageless: true } }, record, truthOnScreen(record), captures);
+  assert.equal(pageless.auto.falseFires, 2);
+});
