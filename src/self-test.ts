@@ -22,6 +22,8 @@
 import { encodeSurface } from "@/lib/encode";
 import { assetUrls } from "@/lib/runtime-config";
 import { isMlDisabled, warmUpMl } from "@/lib/ml-detection";
+import { probeDetectWorker } from "@/lib/detect-lane";
+import type { LaneReason } from "@/lib/detect-protocol";
 
 export interface SelfTestOptions {
   /** The same value you pass to `<ScanFlow assetBaseUrl>`. */
@@ -45,6 +47,14 @@ export interface SelfTestOptions {
 export interface SelfTestResult {
   /** The corner-detection model loaded, compiled and answered once. */
   mlReady: boolean;
+  /**
+   * Whether live detection can run off the main thread here: `"worker"`, or
+   * why not — `"worker-load-error"` is usually a 404 on
+   * `<assetBaseUrl>/workers/detect.worker.js` or a CSP header on that response
+   * that forbids it (see the README's host checklist). Anything but
+   * `"worker"` still scans, on the main thread.
+   */
+  detectWorker: LaneReason;
   /** A PDF was assembled from the canvas. Its exact size in bytes. */
   pdfBytes: number;
   pages: number;
@@ -81,6 +91,8 @@ export async function selfTest(options: SelfTestOptions): Promise<SelfTestResult
   // 1. The model, the ONNX Runtime and its WebAssembly — three files, all
   //    located by a string base that no bundler rewrote.
   const mlReady = await warmUpMl(urls);
+  // The detection worker: its script, and the CSP on its own response.
+  const detectWorker = await probeDetectWorker(urls);
 
   // 2. The PDF writer. Imported the way the flow imports it, so a chunk that
   //    fails to resolve fails here rather than after somebody has photographed
@@ -106,6 +118,7 @@ export async function selfTest(options: SelfTestOptions): Promise<SelfTestResult
 
   return {
     mlReady: mlReady && !isMlDisabled(),
+    detectWorker,
     pdfBytes: built.bytes,
     pages: built.pageCount,
     pdfImportReady,

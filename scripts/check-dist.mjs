@@ -109,6 +109,7 @@ const required = [
   "scanic-ml/ort-wasm-simd-threaded.wasm",
   "workers/render.worker.js",
   "workers/dewarp-classical.worker.js",
+  "workers/detect.worker.js",
   "scanic/scanic-entry.js",
 ];
 for (const entryPath of required) {

@@ -30,3 +30,18 @@ export function probeListener(): ProbeListener | null {
     return null;
   }
 }
+
+/**
+ * A bench-only setting the page hung on its listener (`listener.knobs`), or
+ * `undefined` — e.g. which detection lane to force. Lives here for the same
+ * reason the listener does: compiled out with it.
+ */
+export function probeListenerSetting(name: string): unknown {
+  const listener = probeListener() as (ProbeListener & { knobs?: Record<string, unknown> }) | null;
+  try {
+    const knobs = listener?.knobs;
+    return knobs !== null && typeof knobs === "object" ? knobs[name] : undefined;
+  } catch {
+    return undefined;
+  }
+}

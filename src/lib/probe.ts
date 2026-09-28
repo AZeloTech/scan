@@ -39,7 +39,9 @@
 import type { DetectionSource } from "@/lib/flatten";
 import type { NormalizedQuad } from "@/lib/quad";
 import type { SideReport } from "@/lib/refine";
-import { probeListener } from "@/lib/probe-hook";
+import type { LaneReason } from "@/lib/detect-protocol";
+import type { PaperEvidence } from "@/lib/paper-evidence";
+import { probeListener, probeListenerSetting } from "@/lib/probe-hook";
 
 /**
  * The build-time switch. esbuild's `define` replaces the member expression
@@ -91,6 +93,23 @@ export interface DetectProbe {
   timedOut: boolean;
   /** A miss on a moved scene ended the hold on the tracked quad. */
   holdBroken: boolean;
+  /** Where the pass ran. */
+  lane?: "worker" | "main";
+  /** What the pass cost the main thread (the whole pass on the main lane; the grab and hand-over on the worker's). */
+  mainMs?: number | null;
+  /** The worker's own time on the pass (worker lane). */
+  computeMs?: number | null;
+  /** Time the frame waited in the worker's queue. */
+  queueMs?: number | null;
+  /** The answer refined onto the paper's edges on this frame (what is drawn), `null` when that did not move it. */
+  refinedQuad?: NormalizedQuad | null;
+  refineMs?: number | null;
+  /** The paper evidence for the drawn quad, when it was read. */
+  evidence?: PaperEvidence | null;
+  /** After this pass the tracked quad counts as a found sheet. */
+  locked?: boolean;
+  /** Why an answer that cleared the floor was not taken (a classical quad that failed its sanity checks, say). */
+  rejected?: string | null;
 }
 
 /** What the viewfinder is drawing, sampled at most every ~100 ms. */
@@ -102,6 +121,8 @@ export interface OverlayProbe {
   opacity: number;
   hasQuad: boolean;
   searching: boolean;
+  /** The drawn quad is a found sheet (evidence behind it), not a candidate. */
+  locked?: boolean;
 }
 
 /** A chip or notice over the viewfinder appearing (`shown`) or going away. */
@@ -158,6 +179,13 @@ export interface CaptureProbe {
   grab: number | null;
   /** When that preview frame was drawn off the `<video>`. */
   grabbedAt: number | null;
+  /**
+   * When the corners came from the classical fall-through, what the other
+   * capture policy (no fall-through) would have opened the confirm screen
+   * with: the buffered live quad (refined) where one could travel, else none.
+   * Absent when the policies agree.
+   */
+  alternative?: { corners: NormalizedQuad | null; cornersFrom: CornersFrom } | null;
 }
 
 /**
@@ -204,6 +232,29 @@ export interface CaptureDetectProbe {
   accepted: boolean;
   width: number;
   height: number;
+  /** Where it ran. */
+  lane?: "worker" | "main";
+  /** Time it waited in the worker's queue (behind a live pass already running). */
+  queueMs?: number | null;
+  /** The model answered nothing and the classical detector was asked. */
+  fellThrough?: boolean;
+  /** Why the model was not asked: `busy` = a live pass held it (a downgrade), else `null`. */
+  mlSkipped?: "busy" | "not-ready" | "disabled" | null;
+}
+
+/** The session's detection lane was decided (or changed). */
+export interface LaneProbe {
+  type: "lane";
+  t: number;
+  lane: "worker" | "main";
+  reason: LaneReason;
+}
+
+/** The model's runtime came up (`ok`) or was latched off. */
+export interface MlReadyProbe {
+  type: "ml-ready";
+  t: number;
+  ok: boolean;
 }
 
 /**
@@ -287,7 +338,9 @@ export type ProbeEvent =
   | RefineProbe
   | StillProbe
   | ConfirmOpenProbe
-  | ConfirmDoneProbe;
+  | ConfirmDoneProbe
+  | LaneProbe
+  | MlReadyProbe;
 
 /** Whether anyone is listening — checked before an event is built. */
 export function probing(): boolean {
@@ -295,6 +348,17 @@ export function probing(): boolean {
     return probeListener() !== null;
   }
   return false;
+}
+
+/**
+ * A bench-only setting the page gave its listener, or `undefined` — always
+ * `undefined` in the published build, where there is no listener to ask.
+ */
+export function probeSetting(name: string): unknown {
+  BENCH_PROBE: if ((globalThis as ProbeBuild).__SCAN_PROBE_BUILD__ === true) {
+    return probeListenerSetting(name);
+  }
+  return undefined;
 }
 
 /**

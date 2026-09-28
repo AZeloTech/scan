@@ -27,13 +27,15 @@
 import type { DetectionSource } from "@/lib/flatten";
 import { loadScanic } from "@/lib/scanic-runtime";
 import { mlDetectorOptions, type AssetUrls } from "@/lib/runtime-config";
+import { probe, probing } from "@/lib/probe";
 
 /**
- * The ML pass's base interval: ~1.4 passes a second.
+ * The slowest the live loop polls the model: ~1.4 passes a second.
  *
- * Slower than the classical loop's ~8/s on purpose. An inference is worth more
- * per pass than a contour trace, and the phones this product targets are the
- * ones a 60 ms pass every 125 ms would cook.
+ * It used to be the cadence itself; the loop now paces itself by what a pass
+ * costs (`lib/cadence.ts`) and looks up to eight times a second on a device
+ * that can afford it. This remains the ceiling — the beat a slow phone backs
+ * off to — and the floor under the ML quad's stale horizon.
  */
 export const ML_CADENCE_MS = 700;
 
@@ -291,12 +293,23 @@ export function isMlBusy(): boolean {
  * not load, and lands in the same place.
  */
 export function disableMl(): void {
+  if (!disabled && probing()) probe({ type: "ml-ready", t: performance.now(), ok: false });
   disabled = true;
 }
 
 /** A pass settled, whatever it found: the runtime is proven. */
 export function markMlReady(): void {
+  if (!ready && !disabled && probing()) probe({ type: "ml-ready", t: performance.now(), ok: true });
   ready = true;
+}
+
+/**
+ * The runtime that was proven lives somewhere that is gone (the detection
+ * worker died): this thread has to warm its own before the model is primary
+ * again. The fail-closed latch is untouched — a failure stays a failure.
+ */
+export function forgetMlReady(): void {
+  ready = false;
 }
 
 /**

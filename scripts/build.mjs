@@ -86,7 +86,7 @@ if (problems.length > 0) {
 }
 
 /**
- * The two Web Workers, each bundled into one self-contained file under
+ * The three Web Workers, each bundled into one self-contained file under
  * `assets/workers/`.
  *
  * Separate from the main build and deliberately not code-split: a worker that
@@ -127,6 +127,10 @@ await build({
 const WORKERS = [
   ["src/lib/render.worker.ts", "render.worker.js"],
   ["src/lib/dewarp/dewarp-classical.worker.ts", "dewarp-classical.worker.js"],
+  // scanic itself is NOT bundled in: the worker imports assets/scanic/ at run
+  // time, like the main thread does (`external` keeps a stray static import
+  // from dragging it in).
+  ["src/lib/detect.worker.ts", "detect.worker.js"],
 ];
 for (const [entry, name] of WORKERS) {
   // One `outfile` per worker rather than one `outdir` for both: esbuild mirrors
@@ -145,16 +149,24 @@ for (const [entry, name] of WORKERS) {
     legalComments: "none",
     define: DEFINE,
     dropLabels: DROP_LABELS,
+    external: ["scanic"],
     logLevel: "warning",
   });
 }
 
 const workers = await readdir(join(ROOT, "assets/workers"));
-for (const expected of ["render.worker.js", "dewarp-classical.worker.js"]) {
+for (const expected of ["render.worker.js", "dewarp-classical.worker.js", "detect.worker.js"]) {
   if (!workers.includes(expected)) {
     console.error(`\nassets/workers/${expected} was not emitted.\n`);
     process.exit(1);
   }
+}
+// The detection worker imports scanic from the asset directory at run time;
+// a copy of it (or of the ONNX Runtime) inside the worker would be a second,
+// unversioned scanic — and a second 3.4 MB session's worth of code.
+if (/ort-wasm-simd-threaded|scanic-mlDetector/.test(await readFile(join(ROOT, "assets/workers/detect.worker.js"), "utf8"))) {
+  console.error("\nassets/workers/detect.worker.js bundles scanic; it must import it from assetBaseUrl at run time.\n");
+  process.exit(1);
 }
 
 await writeFile(join(DIST, "meta.json"), JSON.stringify(result.metafile), "utf8");
