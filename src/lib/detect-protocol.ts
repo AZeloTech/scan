@@ -97,8 +97,9 @@ export interface DetectMessage {
   evidence: boolean;
   /**
    * The quad the overlay is holding (pixels of this frame's size), to be
-   * judged by the evidence on this frame when the detector finds nothing —
-   * a page that was slid away leaves no edges where it was. `null`: none.
+   * judged by the evidence on this frame when the detector finds nothing or
+   * finds a quad somewhere else — a page that was slid away leaves no edges
+   * where it was. `null`: none.
    */
   held: CornerPoints | null;
   /**
@@ -188,7 +189,7 @@ export interface ResultReply {
   /** What the refinement cost, ms, `null` when it did not run. */
   refineMs: number | null;
   evidence: PaperEvidence | null;
-  /** The evidence for `held` on this frame, when the detector found nothing. */
+  /** The evidence for `held` on this frame, when the detector found nothing or found a quad away from it. */
   heldEvidence: PaperEvidence | null;
   hint: FrameReading | null;
 }

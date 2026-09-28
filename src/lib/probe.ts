@@ -41,6 +41,7 @@ import type { NormalizedQuad } from "@/lib/quad";
 import type { SideReport } from "@/lib/refine";
 import type { LaneReason } from "@/lib/detect-protocol";
 import type { PaperEvidence } from "@/lib/paper-evidence";
+import type { FrameReading } from "@/lib/hints";
 import { probeListener, probeListenerSetting } from "@/lib/probe-hook";
 
 /**
@@ -110,6 +111,10 @@ export interface DetectProbe {
   locked?: boolean;
   /** Why an answer that cleared the floor was not taken (a classical quad that failed its sanity checks, say). */
   rejected?: string | null;
+  /** The evidence read where the found sheet was held, when this pass looked there. */
+  heldEvidence?: PaperEvidence | null;
+  /** The frame's focus and light, when this pass read them (`lib/hints.ts`). */
+  reading?: FrameReading | null;
 }
 
 /** What the viewfinder is drawing, sampled at most every ~100 ms. */
@@ -123,6 +128,12 @@ export interface OverlayProbe {
   searching: boolean;
   /** The drawn quad is a found sheet (evidence behind it), not a candidate. */
   locked?: boolean;
+  /** The ready cue is on the brackets (`lib/guidance.ts`). */
+  ready?: boolean;
+  /** Auto-capture's countdown (0–1) while it runs, else null. */
+  countdown?: number | null;
+  /** The last watch of the camera while the cue was on: its motion score against the confirmed frame (`hooks/useLiveDetect.ts`). */
+  watch?: number | null;
 }
 
 /** A chip or notice over the viewfinder appearing (`shown`) or going away. */
@@ -143,7 +154,8 @@ export interface CaptureProbe {
   t: number;
   /** When the corners were resolved, just before the canonical is encoded. */
   doneAt: number;
-  trigger: "shutter" | "frame";
+  /** `auto`: auto-capture fired it (`lib/guidance.ts`), through the same path as a tap. */
+  trigger: "shutter" | "frame" | "auto";
   /** The still photo became the page (it arrived and matched the preview's shape). */
   stillUsed: boolean;
   /** The still that arrived, whether or not it was used. */

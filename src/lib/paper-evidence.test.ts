@@ -3,9 +3,12 @@ import test from "node:test";
 
 import {
   classicalQuadSane,
+  GLARE_LUMA,
   minInteriorAngle,
   PAPER,
   paperEvidence,
+  paperLike,
+  paperSurface,
   sideRatio,
   sidesOnFrameBorder,
 } from "./paper-evidence.ts";
@@ -118,6 +121,76 @@ test("a keyboard is not: a third of it is the deck between the keys", () => {
   });
   const e = paperEvidence(data, W, H, quad);
   assert.ok(e !== null && !e.ok, JSON.stringify(e));
+});
+
+test("a sheet under three-quarters background must be mostly print off it (the black keyboard)", () => {
+  // The numbers a black keyboard on a wooden desk read at (session runs):
+  // strong sides, a 0.70 "background" of keycaps, little ink.
+  const keyboard = {
+    sidesSupported: 3,
+    sidesKnown: 3,
+    sideSupport: [1, 1, 1, null],
+    background: 0.7,
+    ink: 0.031,
+    counterInk: 0.012,
+    inkSpread: 0.39,
+    solidInk: 0,
+    backgroundSpread: 0.03,
+  };
+  assert.equal(paperLike(keyboard), false);
+  assert.equal(paperLike(keyboard, { ...PAPER, minInkOfRest: 0 }), true);
+  // A dense real page at the same background share holds far more ink.
+  assert.equal(paperLike({ ...keyboard, ink: 0.106, counterInk: 0.03 }), true);
+  // Above the marginal line the rule does not apply (a sparse, faint page).
+  assert.equal(paperSurface({ ...keyboard, background: 0.95, ink: 0.013, counterInk: 0 }), true);
+});
+
+test("little ink spread evenly over the whole sheet is a texture, not print (the woven place mat)", () => {
+  // A white woven place mat as the breaker's still-lookalikes session read it.
+  const mat = {
+    sidesSupported: 4,
+    sidesKnown: 4,
+    sideSupport: [0.9, 0.95, 0.9, 0.92],
+    background: 0.9,
+    ink: 0.028,
+    counterInk: 0,
+    inkSpread: 0.86,
+    solidInk: 0,
+    backgroundSpread: 0.02,
+  };
+  assert.equal(paperLike(mat), false);
+  assert.equal(paperLike(mat, { ...PAPER, textureInk: 0 }), true);
+  // A faint page with as little ink holds it in lines: half its blocks or so.
+  assert.equal(paperLike({ ...mat, inkSpread: 0.56 }), true);
+  // A page with real print spread all over is print.
+  assert.equal(paperLike({ ...mat, ink: 0.08, inkSpread: 0.92 }), true);
+});
+
+test("the glare share is the interior clipped white, and no part of the verdict", () => {
+  const noise = rng(9);
+  const hot = (x: number, y: number): boolean => Math.hypot(x - 180, y - 280) < 60;
+  const data = image((x, y) => (inPage(x, y) ? (hot(x, y) ? 255 : printed(x, y) ? 60 : 225 + noise() * 6) : 55 + noise() * 20));
+  const e = paperEvidence(data, W, H, quad);
+  assert.ok(e !== null);
+  // A 60 px disc in a 200 × 280 page, a little under the inset interior's 0.24.
+  assert.ok(e.glare > 0.15 && e.glare < 0.3, `glare ${e.glare}`);
+  const clean = paperEvidence(image((x, y) => (inPage(x, y) ? (printed(x, y) ? 60 : 225) : 55)), W, H, quad);
+  assert.ok(clean !== null && clean.glare === 0 && GLARE_LUMA > 225);
+  // A page exposed to the top of the range is bright, not glared.
+  const bright = paperEvidence(image((x, y) => (inPage(x, y) ? (printed(x, y) ? 60 : 255) : 55)), W, H, quad);
+  assert.ok(bright !== null && bright.glare === 0, `glare ${bright?.glare}`);
+});
+
+test("an edgeless side with the page's paper running on to the frame's edge is open", () => {
+  const noise = rng(10);
+  // The page runs off the right of the frame; the quad was drawn short of it, at x = 280.
+  const data = image((x, y) => (x >= page.x0 && y >= page.y0 && y < page.y1 ? (printed(x, y) ? 60 : 225) + noise() * 6 : 55 + noise() * 20));
+  const e = paperEvidence(data, W, H, quad);
+  assert.ok(e !== null && e.sideSupport[1] !== null && e.sideSupport[1] < 0.3, JSON.stringify(e?.sideSupport));
+  assert.equal(e.open, 1);
+  // The same quad on a page that ends there has no open side.
+  const whole = paperEvidence(image((x, y) => (inPage(x, y) ? (printed(x, y) ? 60 : 225) + noise() * 6 : 55 + noise() * 20)), W, H, quad);
+  assert.ok(whole !== null && whole.open === 0);
 });
 
 test("a quad drawn across a textured desk is not: no edges, all texture", () => {

@@ -54,6 +54,19 @@ export interface PaperEvidence {
   solidInk: number;
   /** How much the background itself varies from block to block (0–1 of the range). */
   backgroundSpread: number;
+  /**
+   * Share of the interior clipped white ({@link GLARE_LUMA} and up) — a
+   * lamp's reflection washing the print out. Not part of the verdict: it is
+   * what the viewfinder's "reflection" hint reads (`lib/guidance.ts`).
+   */
+  glare: number;
+  /**
+   * Sides with no edge under them past which the page's own paper runs on to
+   * the frame's edge ({@link openSides}) — a page cut off by the frame whose
+   * quad the model drew short of it. Not part of the verdict: what the
+   * viewfinder's "move back" hint reads (`lib/guidance.ts`).
+   */
+  open: number;
 }
 
 /** The rules the numbers are judged by (see {@link judgeEvidence}); defaults in {@link PAPER}. */
@@ -91,6 +104,24 @@ export interface EvidenceRules {
   maxBackgroundSpread: number;
   /** Largest share of the ink that may be solid area. */
   maxSolidInk: number;
+  /**
+   * On a marginal sheet — background share under `marginalBackground` — the
+   * rest of the interior must be mostly print: ink at least `minInkOfRest`
+   * of the non-background share. A page with a quarter of its interior off
+   * its background has that much text; a black keyboard's keycaps read as a
+   * 0.68–0.71 "background" whose rest is mid-grey gaps and legends, not ink.
+   */
+  marginalBackground: number;
+  minInkOfRest: number;
+  /**
+   * A sheet with little ink — under `textureInk` — spread over more than
+   * `textureSpread` of its blocks is a texture, not print: a woven place mat
+   * reads 0.026–0.029 ink in 0.75–0.92 of its blocks, while every page on the
+   * bench with that little ink (a faint form, a dim or distant page) holds it
+   * in 0.56 of its blocks or fewer — print sits in lines and blocks.
+   */
+  textureInk: number;
+  textureSpread: number;
 }
 
 /**
@@ -106,7 +137,19 @@ export interface EvidenceRules {
  * the "sheet", the gaps and legends the "ink"), a page 0.8 and up; over the
  * model's passes in 10-seed session runs that cut the empty-desk readings
  * passing as paper from 35 of 676 to 12, and not one of the 7896 readings of
- * the hold sessions nor any synthetic or real page. The low edge step is deliberate: a white page on a white table
+ * the hold sessions nor any synthetic or real page. The same keyboard still
+ * passed at 0.68–0.71 with little ink (0.03–0.046: ink over the non-background
+ * share 0.09–0.15), so a sheet under 0.75 background must hold ink at least
+ * 0.22 of the rest — every real and synthetic page there holds 0.31 or more.
+ * Over the Phase 3 session runs (cpu 1 and 4) that cut the page-less readings
+ * passing as paper from 30 of 1165 to 4, and changed not one reading of a page
+ * (8064 hold-session readings, 186 synthetic pages, 94 real stills, the
+ * replayed clips). A woven place mat still passed on four clean sides with a
+ * little ink everywhere — a texture — so little ink spread over most of the
+ * sheet is not print ({@link EvidenceRules.textureInk}); that turned away its
+ * readings in the breaker's still-lookalikes session and changed none of the
+ * 186 synthetic pages, 94 real stills, replayed clips or 19,433 accepted
+ * readings of pages in the Phase 4 session runs. The low edge step is deliberate: a white page on a white table
  * differs from it by 3–8 luma levels, and what makes that an edge is that it
  * is the same step, in the same place, all along the side.
  */
@@ -127,6 +170,10 @@ export const PAPER: EvidenceRules = {
   counterFloor: 0.01,
   maxBackgroundSpread: 0.35,
   maxSolidInk: 0.35,
+  marginalBackground: 0.75,
+  minInkOfRest: 0.22,
+  textureInk: 0.04,
+  textureSpread: 0.75,
 };
 
 /** The step's boxes, and how far from the side it is looked for — shares of the frame's short side. */
@@ -137,6 +184,30 @@ const PROFILES = 20;
 const PROFILE_SPAN = [0.12, 0.88] as const;
 /** A side needs this many judged profiles to be judged at all. */
 const MIN_JUDGED = 6;
+
+/** A side under this support has no edge under it: {@link openSides} looks past it. */
+const OPEN_SIDE_SUPPORT = 0.3;
+/** Rays past such a side, and how many must find the page's paper all the way to the frame's edge. */
+const OPEN_RAYS = [0.25, 0.5, 0.75] as const;
+const OPEN_RAYS_NEEDED = 2;
+/** A ray sample is the page's paper within this much luma of its background… */
+const OPEN_BAND = 18;
+/** …and a ray finds paper when this share of its samples (at least {@link OPEN_MIN_SAMPLES}) is. */
+const OPEN_SHARE = 0.7;
+const OPEN_MIN_SAMPLES = 5;
+
+/** Luma (0–255) from which an interior sample counts as clipped white. */
+export const GLARE_LUMA = 250;
+/**
+ * The glare share: interior blocks (of 36) whose median is washed out
+ * ({@link GLARE_BLOCK_LUMA} and up), counted only while at least
+ * {@link GLARE_LIT_SHARE} of the blocks sit at the paper's own level
+ * ({@link GLARE_PAPER_MAX} and under) — a hot spot, not a page exposed
+ * bright all over.
+ */
+export const GLARE_BLOCK_LUMA = 252;
+export const GLARE_PAPER_MAX = 245;
+export const GLARE_LIT_SHARE = 0.3;
 
 /** The interior grid: about one sample per 3 px, within these bounds per axis. */
 const GRID_MIN = 20;
@@ -206,6 +277,8 @@ export interface EvidenceSamples {
   blocks: number;
   /** The background of each block (its median luma). */
   blockMedians: number[];
+  /** Share of the in-frame interior samples at {@link GLARE_LUMA} or brighter (absent: not measured). */
+  clipped?: number;
 }
 
 /**
@@ -332,16 +405,18 @@ function measureInterior(data: Uint8ClampedArray, width: number, height: number,
   const residuals = new Float32Array(cols * rows);
   const blockOf = new Uint8Array(cols * rows);
   let inFrame = 0;
+  let clipped = 0;
   for (let j = 0; j < rows; j += 1) {
     for (let i = 0; i < cols; i += 1) {
       const at = j * cols + i;
       const y = grid[at];
       residuals[at] = Number.isNaN(y) ? Number.NaN : y - background(i, j);
       if (!Number.isNaN(y)) inFrame += 1;
+      if (y >= GLARE_LUMA) clipped += 1;
       blockOf[at] = Math.min(BLOCKS - 1, Math.floor((j * BLOCKS) / rows)) * BLOCKS + Math.min(BLOCKS - 1, Math.floor((i * BLOCKS) / cols));
     }
   }
-  return { residuals, cols, rows, inFrame, blockOf, blockMedians: known };
+  return { residuals, cols, rows, inFrame, blockOf, blockMedians: known, clipped: inFrame > 0 ? clipped / inFrame : 0 };
 }
 
 /**
@@ -455,22 +530,38 @@ export function judgeEvidence(samples: EvidenceSamples, rules: EvidenceRules = P
     solidInk: inkSamples > 0 ? solid / inkSamples : 0,
     backgroundSpread: blockRange,
   };
-  return { ok: paperLike(numbers, rules), ...numbers };
+  // A reflection is a hot spot: blocks of the interior washed white while a
+  // good part of the page is not. A page exposed to the top of the range is
+  // bright all over, not glared — nothing is left to compare with.
+  const blocks = samples.blockMedians;
+  const washed = blocks.filter((b) => b >= GLARE_BLOCK_LUMA).length;
+  const lit = blocks.filter((b) => b <= GLARE_PAPER_MAX).length;
+  const glare = blocks.length > 0 && lit >= GLARE_LIT_SHARE * blocks.length ? washed / blocks.length : 0;
+  return { ok: paperLike(numbers, rules), ...numbers, glare, open: 0 };
 }
 
-/** The decision over the numbers. */
-export function paperLike(e: Omit<PaperEvidence, "ok">, rules: EvidenceRules = PAPER): boolean {
+/** The decision over the numbers (the glare share is not one of them). */
+export function paperLike(e: Omit<PaperEvidence, "ok" | "glare" | "open">, rules: EvidenceRules = PAPER): boolean {
   const sidesNeeded = Math.min(rules.minSides, Math.max(2, e.sidesKnown - 1));
+  return e.sidesKnown >= 2 && e.sidesSupported >= sidesNeeded && paperSurface(e, rules);
+}
+
+/**
+ * The surface half of {@link paperLike}: paper with print on it, whatever
+ * the sides say — what a page the frame cuts off still shows (its cut sides
+ * run along the frame's edge, where there is no step to find).
+ */
+export function paperSurface(e: Omit<PaperEvidence, "ok" | "glare" | "open">, rules: EvidenceRules = PAPER): boolean {
   return (
-    e.sidesKnown >= 2 &&
-    e.sidesSupported >= sidesNeeded &&
     e.background >= rules.minBackground &&
     e.ink >= (e.background >= rules.faintBackground ? rules.faintInk : rules.minInk) &&
     e.ink <= rules.maxInk &&
     e.inkSpread >= rules.minInkSpread &&
     e.counterInk <= e.ink * rules.maxCounterRatio + rules.counterFloor &&
     e.backgroundSpread <= rules.maxBackgroundSpread &&
-    e.solidInk <= rules.maxSolidInk
+    e.solidInk <= rules.maxSolidInk &&
+    (e.background >= rules.marginalBackground || e.ink >= rules.minInkOfRest * (1 - e.background)) &&
+    !(e.ink < rules.textureInk && e.inkSpread > rules.textureSpread)
   );
 }
 
@@ -486,7 +577,64 @@ export function paperEvidence(
   rules: EvidenceRules = PAPER,
 ): PaperEvidence | null {
   const samples = measureEvidence(data, width, height, quad);
-  return samples === null ? null : judgeEvidence(samples, rules);
+  if (samples === null) return null;
+  const evidence = judgeEvidence(samples, rules);
+  return { ...evidence, open: openSides(data, width, height, quad, evidence.sideSupport, median(samples.blockMedians)) };
+}
+
+/**
+ * How many of the quad's edgeless sides (support under
+ * {@link OPEN_SIDE_SUPPORT}) have the page's own paper past them all the way
+ * to the frame's edge: along rays out of the side (from {@link OPEN_RAYS} of
+ * its length), at least {@link OPEN_SHARE} of the samples within
+ * {@link OPEN_BAND} of the page's background luma, on
+ * {@link OPEN_RAYS_NEEDED} of the rays. A side the model drew across the
+ * page — its corner pulled inside because the frame cut the page off — is
+ * such a side; one drawn across the desk is not.
+ */
+export function openSides(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  quad: CornerPoints,
+  sideSupport: readonly (number | null)[],
+  paperLuma: number,
+): number {
+  const c = corners(quad);
+  const cx = (c[0].x + c[1].x + c[2].x + c[3].x) / 4;
+  const cy = (c[0].y + c[1].y + c[2].y + c[3].y) / 4;
+  const start = Math.max(3, Math.round(EDGE_REACH * Math.min(width, height)));
+  let open = 0;
+  for (let side = 0; side < 4; side += 1) {
+    const support = sideSupport[side];
+    if (support === null || support === undefined || support >= OPEN_SIDE_SUPPORT) continue;
+    const a = c[side];
+    const b = c[(side + 1) % 4];
+    const length = Math.hypot(b.x - a.x, b.y - a.y);
+    if (length < 4) continue;
+    let nx = -(b.y - a.y) / length;
+    let ny = (b.x - a.x) / length;
+    if (((a.x + b.x) / 2 - cx) * nx + ((a.y + b.y) / 2 - cy) * ny < 0) {
+      nx = -nx;
+      ny = -ny;
+    }
+    let paperRays = 0;
+    for (const t of OPEN_RAYS) {
+      const px = a.x + (b.x - a.x) * t;
+      const py = a.y + (b.y - a.y) * t;
+      let samples = 0;
+      let paper = 0;
+      for (let d = start; ; d += 3) {
+        const value = luma(data, width, height, px + nx * d, py + ny * d);
+        if (value === null) break;
+        samples += 1;
+        if (Math.abs(value - paperLuma) <= OPEN_BAND) paper += 1;
+      }
+      if (samples >= OPEN_MIN_SAMPLES && paper / samples >= OPEN_SHARE) paperRays += 1;
+    }
+    if (paperRays >= OPEN_RAYS_NEEDED) open += 1;
+  }
+  return open;
 }
 
 /* ── the classical detector's quads ─────────────────────────────────────── */

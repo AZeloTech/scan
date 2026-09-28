@@ -59,6 +59,12 @@ export interface FrameReading {
   /** Scale-free blur/re-blur sharpness, 0…1. Higher is sharper. */
   sharpness: number;
   meanLuma: number;
+  /**
+   * The luma the brightest twentieth of the frame reaches (its 95th
+   * percentile): a dark desk in good light still has something bright in
+   * view; a dim room does not.
+   */
+  brightLuma: number;
 }
 
 function toGrayscale(data: Uint8ClampedArray, pixels: number): Float32Array {
@@ -75,13 +81,25 @@ export function readFrame(image: ImageData): FrameReading {
   const { width, height } = image;
   const pixels = width * height;
   if (pixels === 0) {
-    return { hint: "good", sharpness: 1, meanLuma: 255 };
+    return { hint: "good", sharpness: 1, meanLuma: 255, brightLuma: 255 };
   }
   const gray = toGrayscale(image.data, pixels);
 
   let lumaSum = 0;
-  for (let index = 0; index < pixels; index += 1) lumaSum += gray[index];
+  const histogram = new Uint32Array(256);
+  for (let index = 0; index < pixels; index += 1) {
+    lumaSum += gray[index];
+    histogram[Math.min(255, Math.max(0, Math.round(gray[index])))] += 1;
+  }
   const meanLuma = lumaSum / pixels;
+  let brightLuma = 255;
+  for (let level = 255, above = 0; level >= 0; level -= 1) {
+    above += histogram[level];
+    if (above >= pixels * 0.05) {
+      brightLuma = level;
+      break;
+    }
+  }
 
   const sharpness = sharpnessOf(gray, width, height);
 
@@ -91,7 +109,7 @@ export function readFrame(image: ImageData): FrameReading {
   if (sharpness < LIVE_SHARPNESS_FLOOR) hint = "hold_still";
   else if (meanLuma < LUMA_FLOOR) hint = "low_light";
 
-  return { hint, sharpness, meanLuma };
+  return { hint, sharpness, meanLuma, brightLuma };
 }
 
 

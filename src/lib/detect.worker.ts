@@ -278,9 +278,10 @@ async function run(job: Job): Promise<void> {
       }
       if (job.evidence) evidence = paperEvidence(pixels.data, job.width, job.height, corners);
     }
-    // Nothing found: is the page the overlay holds still there?
+    // Nothing found — or a quad found somewhere else entirely: is the page
+    // the overlay holds still there?
     let heldEvidence = null;
-    if (job.evidence && !found.success && job.held !== null && workContext !== null) {
+    if (job.evidence && job.held !== null && workContext !== null && (!found.success || found.corners === null || movedAway(found.corners, job.held, job.width, job.height))) {
       const pixels = workContext.getImageData(0, 0, job.width, job.height);
       heldEvidence = paperEvidence(pixels.data, job.width, job.height, job.held);
     }
@@ -319,6 +320,20 @@ async function run(job: Job): Promise<void> {
       work.height = 1;
     }
   }
+}
+
+/**
+ * Whether a found quad lies away from the held one — a corner farther than
+ * {@link HELD_AWAY} of the frame's diagonal (the live loop's jump threshold,
+ * `JUMP_RESET_DIAG`): the page the overlay holds may have gone.
+ */
+const HELD_AWAY = 0.08;
+function movedAway(found: NonNullable<ResultReply["corners"]>, held: NonNullable<DetectMessage["held"]>, width: number, height: number): boolean {
+  const diagonal = Math.hypot(width, height);
+  for (const key of ["topLeft", "topRight", "bottomRight", "bottomLeft"] as const) {
+    if (Math.hypot(found[key].x - held[key].x, found[key].y - held[key].y) > HELD_AWAY * diagonal) return true;
+  }
+  return false;
 }
 
 async function pump(): Promise<void> {
