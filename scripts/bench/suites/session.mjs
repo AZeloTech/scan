@@ -16,9 +16,13 @@
  * pre-rendered.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { cpuThrottle } from "../browser.mjs";
+import { BENCH_DIR } from "../paths.mjs";
+import { FRAME_CACHE_VERSION } from "../app/session-player.js";
+import { buildSession, loopedFrame } from "../emulator/index.js";
 import {
   CONTENT_CLIP_MIN_FRACTION,
   LOCK_TOLERANCE,
@@ -43,6 +47,22 @@ export const PHONE = {
 
 /** The stream the fake camera delivers, unless `--stream` says otherwise. */
 export const DEFAULT_STREAM = "720x1280";
+
+/**
+ * The frame-cache key of a session's pre-rendered frames: the script, the
+ * stream size, and everything that decides their pixels — the emulator's
+ * source, the player's render settings and the browser build. Any change to
+ * any of them is another key, so a stale frame is never replayed.
+ */
+export function frameCacheKey(id, seed, stream, browserVersion) {
+  const hash = createHash("sha256");
+  const dir = join(BENCH_DIR, "emulator");
+  for (const name of readdirSync(dir).filter((n) => n.endsWith(".js")).sort()) {
+    hash.update(name).update(readFileSync(join(dir, name)));
+  }
+  hash.update(FRAME_CACHE_VERSION).update(browserVersion);
+  return `${id}-${seed}-${stream}-${hash.digest("hex").slice(0, 16)}`;
+}
 
 const pct = (v, digits = 1) => (v === null || v === undefined ? "–" : `${(v * 100).toFixed(digits)} %`);
 const diag = (v) => (v === null || v === undefined ? "–" : `${(v * 100).toFixed(2)}`);
@@ -144,6 +164,69 @@ function render(results) {
     }
     out.push("");
   }
+  if (results.summary) {
+    const n = (v, d = 0) => (v === null || v === undefined ? "–" : Number(v).toFixed(d));
+    out.push("## Live loop");
+    out.push("");
+    out.push(
+      "The overlay over the hold windows, **pooled over runs and time-weighted** (on page = within 2 % of the diagonal; " +
+        "wrong = a corner > 3 % off; none = nothing shown). Time to lock over runs — a run that never locked counts as never in the p50. " +
+        "Stale = how long the overlay stayed on a swapped-out page (p95 over runs that left it). Exposure = share of an empty desk's time a quad was shown.",
+    );
+    out.push("");
+    out.push(
+      "| session | hold on page / wrong / none | after swap on page / wrong | time to lock p50 / mean (never) ms | stale p95 ms | exposure | tap→confirm p50 ms | capture fall-through / downgraded |",
+    );
+    out.push("|---|---|---|---:|---:|---:|---:|---:|");
+    for (const [session, { all: a }] of Object.entries(results.summary)) {
+      out.push(
+        `| ${session} | ${pct(a.holdOnPageShare, 0)} / ${pct(a.holdWrongShare, 0)} / ${pct(a.holdNoneShare, 0)} | ` +
+          `${pct(a.holdAfterSwapOnPageShare, 0)} / ${pct(a.holdAfterSwapWrongShare, 0)} | ${ms(a.timeToLockP50)} / ${ms(a.timeToLockMean)} (${a.neverLocked}) | ` +
+          `${ms(a.staleAfterSwapP95)} | ${pct(a.falseLockExposure, 0)} | ${ms(a.tapToConfirmP50)} | ${a.captureFallThrough} / ${a.captureDowngraded ?? "n/a"} |`,
+      );
+    }
+    out.push("");
+    const policies = Object.entries(results.summary).filter(([, { all: a }]) => (a.fallThroughPolicy?.fellThrough ?? 0) > 0);
+    if (policies.length > 0) {
+      out.push(
+        "Captures whose corners came from the **classical fall-through** (the model answered no page on the capture), judged as they were and as the " +
+          "no-fall-through policy would have opened them (the buffered live quad where one could travel, else none) — paired, same image:",
+      );
+      out.push("");
+      out.push("| session | fall-through captures | failed: with / without | severe: with / without |");
+      out.push("|---|---:|---:|---:|");
+      for (const [session, { all: a }] of policies) {
+        const p = a.fallThroughPolicy;
+        out.push(`| ${session} | ${p.fellThrough} | ${p.wrongWith} / ${p.wrongWithout} | ${p.severeWith} / ${p.severeWithout} |`);
+      }
+      out.push("");
+    }
+    out.push("## What it cost");
+    out.push("");
+    out.push(
+      "Over the live part of each run (camera live → end of script), averaged over runs: main-thread long tasks (> 50 ms) per minute and their share of the time; " +
+        "the ML loop's cadence (interval between regular passes p50 / p95, captures excluded), its pass time and the main thread's own share of a pass " +
+        "(where the probe reports it); the JS heap's slope; start-up on the camera clock (camera open → the model's first answer → first lock, p50); " +
+        "remounts (warm: mount → first ML answer → lock); what outlived the flow.",
+    );
+    out.push("");
+    out.push(
+      "| session | long tasks /min | long-task share | ML interval p50 / p95 ms | ML passes /min | ML pass ms p50 (main) | heap slope MB/min | camera→ML / →lock ms | remount →ML / →lock ms | lanes | outlived the flow |",
+    );
+    out.push("|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|");
+    for (const [session, { all: a }] of Object.entries(results.summary)) {
+      const leaks =
+        a.leaks === null || a.leaks === undefined
+          ? "–"
+          : `workers alive ${a.leaks.workersAliveMax} (+${a.leaks.workersAddedByRemounts} by remounts), bitmaps open ${a.leaks.bitmapsOpenMax}, collected open ${a.leaks.bitmapsCollectedOpenMax}${a.leaks.gcRan ? "" : " (no GC)"}`;
+      out.push(
+        `| ${session} | ${n(a.longTasksPerMinute, 1)} | ${pct(a.longTaskShare, 1)} | ${ms(a.mlIntervalP50)} / ${ms(a.mlIntervalP95)} | ${n(a.mlPassesPerMinute)} | ` +
+          `${n(a.mlPassMsP50, 1)} (${n(a.mlMainMsP50, 1)}) | ${n(a.heapSlopeMBPerMin, 2)} | ${ms(a.cameraToMlMsP50)} / ${ms(a.cameraToLockP50)} | ` +
+          `${ms(a.remountToMlMsP50)} / ${ms(a.remountToLockP50)} | ${Object.entries(a.lanes ?? {}).map(([k, v]) => `${k} ×${v}`).join(", ") || "–"} | ${leaks} |`,
+      );
+    }
+    out.push("");
+  }
   out.push("## Sessions");
   out.push("");
   out.push(
@@ -212,10 +295,10 @@ function render(results) {
   return out.join("\n");
 }
 
-/** The overlay shown when frame `k` was on screen, and the last accepted pass. */
-function overlayFor(record, k) {
-  const shown = record.presented.find((p) => p.k >= k);
-  const at = shown?.at ?? record.startedAt + (k * 1000) / 30;
+/** The overlay shown when camera frame `n` was on screen, and the last accepted pass. */
+function overlayFor(record, n) {
+  const shown = record.presented.find((p) => (p.n ?? p.k) >= n);
+  const at = shown?.at ?? record.startedAt + (n * 1000) / 30;
   let overlay = null;
   let detect = null;
   for (const e of record.events) {
@@ -232,13 +315,18 @@ function filmStrip(script, record, score) {
   const frame = script.frame;
   const times = new Set();
   for (const value of Object.values(script.marks)) if (Number.isFinite(value)) times.add(value + 200);
-  for (let t = 500; t < script.duration; t += 1500) times.add(t);
-  const frames = [...new Set([...times].map((t) => Math.min(record.frames.length - 1, Math.round((t * 30) / 1000))))];
+  const step = script.duration > 20000 ? 5000 : 1500;
+  for (let t = 500; t < script.duration; t += step) times.add(t);
+  // Camera frames; a looped session shows rendered frame `loopedFrame(n)` at camera frame n.
+  const frames = [...new Set([...times].map((t) => Math.round((t * 30) / 1000)))].filter((n) =>
+    script.loop === undefined ? n < record.frames.length : true,
+  );
   const tiles = frames
     .sort((a, b) => a - b)
-    .map((k) => {
-      const truth = record.frames[k];
-      const { overlay, detect } = overlayFor(record, k);
+    .map((n) => {
+      const k = script.loop === undefined ? n : loopedFrame(script, n);
+      const truth = { ...record.frames[k], t: (n * 1000) / 30 };
+      const { overlay, detect } = overlayFor(record, n);
       const error = overlay !== null && truth.quad !== null ? quadDistance(overlay, truth.quad, frame) : null;
       return {
         frame: k,
@@ -273,6 +361,20 @@ function filmStrip(script, record, score) {
   return tiles;
 }
 
+/**
+ * The bench-only settings a run hands the app through the probe
+ * (`probeSetting`, `src/lib/probe-hook.ts`): `--lane main|worker` forces the
+ * detection lane; with `--cpu N` a worker's passes are stretched to N× their
+ * cost (`workerSlowdown`) — CDP throttles only the page's own thread, and a
+ * worker left at full speed would flatter the worker lane.
+ */
+export function sessionKnobs(options) {
+  const knobs = {};
+  if (options.lane !== null && options.lane !== undefined) knobs.lane = options.lane;
+  if (options.cpu > 1) knobs.workerSlowdown = options.cpu;
+  return knobs;
+}
+
 export async function runSessionSuite({ page, throttle: _unused, options, outDir, log, environment }) {
   const browser = page.context().browser();
   const origin = new URL(page.url()).origin;
@@ -283,18 +385,32 @@ export async function runSessionSuite({ page, throttle: _unused, options, outDir
   const listing = await openSessionPage(browser, origin);
   const known = await listing.page.evaluate(() => window.__session.sessions());
   await listing.context.close();
-  const ids = options.sessions ?? known.map((s) => s.id);
+  // A group name (`regression`, `all`) stands for its sessions.
+  const ids = [
+    ...new Set(
+      (options.sessions ?? known.filter((s) => s.inDefault !== false).map((s) => s.id)).flatMap((id) =>
+        id === "all"
+          ? known.map((s) => s.id)
+          : known.some((s) => s.group === id)
+            ? known.filter((s) => s.group === id).map((s) => s.id)
+            : [id],
+      ),
+    ),
+  ];
   for (const id of ids) {
     if (!known.some((s) => s.id === id)) throw new Error(`unknown session "${id}" (known: ${known.map((s) => s.id).join(", ")})`);
   }
+  const knobs = sessionKnobs(options);
+  const browserVersion = browser.version();
   for (const id of ids) {
     for (let seed = 1; seed <= options.sessionSeeds; seed += 1) {
       const started = Date.now();
       const { context, page: phone, errors } = await openSessionPage(browser, origin);
       try {
+        const cache = options.frameCache === false ? null : frameCacheKey(id, seed, options.stream, browserVersion);
         const prepared = await phone.evaluate(
-          ([name, s, size]) => window.__session.prepare(name, s, { size }),
-          [id, seed, options.stream],
+          ([name, s, size, key, settings]) => window.__session.prepare(name, s, { size, cache: key, knobs: settings }),
+          [id, seed, options.stream, cache, knobs],
         );
         const throttle = await cpuThrottle(phone);
         await throttle.set(options.cpu);
@@ -339,10 +455,13 @@ export async function runSessionSuite({ page, throttle: _unused, options, outDir
           record: { ...record, frames: record.frames.map((f) => ({ t: f.t, quad: f.quad, whole: f.whole, share: f.share })) },
           script: { ...script, scene: undefined, sceneFamily: script.scene.family },
         });
+        const perf = score.perf;
         log(
           `session: ${id} #${seed} — ${((Date.now() - started) / 1000).toFixed(0)} s ` +
-            `(prepared ${(prepared.prepare.totalMs / 1000).toFixed(0)} s, ${score.stream.fps?.toFixed(1) ?? "–"} fps, ` +
-            `${score.captures.map((c) => c.verdict).join(", ") || "no capture"})`,
+            `(prepared ${(prepared.prepare.totalMs / 1000).toFixed(0)} s${prepared.prepare.cached ? " from cache" : ""}, ${score.stream.fps?.toFixed(1) ?? "–"} fps, ` +
+            `${score.captures.map((c) => c.verdict).join(", ") || "no capture"}` +
+            `${perf?.longTasksPerMinute === null || perf?.longTasksPerMinute === undefined ? "" : `, ${perf.longTasksPerMinute.toFixed(0)} long tasks/min`}` +
+            `${perf?.lanes?.length ? `, lane ${perf.lanes.map((l) => `${l.lane} (${l.reason})`).join(" → ")}` : ""})`,
         );
         if (errors.length > 0) log(`session: ${id} #${seed} page errors: ${errors.slice(0, 3).join(" | ")}`);
       } finally {
@@ -410,8 +529,74 @@ export function summarize(rows) {
       falseLocks: [],
       exposure: [],
       missingData: 0,
+      holdMs: { observed: 0, locked: 0, wrong: 0, none: 0 },
+      holdAfterSwapMs: { observed: 0, locked: 0, wrong: 0, none: 0 },
+      tapToConfirm: [],
+      fallThrough: 0,
+      downgraded: null,
+      policy: { fellThrough: 0, wrongWith: 0, wrongWithout: 0, severeWith: 0, severeWithout: 0 },
+      longTasksPerMinute: [],
+      longTaskShare: [],
+      heapSlope: [],
+      heapEnd: [],
+      mlIntervalP50: [],
+      mlIntervalP95: [],
+      mlPassP50: [],
+      mlMainP50: [],
+      mlPerMinute: [],
+      cameraToMl: [],
+      cameraToLock: [],
+      mountToCamera: [],
+      remountLock: [],
+      remountMl: [],
+      leaks: [],
+      lanes: {},
     });
     entry.runs += 1;
+    const pool = (target, window) => {
+      if (window === undefined || window === null || !(window.observedMs > 0)) return;
+      target.observed += window.observedMs;
+      target.locked += (window.lockedShare ?? 0) * window.observedMs;
+      target.wrong += (window.wrongShare ?? 0) * window.observedMs;
+      target.none += (window.noneShare ?? 0) * window.observedMs;
+    };
+    pool(entry.holdMs, row.score.hold);
+    pool(entry.holdAfterSwapMs, row.score.holdAfterSwap);
+    for (const c of row.score.captures) if (Number.isFinite(c.tapToConfirmMs)) entry.tapToConfirm.push(c.tapToConfirmMs);
+    entry.fallThrough += row.score.captureDetects?.fallThrough ?? 0;
+    if (Number.isFinite(row.score.captureDetects?.downgraded)) {
+      entry.downgraded = (entry.downgraded ?? 0) + row.score.captureDetects.downgraded;
+    }
+    const perf = row.score.perf;
+    if (perf) {
+      if (perf.longTasksPerMinute !== null) entry.longTasksPerMinute.push(perf.longTasksPerMinute);
+      if (perf.longTaskShare !== null) entry.longTaskShare.push(perf.longTaskShare);
+      if (perf.heapSlopeMBPerMin !== null) entry.heapSlope.push(perf.heapSlopeMBPerMin);
+      if (perf.heapEndMB !== null) entry.heapEnd.push(perf.heapEndMB);
+      const ml = perf.cadence?.ml;
+      if (ml) {
+        if (ml.intervalP50 !== null) entry.mlIntervalP50.push(ml.intervalP50);
+        if (ml.intervalP95 !== null) entry.mlIntervalP95.push(ml.intervalP95);
+        if (ml.passMsP50 !== null) entry.mlPassP50.push(ml.passMsP50);
+        if (ml.mainMsP50 !== null) entry.mlMainP50.push(ml.mainMsP50);
+        entry.mlPerMinute.push(ml.perMinute);
+      }
+      for (const lane of perf.lanes ?? []) {
+        const key = `${lane.lane} (${lane.reason})`;
+        entry.lanes[key] = (entry.lanes[key] ?? 0) + 1;
+      }
+    }
+    const startup = row.score.startup;
+    if (startup) {
+      if (startup.cameraToMlMs !== null) entry.cameraToMl.push(startup.cameraToMlMs);
+      entry.cameraToLock.push(startup.cameraToLockMs);
+      if (startup.mountToCameraMs !== null) entry.mountToCamera.push(startup.mountToCameraMs);
+    }
+    for (const r of row.score.remounts ?? []) {
+      entry.remountLock.push(r.mountToLockMs);
+      if (r.mountToMlMs !== null) entry.remountMl.push(r.mountToMlMs);
+    }
+    if (row.score.leaks) entry.leaks.push(row.score.leaks);
     if (row.score.timeToLockMs !== undefined) entry.locks.push(row.score.timeToLockMs);
     const missing = row.score.missingCaptures ?? 0;
     entry.missing += missing;
@@ -439,6 +624,13 @@ export function summarize(rows) {
       if (Number.isFinite(c.unrefinedAtConfirm?.max)) entry.unrefinedErrors.push(c.unrefinedAtConfirm.max);
       if (Number.isFinite(c.refine?.ms)) entry.refineMs.push(c.refine.ms);
       if (offImage(c.confirmCorners)) entry.offImage += 1;
+      if (c.fellThrough) {
+        entry.policy.fellThrough += 1;
+        if (failed(c.verdict)) entry.policy.wrongWith += 1;
+        if (failed(c.alternativeVerdict)) entry.policy.wrongWithout += 1;
+        if (failed(c.verdict) || c.contentClipped === true) entry.policy.severeWith += 1;
+        if (failed(c.alternativeVerdict) || c.alternativeContentClipped === true) entry.policy.severeWithout += 1;
+      }
     }
     if (row.score.staleAfterSwap === "stuck") entry.stuck += 1;
     if (Number.isFinite(row.score.staleAfterSwapMs)) entry.stale.push(row.score.staleAfterSwapMs);
@@ -446,6 +638,14 @@ export function summarize(rows) {
     if (Number.isFinite(row.score.falseLockExposure?.share)) entry.exposure.push(row.score.falseLockExposure.share);
   }
   const avg = (list) => (list.length > 0 ? list.reduce((s, v) => s + v, 0) / list.length : null);
+  /** p50 over runs where a run that never got there counts as never (∞). */
+  const p50Never = (list) => {
+    if (list.length === 0) return null;
+    const sorted = list.map((v) => (v === null ? Infinity : v)).sort((a, b) => a - b);
+    const value = sorted[Math.floor((sorted.length - 1) / 2)];
+    return Number.isFinite(value) ? value : null;
+  };
+  const share = (pooled, key) => (pooled.observed > 0 ? pooled[key] / pooled.observed : null);
   return Object.fromEntries(
     Object.entries(out).map(([session, e]) => [
       session,
@@ -488,6 +688,53 @@ export function summarize(rows) {
           falseLockExposure: avg(e.exposure),
           // Windows, swaps and captures that could not be measured.
           missingData: e.missingData,
+          // The live loop, as the user saw it (Phase 3's gate): the hold
+          // windows pooled over runs, time-weighted; time to lock over runs
+          // (a run that never locked counts as never); stale overlay p95.
+          holdOnPageShare: share(e.holdMs, "locked"),
+          holdWrongShare: share(e.holdMs, "wrong"),
+          holdNoneShare: share(e.holdMs, "none"),
+          holdAfterSwapOnPageShare: share(e.holdAfterSwapMs, "locked"),
+          holdAfterSwapWrongShare: share(e.holdAfterSwapMs, "wrong"),
+          timeToLockP50: p50Never(e.locks),
+          timeToLockMean: avg(e.locks.filter((v) => v !== null)),
+          staleAfterSwapP95: e.stale.length > 0 ? percentile(e.stale, 95) : null,
+          tapToConfirmP50: e.tapToConfirm.length > 0 ? percentile(e.tapToConfirm, 50) : null,
+          tapToConfirmMean: avg(e.tapToConfirm),
+          captureFallThrough: e.fallThrough,
+          captureDowngraded: e.downgraded,
+          // The captures whose corners came from the classical fall-through,
+          // judged with them and with what the other policy would have
+          // opened with (paired: same capture, same image).
+          fallThroughPolicy: e.policy,
+          // What it cost (live part of each run).
+          longTasksPerMinute: avg(e.longTasksPerMinute),
+          longTaskShare: avg(e.longTaskShare),
+          heapSlopeMBPerMin: avg(e.heapSlope),
+          heapEndMB: avg(e.heapEnd),
+          mlIntervalP50: avg(e.mlIntervalP50),
+          mlIntervalP95: avg(e.mlIntervalP95),
+          mlPassMsP50: avg(e.mlPassP50),
+          mlMainMsP50: avg(e.mlMainP50),
+          mlPassesPerMinute: avg(e.mlPerMinute),
+          lanes: e.lanes,
+          // Start-up (cold: a fresh page) and remounts (warm).
+          mountToCameraMs: avg(e.mountToCamera),
+          cameraToMlMsP50: e.cameraToMl.length > 0 ? percentile(e.cameraToMl, 50) : null,
+          cameraToLockP50: p50Never(e.cameraToLock),
+          remountToMlMsP50: e.remountMl.length > 0 ? percentile(e.remountMl, 50) : null,
+          remountToLockP50: p50Never(e.remountLock),
+          remountNeverLocked: e.remountLock.filter((v) => v === null).length,
+          leaks:
+            e.leaks.length === 0
+              ? null
+              : {
+                  workersAliveMax: Math.max(...e.leaks.map((l) => l.workersAlive)),
+                  workersAddedByRemounts: Math.max(...e.leaks.map((l) => l.workersAlive - l.workersAliveBeforeRemounts)),
+                  bitmapsOpenMax: Math.max(...e.leaks.map((l) => l.bitmapsOpen)),
+                  bitmapsCollectedOpenMax: Math.max(...e.leaks.map((l) => l.bitmapsCollectedOpen)),
+                  gcRan: e.leaks.every((l) => l.gcRan),
+                },
         },
       },
     ]),

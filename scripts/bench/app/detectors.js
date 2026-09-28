@@ -18,6 +18,8 @@
  *    with its edge refinement (`src/lib/refine.ts`) on.
  *  - `ml+refine` — the live-loop ML pass, its quad then refined on the full
  *    frame exactly as a capture refines a carried live quad.
+ *  - `ml+live` — the live-loop ML pass refined on its own 640 px sample: what
+ *    the live overlay draws (`hooks/useLiveDetect.ts`).
  *
  * The refinement's own report (probe `refine` event: ms, per-side verdicts)
  * travels in the row as `refine`.
@@ -35,7 +37,9 @@ import {
   warmUpMl,
 } from "../../../src/lib/flatten.ts";
 import { coverageFloor, ML_CALL_BUDGET_MS } from "../../../src/lib/ml-detection.ts";
-import { cornerList, normalizedCoverage, normalizeQuad } from "../../../src/lib/quad.ts";
+import { cornerList, denormalizeQuad, normalizedCoverage, normalizeQuad } from "../../../src/lib/quad.ts";
+import { classicalQuadSane, judgeEvidence, measureEvidence } from "../../../src/lib/paper-evidence.ts";
+import { refineQuad } from "../../../src/lib/refine.ts";
 
 /**
  * `SAMPLE_LONG_EDGE` and the classical pass budget are module-private in
@@ -160,6 +164,15 @@ export const VARIANTS = {
     describe: "capture path as shipped: production + edge refinement on the full frame (src/lib/refine.ts)",
     run: (frame) => capturePass(frame, true),
   },
+  "ml+live": {
+    describe: "live-loop ML pass, its accepted quad refined on the same 640 px sample — what the live overlay draws",
+    run: async (frame) => {
+      const pass = await livePass(frame, (sample) => detectOnCanvasMl(sample, ML_CALL_BUDGET_MS, urls));
+      if (!pass.accepted) return pass;
+      const refined = refineOnSample(frame, pass.quad);
+      return { ...pass, quad: refined.quad, ms: pass.ms + refined.ms, liveRefine: { changed: refined.changed, ms: refined.ms, modes: refined.modes } };
+    },
+  },
   "ml+refine": {
     describe: "live-loop ML pass, its accepted quad refined on the full frame as a carried live quad is",
     run: async (frame) => {
@@ -186,4 +199,65 @@ export async function detect(variant, frame) {
   }
   const result = await entry.run(frame);
   return { variant, ...result, mlReady: isMlDetectionReady(), mlDisabled: isMlDetectionDisabled() };
+}
+
+/**
+ * The live loop's paper evidence (`src/lib/paper-evidence.ts`) on this frame's
+ * 640 px sample, for each quad given (`[[x, y] × 4]`, normalized; `null`
+ * answers `null`) — what "sheet found" would say about the model's quad, the
+ * truth's, or any other. With `classical`, also whether a classical quad
+ * would pass its sanity checks.
+ */
+export function evidenceOn(frame, quads) {
+  const sample = liveSample(frame);
+  const context = sample.getContext("2d", { willReadFrequently: true });
+  const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
+  return quads.map((points) => {
+    if (points === null || points === undefined) return null;
+    const quad = {
+      topLeft: { x: points[0][0], y: points[0][1] },
+      topRight: { x: points[1][0], y: points[1][1] },
+      bottomRight: { x: points[2][0], y: points[2][1] },
+      bottomLeft: { x: points[3][0], y: points[3][1] },
+    };
+    const corners = denormalizeQuad(quad, sample.width, sample.height);
+    const measured = measureEvidence(pixels, sample.width, sample.height, corners);
+    const evidence = measured === null ? null : judgeEvidence(measured);
+    return {
+      evidence,
+      classicalSane: classicalQuadSane(corners, sample.width, sample.height, evidence),
+      // The raw readings, compact, for re-judging under other rules in Node.
+      samples:
+        measured === null
+          ? null
+          : {
+              sides: measured.sides.map((side) => side?.map((p) => [Math.round(p.t * 1000) / 1000, Math.round(p.step * 10) / 10, p.at]) ?? null),
+              sideLengths: measured.sideLengths.map((v) => Math.round(v * 10) / 10),
+              residuals: Array.from(measured.residuals, (r) => (Number.isNaN(r) ? null : Math.round(r))),
+              cols: measured.cols,
+              rows: measured.rows,
+              blockOf: Array.from(measured.blockOf),
+              blocks: measured.blocks,
+              blockMedians: measured.blockMedians.map((v) => Math.round(v * 10) / 10),
+            },
+    };
+  });
+}
+
+/**
+ * The live loop's refinement experiment: the model's quad (`[[x, y] × 4]`)
+ * refined on this frame's 640 px live sample (`refineQuad`, as the capture
+ * refines on its 1200 px copy) — the refined quad and what it cost.
+ */
+export function refineOnSample(frame, points, mode = "full") {
+  const sample = liveSample(frame);
+  const image = sample.getContext("2d", { willReadFrequently: true }).getImageData(0, 0, sample.width, sample.height);
+  const quad = {
+    topLeft: { x: points[0][0], y: points[0][1] },
+    topRight: { x: points[1][0], y: points[1][1] },
+    bottomRight: { x: points[2][0], y: points[2][1] },
+    bottomLeft: { x: points[3][0], y: points[3][1] },
+  };
+  const result = refineQuad(image, quad, { mode });
+  return { quad: toPoints(result.quad), changed: result.changed, ms: result.ms, reason: result.reason, modes: result.sides.map((side) => side.mode) };
 }

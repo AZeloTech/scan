@@ -41,8 +41,12 @@ export { materialNames, registerMaterial } from "./materials.js";
 export {
   buildSession,
   describeSessions,
+  loopedFrame,
+  loopedTime,
   poseAt,
   registerSession,
+  renderedFrameCount,
+  SESSION_FRAME_MS,
   sessionAt,
   sessionIds,
   sessionTruth,

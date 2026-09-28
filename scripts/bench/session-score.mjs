@@ -337,6 +337,10 @@ export function scoreCaptures(script, record) {
     const refinedSeed = refine !== null && open !== null && sameQuad(toPoints(refine.output), corners);
     const unrefinedCorners = refinedSeed ? toPoints(refine.input) : corners;
     const unrefined = judge(unrefinedCorners);
+    // The other capture policy on the same capture (`alternative`: what the
+    // screen would have opened with without the classical fall-through).
+    const alternativeCorners = capture.alternative ? toPoints(capture.alternative.corners) : corners;
+    const alternative = capture.alternative ? judge(alternativeCorners) : proposal;
     const headline = (score) =>
       open === null ? "confirm never opened" : truthQuad === undefined ? UNSCORED_CAPTURE : captureVerdict(score);
     return {
@@ -404,6 +408,9 @@ export function scoreCaptures(script, record) {
       unrefinedCorners,
       unrefinedAtConfirm: atError(unrefinedCorners),
       unrefinedVerdict: headline(unrefined),
+      fellThrough: capture.alternative !== undefined && capture.alternative !== null,
+      alternativeVerdict: headline(alternative),
+      alternativeContentClipped: alternative?.contentClipped ?? null,
       tapToConfirmMs: tapToConfirmLatency(capture, open),
       captureMs: capture.doneAt - capture.t,
       confirmEdited: done?.edited ?? null,
@@ -520,7 +527,202 @@ export function scoreSession(script, record) {
     stillRenderMs: mean((record.stills ?? []).map((s) => s.renderMs)),
   };
   out.hints = hintTimeline(record);
+  out.captureDetects = scoreCaptureDetects(record);
+  out.perf = scorePerf(record);
+  out.startup = scoreStartup(record, series, frame);
+  if ((record.remounts ?? []).length > 0) out.remounts = scoreRemounts(record, series, frame);
+  if (record.perfEnd) out.leaks = scoreLeaks(record);
   return out;
+}
+
+/**
+ * The captures' own detects (`capture-detect`, on the frame and on a stored
+ * canonical): how many fell through to the classical detector after the model
+ * answered nothing (`fellThrough`, where the probe says; else a classical
+ * answer once the model had answered anything), and how many were
+ * **downgraded** — the model skipped because a live pass held it (`mlSkipped:
+ * "busy"`; `null` when the app does not report it).
+ */
+export function scoreCaptureDetects(record) {
+  const detects = record.events.filter((e) => e.type === "capture-detect");
+  let fallThrough = 0;
+  let downgraded = 0;
+  let known = false;
+  for (const e of detects) {
+    const mlBefore = record.events.some((d) => d.type === "detect" && d.source === "ml" && d.t < e.t);
+    if (e.fellThrough === true || (e.fellThrough === undefined && e.source === "classical" && mlBefore)) fallThrough += 1;
+    if (e.mlSkipped !== undefined) known = true;
+    if (e.mlSkipped === "busy") downgraded += 1;
+  }
+  return { detects: detects.length, fallThrough, downgraded: known ? downgraded : null };
+}
+
+/** The long tasks this share of a window or longer count as "the main thread was blocked". */
+export const LONG_TASK_MS = 50;
+
+/**
+ * An interval between two regular passes that spans a capture (tap to the
+ * confirm screen closing) measures the pause, not the cadence.
+ */
+function captureWindows(record) {
+  const windows = [];
+  for (const e of record.events) {
+    if (e.type !== "capture") continue;
+    const done = record.events.find((d) => d.type === "confirm-done" && d.t >= e.t);
+    windows.push([e.t - 50, (done?.t ?? e.doneAt) + 2000]);
+  }
+  return windows;
+}
+
+/** Least-squares slope of `y` over `x`, or null with fewer than three points. */
+function slope(points) {
+  if (points.length < 3) return null;
+  const n = points.length;
+  const mx = points.reduce((s, p) => s + p[0], 0) / n;
+  const my = points.reduce((s, p) => s + p[1], 0) / n;
+  let num = 0;
+  let den = 0;
+  for (const [x, y] of points) {
+    num += (x - mx) * (y - my);
+    den += (x - mx) ** 2;
+  }
+  return den > 0 ? num / den : null;
+}
+
+/**
+ * What the live part of a session cost the page (`record.perf`, from
+ * `app/perf-watch.js`): main-thread long tasks per minute and their share of
+ * the time; the heap at the start, the end and its slope; and the detection
+ * loop's cadence as it actually ran — the time between consecutive regular
+ * passes (captures excluded), per detector, and what the passes cost: `passMs`
+ * as the loop measured it and, where the probe says, the main thread's own
+ * share of it (`mainMs`: the worker lane's grab and hand-over).
+ */
+export function scorePerf(record) {
+  const perf = record.perf;
+  if (perf === null || perf === undefined) return null;
+  const minutes = perf.windowMs / 60000;
+  const tasks = perf.longTasks ?? [];
+  const taskMs = tasks.map((t) => t.ms);
+  const totalTaskMs = taskMs.reduce((s, v) => s + v, 0);
+  const heap = (perf.memory ?? []).filter((m) => m.at >= perf.from && m.at <= perf.to);
+  const mb = (bytes) => bytes / (1024 * 1024);
+  const heapSlope = slope(heap.map((m) => [(m.at - perf.from) / 60000, mb(m.used)]));
+  const pauses = captureWindows(record);
+  const paused = (a, b) => pauses.some(([from, to]) => a < to && b > from);
+  const bySource = {};
+  let previous = null;
+  for (const e of record.events) {
+    if (e.type !== "detect" || e.warmUp || e.frameAt < perf.from || e.frameAt > perf.to) continue;
+    const entry = (bySource[e.source] ??= { intervals: [], passMs: [], mainMs: [], computeMs: [], passes: 0 });
+    entry.passes += 1;
+    entry.passMs.push(e.passMs);
+    if (Number.isFinite(e.mainMs)) entry.mainMs.push(e.mainMs);
+    if (Number.isFinite(e.computeMs)) entry.computeMs.push(e.computeMs);
+    if (previous !== null && previous.source === e.source && !paused(previous.frameAt, e.frameAt)) {
+      entry.intervals.push(e.frameAt - previous.frameAt);
+    }
+    previous = e;
+  }
+  const cadence = Object.fromEntries(
+    Object.entries(bySource).map(([source, e]) => {
+      const m = mean(e.intervals);
+      const sd = e.intervals.length > 1 ? Math.sqrt(e.intervals.reduce((s, v) => s + (v - m) ** 2, 0) / (e.intervals.length - 1)) : null;
+      return [
+        source,
+        {
+          passes: e.passes,
+          perMinute: e.passes / minutes,
+          intervalP50: percentile(e.intervals, 50),
+          intervalP95: percentile(e.intervals, 95),
+          intervalCv: m === null || sd === null || m === 0 ? null : sd / m,
+          passMsP50: percentile(e.passMs, 50),
+          passMsP95: percentile(e.passMs, 95),
+          mainMsP50: percentile(e.mainMs, 50),
+          mainMsP95: percentile(e.mainMs, 95),
+          computeMsP50: percentile(e.computeMs, 50),
+          computeMsP95: percentile(e.computeMs, 95),
+        },
+      ];
+    }),
+  );
+  const lanes = record.events.filter((e) => e.type === "lane").map((e) => ({ lane: e.lane, reason: e.reason }));
+  return {
+    windowMs: perf.windowMs,
+    longTaskSupported: perf.longTaskSupported,
+    longTasks: tasks.length,
+    longTasksPerMinute: perf.longTaskSupported ? tasks.length / minutes : null,
+    longTaskShare: perf.longTaskSupported ? totalTaskMs / perf.windowMs : null,
+    longTaskMsP50: percentile(taskMs, 50),
+    longTaskMsMax: taskMs.length > 0 ? Math.max(...taskMs) : null,
+    heapStartMB: heap.length > 0 ? mb(heap[0].used) : null,
+    heapEndMB: heap.length > 0 ? mb(heap[heap.length - 1].used) : null,
+    heapMaxMB: heap.length > 0 ? Math.max(...heap.map((m) => mb(m.used))) : null,
+    heapSlopeMBPerMin: heapSlope,
+    cadence,
+    lanes,
+    workersCreated: (perf.workers ?? []).length,
+  };
+}
+
+/**
+ * Start-up, on the camera clock: from the flow's mount to the camera, to the
+ * model's first answer (the `ml-ready` probe event where the app reports one,
+ * else its first ML pass), to the first lock on the page — the last only
+ * means something in a session framed from the start.
+ */
+export function scoreStartup(record, series, frame) {
+  const camera = record.startedAt;
+  const mounted = record.mountedAt ?? null;
+  const ready = record.events.find((e) => e.type === "ml-ready" && e.ok);
+  const firstMl = record.events.find((e) => e.type === "detect" && e.source === "ml");
+  const mlAt = ready?.t ?? firstMl?.t ?? null;
+  const lock = timeToLock(series, { from: camera, frame });
+  return {
+    mountToCameraMs: mounted === null || camera === null ? null : camera - mounted,
+    cameraToMlMs: mlAt === null || camera === null ? null : mlAt - camera,
+    mlFrom: ready !== undefined ? "ml-ready" : firstMl !== undefined ? "first ML pass" : null,
+    cameraToLockMs: lock,
+  };
+}
+
+/**
+ * The flow mounted again, the runtime warm: mount → camera → the model's
+ * first answer after it → the first lock, each within the remount's own
+ * window.
+ */
+export function scoreRemounts(record, series, frame) {
+  return record.remounts.map((r) => {
+    const inside = series.filter((s) => s.t >= r.mountedAt && s.t <= r.heldTo);
+    const firstMl = record.events.find((e) => e.type === "detect" && e.source === "ml" && e.t >= r.mountedAt && e.t <= r.heldTo);
+    return {
+      mountToCameraMs: r.cameraLiveAt === null ? null : r.cameraLiveAt - r.mountedAt,
+      mountToMlMs: firstMl === undefined ? null : firstMl.t - r.mountedAt,
+      mountToLockMs: timeToLock(inside, { from: r.mountedAt, frame }),
+    };
+  });
+}
+
+/** Workers the bench itself starts (the camera's frame pump): not the app's. */
+const BENCH_WORKERS = new Set(["bench-camera"]);
+
+/** What outlived the flow: the app's workers not terminated, bitmaps never closed, the heap. */
+export function scoreLeaks(record) {
+  const end = record.perfEnd;
+  const live = record.perf;
+  const alive = (workers) => (workers ?? []).filter((w) => w.terminatedAt === null && !BENCH_WORKERS.has(w.name));
+  const heap = end.memory ?? [];
+  return {
+    workersCreated: (end.workers ?? []).filter((w) => !BENCH_WORKERS.has(w.name)).length,
+    workersAlive: alive(end.workers).length,
+    workersAliveBeforeRemounts: alive(live?.workers).length,
+    workers: alive(end.workers).map((w) => w.name ?? w.url),
+    bitmapsCreated: end.bitmaps.created,
+    bitmapsOpen: end.bitmaps.open,
+    bitmapsCollectedOpen: end.bitmaps.collectedOpen,
+    gcRan: end.bitmaps.gcRan,
+    heapEndMB: heap.length > 0 ? heap[heap.length - 1].used / (1024 * 1024) : null,
+  };
 }
 
 /** The chips over the viewfinder, in order: `+key` shown, `-key` gone, camera time. */

@@ -26,6 +26,10 @@ const RENDER_ARGS = [
   "--disable-background-timer-throttling",
   "--disable-renderer-backgrounding",
   "--disable-backgrounding-occluded-windows",
+  // The session suite reads the heap (`performance.memory`) unrounded, and
+  // collects garbage before counting what outlived the flow (`gc()`).
+  "--enable-precise-memory-info",
+  "--js-flags=--expose-gc",
 ];
 
 function playwrightCache() {

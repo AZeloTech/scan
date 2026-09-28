@@ -24,6 +24,19 @@ export const OUT_DIR = join(ROOT, ".bench-out");
 /** The bench page's bundle. Code, not media — but generated, so it lives with the output. */
 export const APP_BUILD_DIR = join(OUT_DIR, "app");
 
+/**
+ * Runtime assets the bench builds from the working tree to stand in for the
+ * library's own (`/assets/workers/detect.worker.js`, with the probe on).
+ */
+export const APP_ASSETS_DIR = join(OUT_DIR, "app-assets");
+
+/**
+ * Pre-rendered session frames (synthetic JPEGs), keyed by script, stream size,
+ * emulator source and browser build — rendered once, replayed by every later
+ * run of the same session. Synthetic only: a real clip is never cached here.
+ */
+export const FRAME_CACHE_DIR = join(OUT_DIR, "frame-cache");
+
 /** The cache for anything derived from real media. Never inside the repository. */
 export function cacheDir() {
   const base = process.env.XDG_CACHE_HOME || join(homedir(), ".cache");

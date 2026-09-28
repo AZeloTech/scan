@@ -44,7 +44,7 @@ import { detectorTable, summarizeGroup } from "../report.mjs";
 import { toPoints } from "../session-score.mjs";
 import { cpuThrottle } from "../browser.mjs";
 import { COLORS } from "../app/sheets.js";
-import { openSessionPage } from "./session.mjs";
+import { openSessionPage, sessionKnobs } from "./session.mjs";
 import { detectAll, diag, ms, num, pct, REAL_BANNER, realHeader, runLabels, writeSheet } from "./real-shared.mjs";
 
 /** Sparse-frame thumbnails for the sheets. */
@@ -140,7 +140,7 @@ function overlayAt(record, k, fps) {
 }
 
 /** Pass 3: the clip replayed through the real app on the bench phone. */
-async function replayThroughApp(browser, origin, options, clip, { reference, labelsByK, frame }, outDir, log) {
+async function replayThroughApp(browser, origin, options, clip, { reference, referenceLive, labelsByK, frame }, outDir, log) {
   const fps = clip.fps;
   const tapK =
     steadiestFrame(reference, frame, {
@@ -152,8 +152,8 @@ async function replayThroughApp(browser, origin, options, clip, { reference, lab
   const { context, page, errors } = await openSessionPage(browser, origin);
   try {
     const prepared = await page.evaluate(
-      ([key, tap, labels]) => window.__session.prepareClip(key, { tapAtMs: tap, labels }),
-      [clip.key, tapAtMs, [...labelsByK.entries()]],
+      ([key, tap, labels, knobs]) => window.__session.prepareClip(key, { tapAtMs: tap, labels, knobs }),
+      [clip.key, tapAtMs, [...labelsByK.entries()], sessionKnobs(options)],
     );
     const throttle = await cpuThrottle(page);
     await throttle.set(options.cpu);
@@ -164,6 +164,13 @@ async function replayThroughApp(browser, origin, options, clip, { reference, lab
       await throttle.set(1);
     }
     const score = scoreReplay({ frame, fps }, record, { labels: labelsByK, reference });
+    // The same overlay against the live loop's own per-frame answer — the
+    // model's quad refined on its sample, which is what the overlay draws:
+    // where the refinement corrects the model, "off the per-frame ML" is the
+    // overlay being right.
+    if (referenceLive !== null) {
+      score.vsLive = scoreReplay({ frame, fps }, record, { labels: new Map(), reference: referenceLive }).vsReference;
+    }
     // A film strip: every ~1.5 s and each capture.
     const tiles = [];
     const step = Math.round(1.5 * fps);
@@ -354,6 +361,13 @@ function render(results, labels) {
       const s = r.score;
       out.push(`### ${r.clip} · replay`);
       out.push("");
+      if (s.vsLive) {
+        const v = s.vsLive;
+        out.push(
+          `- vs the live loop's own per-frame answer (\`ml+live\`: the model's quad refined on its sample): on ${pct(v.onShare, 0)} / near ${pct(v.nearShare, 0)} / ` +
+            `off ${pct(v.offShare, 0)} / on nothing ${pct(v.onNothingShare, 0)} / none ${pct(v.noneShare, 0)}; err p50 ${diag(v.errorP50)} / p95 ${diag(v.errorP95)} % diag`,
+        );
+      }
       out.push(`- loaded ${r.prepare.frames} frames (${(r.prepare.bytes / 1e6).toFixed(1)} MB) · flow: ${r.actions} · tap at frame ${r.tapK} (${(r.tapAtMs / 1000).toFixed(2)} s)`);
       out.push(
         `- passes: ${Object.entries(s.passes).map(([source, p]) => `${source} ${p.passes} (accepted ${p.accepted}, ${ms(p.msP50)} ms p50, every ${ms(p.intervalP50)} ms)`).join("; ") || "none"}`,
@@ -394,6 +408,7 @@ export async function runRealVideoSuite({ page, throttle, options, outDir, log }
     const sparseRows = await sparsePass(page, throttle, options, clip, labels);
     const referenceVariant = options.variants.includes("ml") ? "ml" : options.variants[0];
     const reference = replay.perVariant[referenceVariant].map((r) => (r.det.accepted ? r.det.quad : null));
+    const referenceLive = replay.perVariant["ml+live"]?.map((r) => (r.det.accepted ? r.det.quad : null)) ?? null;
     const labelsByK = new Map();
     for (let j = 0; j < clip.sparse.frames; j += 1) {
       const k = j * clip.sparse.stride;
@@ -499,7 +514,7 @@ export async function runRealVideoSuite({ page, throttle, options, outDir, log }
     await page.evaluate(() => window.__bench.reset());
 
     if (!options.skipReplay) {
-      const played = await replayThroughApp(browser, origin, options, clip, { reference, labelsByK, frame: replay.frame }, outDir, log);
+      const played = await replayThroughApp(browser, origin, options, clip, { reference, referenceLive, labelsByK, frame: replay.frame }, outDir, log);
       rows.push({ kind: "replay", clip: clip.key, ...played });
       sheets.push({ clip: clip.key, replay: true, file: played.sheet });
       const v = played.score.vsReference;
@@ -507,6 +522,8 @@ export async function runRealVideoSuite({ page, throttle, options, outDir, log }
         offShare: v?.offShare ?? null,
         onShare: v?.onShare ?? null,
         noneShare: v?.noneShare ?? null,
+        onShareVsLive: played.score.vsLive?.onShare ?? null,
+        offShareVsLive: played.score.vsLive?.offShare ?? null,
         timeToLockMs: v?.timeToLockMs ?? null,
         longestOffMs: v?.longestOffMs ?? null,
         capturesVsReference: played.score.captures.map((c) => c.vsReference),

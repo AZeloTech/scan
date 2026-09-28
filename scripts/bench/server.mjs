@@ -35,9 +35,11 @@ import { readFile, stat } from "node:fs/promises";
 import { dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  APP_ASSETS_DIR,
   APP_BUILD_DIR,
   ASSETS_DIR,
   DIST_DIR,
+  FRAME_CACHE_DIR,
   ROOT,
   cacheDir,
   isInside,
@@ -68,6 +70,12 @@ const MIME = {
 
 /** Largest labels document accepted: a few hundred items is a few hundred KB. */
 const MAX_LABELS_BYTES = 5 * 1024 * 1024;
+
+/** Largest frame-cache file accepted: one JPEG frame, or a session's manifest of per-frame truth. */
+const MAX_FRAME_CACHE_BYTES = 32 * 1024 * 1024;
+
+/** `/frame-cache/<key>/<file>`: a key the runner derived, a frame or the manifest. */
+const FRAME_CACHE_PATH = /^\/frame-cache\/([A-Za-z0-9._-]{1,160})\/(\d{1,5}\.jpg|manifest\.json)$/;
 
 /** A file under `root`, or null when the request path tries to leave it. */
 function under(root, requestPath) {
@@ -171,22 +179,26 @@ function labelsBackupPath() {
   return join(cacheDir(), "labels", "scan-bench-labels.previous.json");
 }
 
-function readBody(request) {
+function readBytes(request, limit) {
   return new Promise((resolveBody, reject) => {
     const chunks = [];
     let size = 0;
     request.on("data", (chunk) => {
       size += chunk.length;
-      if (size > MAX_LABELS_BYTES) {
+      if (size > limit) {
         reject(new Error("too large"));
         request.destroy();
         return;
       }
       chunks.push(chunk);
     });
-    request.on("end", () => resolveBody(Buffer.concat(chunks).toString("utf8")));
+    request.on("end", () => resolveBody(Buffer.concat(chunks)));
     request.on("error", reject);
   });
+}
+
+async function readBody(request) {
+  return (await readBytes(request, MAX_LABELS_BYTES)).toString("utf8");
 }
 
 async function sendFile(response, file) {
@@ -292,6 +304,29 @@ export function startServer({ appDir = APP_BUILD_DIR, log = () => {} } = {}) {
       return;
     }
 
+    const cached = FRAME_CACHE_PATH.exec(path);
+    if (cached !== null) {
+      // Synthetic frames only, in the git-ignored output: the session page
+      // writes what it rendered and reads it back on the next run.
+      const file = join(FRAME_CACHE_DIR, cached[1], cached[2]);
+      if (request.method === "PUT") {
+        const sender = request.headers.origin;
+        if (sender !== undefined && sender !== origin) {
+          response.writeHead(403).end();
+          return;
+        }
+        const body = await readBytes(request, MAX_FRAME_CACHE_BYTES);
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(`${file}.tmp`, body);
+        renameSync(`${file}.tmp`, file);
+        response.writeHead(204).end();
+        return;
+      }
+      if (request.method === "GET") return sendFile(response, file);
+      response.writeHead(405).end();
+      return;
+    }
+
     if (request.method !== "GET" && request.method !== "HEAD") {
       response.writeHead(405).end();
       return;
@@ -326,6 +361,12 @@ export function startServer({ appDir = APP_BUILD_DIR, log = () => {} } = {}) {
         return;
       }
       return sendFile(response, file);
+    }
+    // The working tree's own build of an asset the bench stands in for (the
+    // detection worker, with the probe on), ahead of the library's copy.
+    if (path.startsWith("/assets/")) {
+      const override = under(APP_ASSETS_DIR, path.slice("/assets/".length));
+      if (override !== null && existsSync(override)) return sendFile(response, override);
     }
     const routes = [
       ["/app/", appDir],

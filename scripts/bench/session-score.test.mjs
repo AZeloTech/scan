@@ -6,8 +6,11 @@ import {
   overlayAccuracy,
   overlaySeries,
   PAGELESS_CAPTURE,
+  scoreCaptureDetects,
   scoreCaptures,
+  scoreLeaks,
   scorePasses,
+  scorePerf,
   scoreSession,
   toPoints,
   truthOnScreen,
@@ -462,3 +465,81 @@ test("the summary keeps proposal, final, unscored, stuck and missing data apart"
   assert.equal(summary.staleAfterSwapMs, 400);
   assert.equal(summary.staleStuck, 1);
 });
+
+test("what a session cost: long tasks per minute, the heap's slope, the cadence without the capture pauses", () => {
+  const detect = (frameAt, extra = {}) => ({ type: "detect", t: frameAt + 20, frameAt, source: "ml", warmUp: false, passMs: 20, mainMs: 1, computeMs: 12, ...extra });
+  const record = {
+    events: [
+      detect(1000),
+      detect(1120),
+      detect(1240),
+      { type: "capture", t: 1300, doneAt: 1500 },
+      { type: "confirm-done", t: 3000 },
+      // After the confirm screen: the gap across the capture is a pause, not a beat.
+      detect(5200),
+      detect(5320),
+      detect(900, { warmUp: true }),
+      { type: "lane", t: 10, lane: "worker", reason: "worker" },
+    ],
+    perf: {
+      from: 1000,
+      to: 61000,
+      windowMs: 60000,
+      longTaskSupported: true,
+      longTasks: [{ start: 2000, ms: 80 }, { start: 3000, ms: 60 }, { start: 4000, ms: 60 }],
+      memory: [
+        { at: 1000, used: 100 * 1024 * 1024 },
+        { at: 31000, used: 101 * 1024 * 1024 },
+        { at: 61000, used: 102 * 1024 * 1024 },
+      ],
+      workers: [{ url: "x", name: "azelo-scan-detect", createdAt: 0, terminatedAt: null }],
+    },
+  };
+  const perf = scorePerf(record);
+  assert.equal(perf.longTasks, 3);
+  assert.equal(perf.longTasksPerMinute, 3);
+  assert.ok(Math.abs(perf.longTaskShare - 200 / 60000) < 1e-9);
+  assert.ok(Math.abs(perf.heapSlopeMBPerMin - 2) < 1e-9);
+  assert.deepEqual(perf.lanes, [{ lane: "worker", reason: "worker" }]);
+  assert.equal(perf.cadence.ml.passes, 5);
+  assert.equal(perf.cadence.ml.intervalP50, 120);
+  assert.equal(perf.cadence.ml.intervalP95, 120);
+  assert.equal(perf.cadence.ml.computeMsP50, 12);
+  // Long tasks cannot be counted where the browser does not report them: unknown, not zero.
+  assert.equal(scorePerf({ ...record, perf: { ...record.perf, longTaskSupported: false, longTasks: [] } }).longTasksPerMinute, null);
+  assert.equal(scorePerf({ events: [] }), null);
+});
+
+test("a capture's detect: a fall-through and a downgrade are told apart", () => {
+  const events = [
+    { type: "detect", t: 10, source: "ml" },
+    { type: "capture-detect", t: 100, source: "classical", fellThrough: true, mlSkipped: null },
+    { type: "capture-detect", t: 200, source: "classical", fellThrough: false, mlSkipped: "busy" },
+    { type: "capture-detect", t: 300, source: "ml", fellThrough: false, mlSkipped: null },
+  ];
+  assert.deepEqual(scoreCaptureDetects({ events }), { detects: 3, fallThrough: 1, downgraded: 1 });
+  // An app that does not report `mlSkipped`: downgrades are unknown, and a classical
+  // answer after the model had answered anything is read as a fall-through.
+  const older = [
+    { type: "detect", t: 10, source: "ml" },
+    { type: "capture-detect", t: 100, source: "classical" },
+  ];
+  assert.deepEqual(scoreCaptureDetects({ events: older }), { detects: 1, fallThrough: 1, downgraded: null });
+});
+
+test("what outlived the flow is counted after the last unmount", () => {
+  const worker = (terminatedAt) => ({ url: "w", name: "azelo-scan-detect", createdAt: 0, terminatedAt });
+  const leaks = scoreLeaks({
+    perf: { workers: [worker(null)] },
+    perfEnd: {
+      workers: [worker(null), { ...worker(500), name: "render" }, { ...worker(null), name: "bench-camera" }],
+      bitmaps: { created: 900, closed: 20, transferred: 880, open: 0, collectedOpen: 0, gcRan: true },
+      memory: [{ at: 1, used: 50 * 1024 * 1024 }],
+    },
+  });
+  assert.deepEqual(
+    { alive: leaks.workersAlive, before: leaks.workersAliveBeforeRemounts, open: leaks.bitmapsOpen, heap: leaks.heapEndMB },
+    { alive: 1, before: 1, open: 0, heap: 50 },
+  );
+});
+

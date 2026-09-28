@@ -30,6 +30,9 @@ import { installFakeCamera } from "./fake-camera.js";
 import { SessionPlayer, thumbnailOf } from "./session-player.js";
 import { ClipPlayer, clipScript } from "./clip-player.js";
 import { drawSheet } from "./sheets.js";
+import { installPerfWatch } from "./perf-watch.js";
+import { pickPhotoSize, readPhotoSizeRange } from "../../../src/lib/still-capture.ts";
+import { MAX_LONG_EDGE } from "../../../src/lib/image.ts";
 import { scoreCaptures, scoreSession } from "../session-score.mjs";
 import { scoreReplayCaptures } from "../real-score.mjs";
 
@@ -40,6 +43,18 @@ const STEP_TIMEOUT_MS = 8000;
 
 /** After the script's last moment, how long the flow is left to finish. */
 const TAIL_MS = 1200;
+
+/** A remount (`script.remounts`): unmounted this long, then held live this long. */
+const REMOUNT_GAP_MS = 600;
+const REMOUNT_HOLD_MS = 4000;
+
+/**
+ * Bench-only settings the app reads through the probe (`probeSetting`,
+ * `src/lib/probe-hook.ts`), set from `prepare`'s `knobs` — e.g. which
+ * detection lane to force, or how much slower a worker's passes should run
+ * than this machine runs them (CDP throttles only the page's own thread).
+ */
+let knobs = {};
 
 let player = null;
 let script = null;
@@ -108,7 +123,7 @@ function lastEvent(type, after) {
  * answers. That is how a capture names its image — by id, never by time.
  */
 function installProbe() {
-  globalThis.__SCAN_PROBE__ = (event) => {
+  const listener = (event) => {
     const entry = { ...event, at: performance.now(), st: player.now() };
     if (event.type === "grab") player.noteGrab(event.id, entry.at);
     if (event.type === "still-call") player.noteStillCall(event.attempt);
@@ -125,18 +140,46 @@ function installProbe() {
       }
     }
   };
+  listener.knobs = { ...knobs };
+  globalThis.__SCAN_PROBE__ = listener;
 }
 
+/**
+ * What the app will ask `takePhoto()` for on this session's camera: its own
+ * `pickPhotoSize` over the fake sensor's capabilities (`fake-camera.js`), at
+ * the preview's shape and the page grid's long edge — so a still rendered
+ * ahead is the size the call asks for.
+ */
+function requestFor(session) {
+  const { width, height } = session.still.sensor;
+  return pickPhotoSize(
+    readPhotoSizeRange({ imageWidth: { min: 640, max: width, step: 1 } }, "imageWidth"),
+    readPhotoSizeRange({ imageHeight: { min: 480, max: height, step: 1 } }, "imageHeight"),
+    MAX_LONG_EDGE,
+    session.frame.width / session.frame.height,
+  );
+}
+
+/**
+ * `cache` names the frame-cache entry for this script (the runner derives it
+ * from the session, seed, stream size, emulator source and browser build);
+ * `stills: false` is a camera without a still pipeline (and renders nothing:
+ * the frames must come from the cache); `knobs` are the bench-only settings
+ * the app reads through the probe.
+ */
 async function prepare(id, seed, options = {}) {
   script = buildSession(id, seed, options);
   if (options.still) script.still = { ...script.still, ...options.still };
-  player = new SessionPlayer(script);
-  const info = await player.prerender(options.onProgress);
-  installFakeCamera({ player, permission: options.permission ?? script.permission });
+  knobs = options.knobs ?? {};
+  const stills = options.stills ?? true;
+  player = new SessionPlayer(script, { stills });
+  const info = await player.prerender(options.onProgress, { cache: options.cache ?? null });
+  info.stillsMs = await player.prepareStills(requestFor);
+  installFakeCamera({ player, permission: options.permission ?? script.permission, stills });
   installProbe();
   return {
     script,
-    renderer: player.renderer.describe(),
+    renderer: player.renderer?.describe() ?? null,
     prepare: info,
   };
 }
@@ -146,7 +189,8 @@ async function prepare(id, seed, options = {}) {
  * cache, played at their own rate, one shutter tap at `tapAtMs` (camera time)
  * or none. `labels` is `[[k, label], …]` for the labelled replay frames.
  */
-async function prepareClip(key, { tapAtMs = null, labels = [], permission, onProgress } = {}) {
+async function prepareClip(key, { tapAtMs = null, labels = [], permission, onProgress, knobs: settings = {} } = {}) {
+  knobs = settings;
   const response = await fetch("/real/items.json");
   if (!response.ok) throw new Error(`/real/items.json: HTTP ${response.status} (is SCAN_REAL_MEDIA set?)`);
   const clip = (await response.json()).clips.find((c) => c.key === key);
@@ -158,6 +202,21 @@ async function prepareClip(key, { tapAtMs = null, labels = [], permission, onPro
   installFakeCamera({ player, permission: script.permission });
   installProbe();
   return { script, clip, prepare: info };
+}
+
+/** Wait for the app's `<video>` to show the camera, and watch it. False when it never did. */
+async function cameraLive() {
+  const video = await waitFor(() => {
+    const v = document.querySelector("video");
+    return v !== null && v.srcObject !== null && v.videoWidth > 0 ? v : null;
+  }, 20000);
+  if (video === null) {
+    log("camera-missing");
+    return false;
+  }
+  log("camera-live", { videoW: video.videoWidth, videoH: video.videoHeight });
+  player.watchVideo(video);
+  return true;
 }
 
 /** The scripted user, from the primer to the last confirm (unscripted: only the primer). */
@@ -176,16 +235,7 @@ async function act({ scripted = true } = {}) {
   } else {
     log("primer-skipped");
   }
-  const video = await waitFor(() => {
-    const v = document.querySelector("video");
-    return v !== null && v.srcObject !== null && v.videoWidth > 0 ? v : null;
-  }, 20000);
-  if (video === null) {
-    log("camera-missing");
-    return;
-  }
-  log("camera-live", { videoW: video.videoWidth, videoH: video.videoHeight });
-  player.watchVideo(video);
+  if (!(await cameraLive())) return;
   if (!scripted) return;
 
   for (const step of script.actions) {
@@ -222,19 +272,31 @@ async function act({ scripted = true } = {}) {
   }
 }
 
+function flow() {
+  return createElement(ScanFlow, {
+    assetBaseUrl: "/assets/",
+    lang: "pt-BR",
+    onComplete: () => hostEvents.push({ name: "complete", at: performance.now() }),
+    onCancel: (reason) => hostEvents.push({ name: "cancel", reason, at: performance.now() }),
+    onEvent: (event) => hostEvents.push({ ...event, at: performance.now() }),
+  });
+}
+
+/**
+ * Mount the flow and play the script to its end. What the app cost the page
+ * over the live part (`perf`: long tasks, heap, workers, bitmaps) comes back
+ * with the record. A script with `remounts` then unmounts the flow and mounts
+ * it again that many times — each held live for a few seconds, when the
+ * runtime is warm — and finally unmounts it for good: `perfEnd` counts what
+ * outlived it, after a garbage collection.
+ */
 async function run({ scripted = true } = {}) {
   if (player === null) throw new Error("__session.prepare() first");
-  const root = document.getElementById("root");
+  const perf = scripted ? installPerfWatch() : null;
+  const host = document.getElementById("root");
+  let root = createRoot(host);
   const mountedAt = performance.now();
-  createRoot(root).render(
-    createElement(ScanFlow, {
-      assetBaseUrl: "/assets/",
-      lang: "pt-BR",
-      onComplete: () => hostEvents.push({ name: "complete", at: performance.now() }),
-      onCancel: (reason) => hostEvents.push({ name: "cancel", reason, at: performance.now() }),
-      onEvent: (event) => hostEvents.push({ ...event, at: performance.now() }),
-    }),
-  );
+  root.render(flow());
   log("mounted");
   await act({ scripted });
   if (!scripted) return { mountedAt };
@@ -242,7 +304,33 @@ async function run({ scripted = true } = {}) {
   const rest = script.duration - player.now();
   if (rest > 0) await sleep(rest);
   await sleep(TAIL_MS);
-  player.stop();
+  const liveFrom = actions.find((a) => a.what === "camera-live")?.at ?? mountedAt;
+  const liveTo = performance.now();
+  const perfLive = await perf.report({ from: liveFrom, to: liveTo });
+  const remounts = [];
+  let perfEnd = null;
+  if (script.remounts > 0) {
+    for (let i = 0; i < script.remounts; i += 1) {
+      root.unmount();
+      log("unmounted");
+      const unmountedAt = performance.now();
+      await sleep(REMOUNT_GAP_MS);
+      root = createRoot(host);
+      const at = performance.now();
+      root.render(flow());
+      log("remounted");
+      const live = await cameraLive();
+      remounts.push({ unmountedAt, mountedAt: at, cameraLiveAt: live ? performance.now() : null });
+      await sleep(REMOUNT_HOLD_MS);
+      remounts[remounts.length - 1].heldTo = performance.now();
+    }
+    root.unmount();
+    log("unmounted");
+    await sleep(1000);
+    perfEnd = await perf.report({ settle: true, from: liveTo, to: performance.now() });
+  }
+  await player.stop();
+  perf.stop();
   return {
     mountedAt,
     events,
@@ -250,6 +338,9 @@ async function run({ scripted = true } = {}) {
     hostEvents,
     ...player.record(),
     frameContent: grabbedContent(),
+    perf: perfLive,
+    perfEnd,
+    remounts,
   };
 }
 

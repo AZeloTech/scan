@@ -16,28 +16,62 @@
  *    the bench's emulated phone.
  */
 
-/** @param {{ player: import("./session-player.js").SessionPlayer, permission?: "prompt" | "granted" }} options */
-export function installFakeCamera({ player, permission = "prompt" }) {
+/** Platform objects whose script wrappers carry the fakes (see {@link installFakeCamera}). */
+const keep = [];
+
+/**
+ * Replace a method of a platform object. A plain assignment is enough in
+ * Chromium; WebKit ignores it on `navigator.mediaDevices` (the app then met
+ * the real, denied camera), so the property is defined — on the object, or
+ * failing that on its prototype.
+ */
+function override(target, name, value) {
+  try {
+    Object.defineProperty(target, name, { value, configurable: true, writable: true });
+  } catch {
+    // Not configurable on the instance.
+  }
+  if (target[name] === value) return;
+  Object.defineProperty(Object.getPrototypeOf(target), name, { value, configurable: true, writable: true });
+}
+
+/**
+ * @param {{ player: import("./session-player.js").SessionPlayer, permission?: "prompt" | "granted", stills?: boolean }} options
+ * `stills: false` is a camera with no still pipeline at all — no
+ * `ImageCapture`, as on Safari — so every capture is a preview frame.
+ */
+export function installFakeCamera({ player, permission = "prompt", stills = true }) {
   let state = permission;
   const media = navigator.mediaDevices;
   if (media === undefined) throw new Error("navigator.mediaDevices is missing: the bench page must be served from 127.0.0.1");
+  // Held for the page's life: WebKit may drop a DOM object's script wrapper
+  // once nothing references it and hand out a fresh one later — without the
+  // methods defined on it here (the app then met the real, denied camera).
+  keep.push(media, navigator.permissions);
 
-  media.getUserMedia = async (constraints) => {
+  override(media, "getUserMedia", async (constraints) => {
     if (constraints === undefined || !constraints.video) {
       throw new DOMException("the bench camera has no audio", "NotFoundError");
     }
-    const stream = player.open(constraints);
+    let stream;
+    try {
+      stream = player.open(constraints);
+    } catch (error) {
+      // A camera that failed to open is the bench's own bug: say so where a run can see it.
+      console.error(`bench camera: ${error?.stack ?? error}`);
+      throw error;
+    }
     state = "granted";
     return stream;
-  };
-  media.enumerateDevices = async () => [
+  });
+  override(media, "enumerateDevices", async () => [
     { deviceId: "bench-camera", kind: "videoinput", label: "bench camera (synthetic)", groupId: "bench", toJSON() { return this; } },
-  ];
+  ]);
 
   const permissions = navigator.permissions;
   if (permissions !== undefined) {
     const query = permissions.query.bind(permissions);
-    permissions.query = async (descriptor) => {
+    override(permissions, "query", async (descriptor) => {
       if (descriptor?.name !== "camera") return query(descriptor);
       return {
         name: "camera",
@@ -51,7 +85,7 @@ export function installFakeCamera({ player, permission = "prompt" }) {
           return true;
         },
       };
-    };
+    });
   }
 
   class BenchImageCapture {
@@ -83,7 +117,15 @@ export function installFakeCamera({ player, permission = "prompt" }) {
       return createImageBitmap(player.canvas);
     }
   }
-  window.ImageCapture = BenchImageCapture;
+  if (stills) window.ImageCapture = BenchImageCapture;
+  else {
+    try {
+      delete window.ImageCapture;
+    } catch {
+      // Not configurable: shadow it instead.
+    }
+    if (typeof window.ImageCapture === "function") window.ImageCapture = undefined;
+  }
 
   // A finger, not a mouse: the phone flow, whatever the host machine is.
   const matchMedia = window.matchMedia.bind(window);

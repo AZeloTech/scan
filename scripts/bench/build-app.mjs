@@ -13,7 +13,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { PROBE_ON } from "../probe-switch.mjs";
-import { APP_BUILD_DIR, APP_SOURCE_DIR, ASSETS_DIR, DIST_DIR, LABEL_SOURCE_DIR, ROOT } from "./paths.mjs";
+import { APP_ASSETS_DIR, APP_BUILD_DIR, APP_SOURCE_DIR, ASSETS_DIR, DIST_DIR, LABEL_SOURCE_DIR, ROOT } from "./paths.mjs";
 
 /** What the detectors load at run time, from `assetBaseUrl`. */
 const RUNTIME_ASSETS = [
@@ -95,6 +95,7 @@ export async function buildBenchApp({ outdir = APP_BUILD_DIR } = {}) {
       entryPoints[page] = join(dir, name);
     }
   }
+  await buildBenchAssets();
   await build({
     entryPoints,
     outdir,
@@ -120,10 +121,39 @@ export async function buildBenchApp({ outdir = APP_BUILD_DIR } = {}) {
 }
 
 /**
+ * The runtime assets the bench builds from the working tree to stand in for
+ * the library's (`server.mjs` serves them ahead of `assets/`): the detection
+ * worker, with the probe **on** — the one build of it that honours the
+ * bench-only `slowdown` (a worker's passes stretched to a slow phone's, which
+ * CDP cannot throttle). Like the bench page, it measures the working tree, not
+ * whatever `assets/` was last built from.
+ */
+export async function buildBenchAssets({ outdir = APP_ASSETS_DIR } = {}) {
+  const entry = join(ROOT, "src/lib/detect.worker.ts");
+  // A tree from before the detection worker existed has nothing to stand in for.
+  if (!existsSync(entry)) return { outdir: null };
+  await build({
+    entryPoints: [entry],
+    outfile: join(outdir, "workers", "detect.worker.js"),
+    bundle: true,
+    splitting: false,
+    format: "esm",
+    platform: "browser",
+    target: ["es2022", "chrome110"],
+    sourcemap: "inline",
+    minify: false,
+    external: ["scanic"],
+    define: PROBE_ON.define,
+    logLevel: "warning",
+  });
+  return { outdir };
+}
+
+/**
  * Entry points are the pages: a module the server can put in a `<script>`.
  * Helpers the pages import are not entries.
  */
-const PAGE_ENTRIES = new Set(["bench.js"]);
+const PAGE_ENTRIES = new Set(["bench.js", "camera-worker.js"]);
 
 function isEntry(name) {
   return PAGE_ENTRIES.has(name) || /^page-.*\.(jsx?|mjs)$/.test(name);

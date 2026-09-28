@@ -18,7 +18,7 @@ import {
   SceneMaker,
 } from "../emulator/index.js";
 import * as emulator from "../emulator/index.js";
-import { detect, initDetectors, VARIANTS } from "./detectors.js";
+import { detect, evidenceOn, initDetectors, refineOnSample, VARIANTS } from "./detectors.js";
 import { COLORS, drawSheet, thumbnail } from "./sheets.js";
 import { clipPolygon, polygonArea, signedArea } from "../metrics.mjs";
 import { bitmapToCanvas } from "../../../src/lib/image.ts";
@@ -201,6 +201,20 @@ async function selfCheck(family, seed, options = {}) {
   };
 }
 
+/** The paper evidence of each quad on scene `id`'s live sample (`evidenceOn`). */
+function evidence(id, quads) {
+  const frame = frames.get(id);
+  if (frame === undefined) throw new Error(`no scene "${id}" (released, or never rendered)`);
+  return evidenceOn(frame, quads);
+}
+
+/** The live-sample refinement of a quad on scene `id` (`refineOnSample`). */
+function refineLive(id, quad, mode) {
+  const frame = frames.get(id);
+  if (frame === undefined) throw new Error(`no scene "${id}" (released, or never rendered)`);
+  return refineOnSample(frame, quad, mode);
+}
+
 async function detectScene(variant, id) {
   const frame = frames.get(id);
   if (frame === undefined) throw new Error(`no scene "${id}" (released, or never rendered)`);
@@ -285,5 +299,5 @@ function reset() {
 }
 
 // `emulator` is the scene emulator itself, for a console or a one-off script.
-window.__bench = { init, scene, load, detect: detectScene, release, sheet, frameDataUrl, reset, selfCheck, emulator };
+window.__bench = { init, scene, load, detect: detectScene, evidence, refineLive, release, sheet, frameDataUrl, reset, selfCheck, emulator };
 window.__benchReady = true;

@@ -7,7 +7,8 @@
  *                    [--size portrait|landscape|WxH] [--compare prev/results.json]
  *                    [--out dir] [--headed]
  *   npm run bench -- --suite session [--session approach-hold,page-swap]
- *                    [--seeds 1] [--stream 720x1280] [--cpu 4]
+ *                    [--seeds 1] [--stream 720x1280] [--cpu 4] [--lane main|worker]
+ *                    [--no-frame-cache]
  *   SCAN_REAL_MEDIA=<dir> npm run bench -- --suite real-stills|real-video
  *                    [--variants …] [--cpu 4] [--skip-replay]
  *
@@ -47,8 +48,8 @@ import { buildScene, frameSize } from "./emulator/index.js";
 import { DEFAULT_STREAM } from "./suites/session.mjs";
 
 const USAGE = `usage: npm run bench -- [--suite detector|session|real-stills|real-video|all|emulator]
-       [--family F1,F2,…] [--setting name,…] [--seeds N] [--variants ml,classical,production,refined,ml+refine]
-       [--session approach-hold,…] [--stream WxH] [--skip-replay]
+       [--family F1,F2,…] [--setting name,…] [--seeds N] [--variants ml,classical,production,refined,ml+refine,ml+live]
+       [--session approach-hold,…] [--stream WxH] [--skip-replay] [--lane main|worker] [--no-frame-cache]
        [--cpu 1|4|6] [--size portrait|landscape|WxH] [--compare results.json]
        [--out dir] [--headed]
 real-stills / real-video need SCAN_REAL_MEDIA=<dir>; their output goes to the cache, never the repo.`;
@@ -60,7 +61,7 @@ const SETTING_SEARCH_LIMIT = 20_000;
 
 /** A session is a real-time run of the whole app: one seed each unless asked. */
 const DEFAULT_SESSION_SEEDS = 1;
-const DEFAULT_VARIANTS = ["ml", "classical", "production", "refined", "ml+refine"];
+const DEFAULT_VARIANTS = ["ml", "classical", "production", "refined", "ml+refine", "ml+live"];
 
 function log(line) {
   console.log(line);
@@ -82,6 +83,8 @@ function parse() {
       out: { type: "string" },
       headed: { type: "boolean", default: false },
       "skip-replay": { type: "boolean", default: false },
+      lane: { type: "string" },
+      "no-frame-cache": { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
     strict: true,
@@ -119,7 +122,16 @@ function parse() {
     out: values.out ?? null,
     headed: values.headed,
     skipReplay: values["skip-replay"],
+    lane: parseLane(values.lane),
+    frameCache: !values["no-frame-cache"],
   };
+}
+
+/** `--lane main|worker`: force the app's detection lane (a bench knob, through the probe). */
+function parseLane(value) {
+  if (value === undefined) return null;
+  if (value !== "main" && value !== "worker") throw new Error(`--lane ${value}: expected main or worker`);
+  return value;
 }
 
 /**
@@ -309,7 +321,7 @@ async function main() {
             cpu: options.cpu,
             size: options.size,
             frame: frameSize(options.size),
-            ...(suiteName === "session" ? { sessions: options.sessions, stream: options.stream } : {}),
+            ...(suiteName === "session" ? { sessions: options.sessions, stream: options.stream, lane: options.lane } : {}),
           }
         : { variants: options.variants, cpu: options.cpu, media: options.real.media, skipReplay: options.skipReplay };
       const comparing = options.compare !== null && options.compare.results.suite === suiteName;

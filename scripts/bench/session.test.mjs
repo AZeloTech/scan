@@ -6,6 +6,10 @@ import {
   buildSession,
   familyIds,
   groundTruth,
+  loopedFrame,
+  loopedTime,
+  renderedFrameCount,
+  SESSION_FRAME_MS,
   poseAt,
   sessionAt,
   sessionIds,
@@ -243,3 +247,22 @@ test("a grab names the frame it drew by that frame's own timestamp, not by the l
   player.presented = player.presented.map((p, i) => ({ ...p, mediaTime: p.mediaTime + (i % 2) * 0.02 }));
   assert.equal(player.timestampOffset(), null);
 });
+
+test("a looped session plays its rendered frames forward and back, stills included", () => {
+  const script = buildSession("sustained-hold", 1);
+  assert.equal(renderedFrameCount(script, 60), 300);
+  assert.equal(renderedFrameCount(buildSession("tremor-hold", 1), 60), Math.ceil(9000 / SESSION_FRAME_MS) + 60);
+  // 0 … 299 forward, 298 … 1 back, 0 again: never a jump.
+  assert.deepEqual([0, 1, 299, 300, 301, 597, 598, 599].map((n) => loopedFrame(script, n)), [0, 1, 299, 298, 297, 1, 0, 1]);
+  for (let n = 1; n < 2000; n += 1) assert.ok(Math.abs(loopedFrame(script, n) - loopedFrame(script, n - 1)) <= 1);
+  // A still exposed at camera time t is a photo of the frame on screen then.
+  for (const t of [0, 5000, 9966.7, 12000, 30000, 71234]) {
+    const n = Math.round(t / SESSION_FRAME_MS);
+    assert.ok(Math.abs(loopedTime(script, t) / SESSION_FRAME_MS - loopedFrame(script, n)) <= 1, `t ${t}`);
+  }
+  // Not looped: camera time is scene time.
+  const plain = buildSession("approach-hold", 1);
+  assert.equal(loopedFrame(plain, 1234), 1234);
+  assert.equal(loopedTime(plain, 4321), 4321);
+});
+
