@@ -177,4 +177,22 @@ export interface ScanFlowProps {
 
   /** Applied to the library's root element, for layout only. */
   className?: string;
+
+  /**
+   * **Experimental.** Offer an auto-capture toggle on the capture screen.
+   * Default `false`: no toggle, and the photo is only ever taken by a tap.
+   *
+   * When offered it is still off in every new flow; switched on, the screen
+   * takes the page by itself once it has been framed, sharp and still for
+   * about half a second (with a countdown on the corner brackets), once per
+   * page, through the same capture and confirm screen as a tap. The choice
+   * lasts while the flow is open and is never stored. Retakes stay manual.
+   *
+   * Experimental because it has not yet met its own bar: on the bench it
+   * still fires on some page-less scenes (a woven white place mat, a screen
+   * showing a page, two overlapping sheets taken as one) — see the
+   * README's "Auto-capture" notes. Do not turn it on for people who cannot
+   * be expected to look at the confirm screen.
+   */
+  experimentalAutoCapture?: boolean;
 }

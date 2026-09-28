@@ -51,7 +51,11 @@ export function ScanFlow(props: ScanFlowProps) {
     onPagesChange,
     onEvent,
     className,
+    experimentalAutoCapture = false,
   } = props;
+
+  /** The auto-capture choice, for this flow only: off in every new one. */
+  const autoCaptureChosen = useRef(false);
 
   /**
    * The callbacks live in a ref so that a host which passes inline arrows —
@@ -151,10 +155,11 @@ export function ScanFlow(props: ScanFlowProps) {
         images: intake?.images ?? true,
         pdf: intake?.pdf ?? false,
       },
+      autoCapture: { offered: experimentalAutoCapture, chosen: autoCaptureChosen },
       emit,
       reportError,
     }),
-    [urls, lang, maxPages, maxBytes, fileNameProp, intake?.camera, intake?.images, intake?.pdf, emit]
+    [urls, lang, maxPages, maxBytes, fileNameProp, intake?.camera, intake?.images, intake?.pdf, experimentalAutoCapture, emit]
   );
 
   const handleStep = useCallback((step: ScanStep) => emit({ name: "step", step }), [emit]);

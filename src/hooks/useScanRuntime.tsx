@@ -32,6 +32,15 @@ export interface ScanRuntime {
     readonly images: boolean;
     readonly pdf: boolean;
   };
+  /**
+   * Auto-capture (`experimentalAutoCapture`): whether its toggle is offered,
+   * and the person's choice while this flow is open — a holder the flow owns,
+   * so a new flow starts with it off and nothing is ever stored.
+   */
+  readonly autoCapture: {
+    readonly offered: boolean;
+    readonly chosen: { current: boolean };
+  };
   /** Report something that happened. Numbers and enums only. */
   emit(event: ScanEvent): void;
   /**

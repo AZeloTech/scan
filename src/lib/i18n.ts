@@ -155,18 +155,34 @@ export interface AppCopy {
     galleryAria: string;
     videoLabel: string;
     tapToCapture: string;
-    sheetFound: string;
-    aimAtDocument: string;
-    fitWholePage: string;
-    edgesNotFound: string;
-    /** The only live hint that still earns a chip — see `lib/hints.ts`. */
-    lowLight: string;
     /**
-     * The one tip the stuck-detector box shows. It was two sentences on two
-     * lines; over a viewfinder, where the box is stealing height from the
-     * thing the user is trying to aim, two lines read as a lecture.
+     * The viewfinder's one hint (`lib/guidance.ts`), in its priority order.
+     * Short on purpose — a phone's own scanner says "Move closer", not a
+     * sentence — and one line at 320 px.
      */
-    tip: string;
+    hints: {
+      searching: string;
+      /** After a few seconds with no page: the photo can still be taken. */
+      notFound: string;
+      moveBack: string;
+      moveCloser: string;
+      lowLight: string;
+      glare: string;
+      holdStill: string;
+    };
+    /** The torch toggle's name, and the low-light hint's offer to switch it on. */
+    torch: string;
+    torchOffer: string;
+    /** The auto-capture toggle: its full name, and the short word on it (off, on). */
+    autoCapture: string;
+    autoCaptureShort: string;
+    autoCaptureShortOn: string;
+    /** Said (polite live region) when it is switched on or off. */
+    autoCaptureOnAnnounce: string;
+    autoCaptureOffAnnounce: string;
+    /** Said once per page when the ready cue comes on — with auto-capture on, that the photo is coming. */
+    ready: string;
+    readyAuto: string;
     captured: (n: number) => string;
     atCapacity: (max: number) => string;
     capacityFallback: string;
@@ -880,12 +896,24 @@ const PT: AppCopy = {
     galleryAria: "Usar uma foto que já está no aparelho",
     videoLabel: "Imagem da câmera",
     tapToCapture: "toque na tela para capturar",
-    sheetFound: "folha encontrada",
-    aimAtDocument: "aponte para o documento",
-    fitWholePage: "encaixe a página inteira",
-    edgesNotFound: "não achei as bordas",
-    lowLight: "Pouca luz — procure um lugar mais claro",
-    tip: "Apoie o papel numa superfície lisa, acenda a luz e afaste o celular até a folha inteira caber.",
+    hints: {
+      searching: "Procurando documento",
+      notFound: "Não achei a folha — toque para capturar",
+      moveBack: "Afaste um pouco",
+      moveCloser: "Aproxime",
+      lowLight: "Pouca luz",
+      glare: "Reflexo — incline o celular",
+      holdStill: "Segure firme",
+    },
+    torch: "Lanterna",
+    torchOffer: "Acender lanterna",
+    autoCapture: "Captura automática",
+    autoCaptureShort: "auto",
+    autoCaptureShortOn: "auto ✓",
+    autoCaptureOnAnnounce: "Captura automática ligada",
+    autoCaptureOffAnnounce: "Captura automática desligada",
+    ready: "Pronto",
+    readyAuto: "Pronto — capturando",
     captured: (n) => `Página ${n} capturada`,
     atCapacity: (max) =>
       `Por enquanto cabem ${max} páginas por documento. Conclua este e comece outro — leva menos de um minuto.`,
@@ -1496,12 +1524,24 @@ const EN: AppCopy = {
     galleryAria: "Use a photo already on this device",
     videoLabel: "Camera image",
     tapToCapture: "tap the screen to capture",
-    sheetFound: "sheet found",
-    aimAtDocument: "point at the document",
-    fitWholePage: "fit the whole page in",
-    edgesNotFound: "no edges found",
-    lowLight: "Low light — find a brighter spot",
-    tip: "Rest the paper on a flat surface, turn on the light and move the phone back until the whole sheet fits.",
+    hints: {
+      searching: "Looking for the document",
+      notFound: "Can't find the page — tap to capture",
+      moveBack: "Move back a little",
+      moveCloser: "Move closer",
+      lowLight: "Low light",
+      glare: "Glare — tilt the phone",
+      holdStill: "Hold still",
+    },
+    torch: "Flashlight",
+    torchOffer: "Turn on the flashlight",
+    autoCapture: "Auto-capture",
+    autoCaptureShort: "auto",
+    autoCaptureShortOn: "auto ✓",
+    autoCaptureOnAnnounce: "Auto-capture on",
+    autoCaptureOffAnnounce: "Auto-capture off",
+    ready: "Ready",
+    readyAuto: "Ready — capturing",
     captured: (n) => `Page ${n} captured`,
     atCapacity: (max) =>
       `For now a document holds ${max} pages. Finish this one and start another — it takes less than a minute.`,

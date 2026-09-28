@@ -279,6 +279,11 @@ export function EscanearScreen() {
             useCamera={runtime.intake.camera && choice !== "gallery"}
             disabled={atCapacity}
             disabledReason={copy.capture.atCapacity(maxPages)}
+            autoCaptureOffered={runtime.autoCapture.offered}
+            autoCaptureOn={runtime.autoCapture.chosen.current}
+            onAutoCaptureChange={(on) => {
+              runtime.autoCapture.chosen.current = on;
+            }}
             rightAction={
               <CameraPill
                 // Not filled while a sheet is flagged: carrying on is allowed

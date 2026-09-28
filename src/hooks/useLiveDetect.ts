@@ -5,10 +5,13 @@
  * times a second, so the user sees the app *find* their document instead of
  * guessing whether the photo will come out straight.
  *
- * **Capture is manual, always.** Nothing here ever takes a photo: the person
- * holding the phone decides when it is taken, and the shutter and the frame tap
- * are the only two things that fire one. What this hook does is *find* the page
- * and show the user it has.
+ * **Capture is the person's, unless they hand it over.** The shutter and the
+ * frame tap always work. What this hook does is *find* the page, show the
+ * user it has, and *guide* them (`lib/guidance.ts`): one hint at a time, a
+ * ready cue on the brackets once the page is framed and still — and, only when
+ * they switched auto-capture on, a capture of its own once the ready cue has
+ * held (`onAutoCapture`: the same capture path as a tap, confirm screen
+ * included).
  *
  * Two loops, all of it in refs:
  *
@@ -81,6 +84,7 @@ import {
   ML_CADENCE_MS,
   ML_CALL_BUDGET_MS,
   ML_HOPELESS_PASS_MS,
+  ML_TRUSTED_CONFIDENCE,
   ML_WARM_UP_BUDGET_MS,
   primaryDetector,
   shouldWarmUpMl,
@@ -89,6 +93,7 @@ import {
 } from "@/lib/ml-detection";
 import {
   frameMotionScore,
+  MOTION_PROBE_SIZE,
   motionBreaksHold,
   probeLuma,
 } from "@/lib/frame-motion";
@@ -105,7 +110,7 @@ import {
 } from "@/lib/quad";
 import { QuadOneEuro } from "@/lib/one-euro";
 import { CadenceController, type CadenceProfile } from "@/lib/cadence";
-import { classicalQuadSane, paperEvidence, type PaperEvidence } from "@/lib/paper-evidence";
+import { classicalQuadSane, PAPER, paperEvidence, paperSurface, type PaperEvidence } from "@/lib/paper-evidence";
 import { refineQuad } from "@/lib/refine";
 import type { CornerPoints } from "@/lib/flatten";
 import {
@@ -118,7 +123,31 @@ import {
   startDetectLane,
 } from "@/lib/detect-lane";
 import type { DetectLaneKind } from "@/lib/detect-protocol";
-import type { FrameHint } from "@/lib/hints";
+import { HINT_SAMPLE_WIDTH, readFrame, type FrameReading } from "@/lib/hints";
+import {
+  AutoCapture,
+  BORDER_EXIT,
+  borderMargin,
+  AREA_EXIT,
+  areaShare,
+  HintDebounce,
+  motionOf,
+  rawHint,
+  ReadyCue,
+  ReadyTick,
+  SHAKE_WINDOW_MS,
+  SHAKY_ENTER,
+  READY_DENSE_READINGS,
+  READY_DRIFT_MAX,
+  READY_DRIFT_MAX_SPARSE,
+  READY_MIN_READINGS,
+  STILL_MAX,
+  STILL_WINDOW_MS,
+  toVisible,
+  WHOLE_FRAME,
+  type HintKey,
+  type VisibleRect,
+} from "@/lib/guidance";
 import { useAssetUrls } from "@/hooks/useScanRuntime";
 import { CAPTURE_GRACE_MS } from "@/lib/still-capture";
 import { probe, probing } from "@/lib/probe";
@@ -288,6 +317,22 @@ const RECALL_MS = 10_000;
 const KEEP_SIDE_SUPPORT = 0.8;
 const KEEP_FORESHORTENING = 0.75;
 
+/**
+ * A missed pass whose reading of the held sheet says "not paper" ends the
+ * hold at once, instead of at the second such reading, when the scene moved
+ * at least this much (`frameMotionScore`, `lib/frame-motion.ts`) — a page
+ * slid away is the motion, and waiting another pass for it kept the overlay
+ * on the old page (`page-swap`'s stale overlay).
+ */
+const HELD_RELEASE_MOTION = 0.05;
+
+/**
+ * How fast the overlay fades once the page it held is known to have gone (a
+ * hold broken on evidence or motion, a jump to another page), against
+ * {@link FADE_OUT_MS} for the ordinary loss of a quad.
+ */
+const FADE_OUT_GONE_MS = 100;
+
 /** Consecutive worker passes that timed out before the lane is written off as stalled. */
 const WORKER_STALL_LIMIT = 3;
 /** Consecutive frames that could not be grabbed or read before the worker lane is written off. */
@@ -309,12 +354,61 @@ let lastFoundSheet: { quad: NormalizedQuad; at: number } | null = null;
 const ENTRY_SIDE_SUPPORT = 0.3;
 
 /**
- * On the worker lane the viewfinder's hint chip (focus, light —
- * `lib/hints.ts`) is read by the worker from the live loop's own frames, at
- * most this often: the same rate the capture screen's own timer reads it at
- * on the main-thread lane, without a second draw of the video on this thread.
+ * The frame's focus and light (`lib/hints.ts`, what the hint and the ready
+ * cue read) are read from the live loop's own frames at most this often — by
+ * the worker on its lane, from the pass's sample on the main thread's.
  */
 const HINT_EVERY_MS = 200;
+
+/** A focus/light reading older than this is not a reading of the frame on screen. */
+const READING_FRESH_MS = 1000;
+
+/**
+ * A page the loop cannot take as a found sheet may still be *suspected*:
+ * the model sure of a paper-looking quad too small for its coverage floor
+ * (the page far away), or a quad at or past the viewfinder's edge whose
+ * surface is paper and at least two of whose sides stand on edges (the page
+ * cut off — its cut sides run along the frame's edge, where no step can be
+ * found). Seen on {@link CANDIDATE_READINGS} readings in a row at one place,
+ * it gives the hint something to say ("Aproxime", "Afaste um pouco"); it is
+ * never drawn and never travels with a capture.
+ */
+const CANDIDATE_READINGS = 2;
+/** A far page whose print the surface reading misses must still read this much background (a clean sheet). */
+const FAR_MIN_BACKGROUND = 0.85;
+/** A cut-off page's model score may sit under the trusted line; not this far under it. */
+const CUT_CANDIDATE_MIN_CONFIDENCE = 0.5;
+/** How long a found sheet's readings are kept for its motion (`motionOf`). */
+const SHEET_READINGS_MS = 3000;
+
+/**
+ * The ready cue (and so auto-capture) stands on detection passes that found
+ * the page where it was. The brackets outlive a pass or two — that is what
+ * keeps them steady — but the cue may not: a pass that says the page is not
+ * where the brackets are (its evidence failed there, a quad found somewhere
+ * else, the scene moved) suspends it until a pass on a *later* frame finds
+ * it again, and none may be older than this plus two of the loop's
+ * intervals.
+ */
+const READY_STALE_MS = 1000;
+
+/**
+ * Between passes, the camera is watched while the cue is on: a
+ * {@link MOTION_PROBE_SIZE}² luma probe of the preview itself, every
+ * {@link WATCH_EVERY_MS} and once more at the instant auto-capture would
+ * fire, against the same probe taken of the frame the newest confirming pass
+ * read. A slow phone reads the page two or three times a second; a camera
+ * whipped off the page between two readings must not be photographed on the
+ * strength of the one before. At or over {@link WATCH_MOVED} the cue waits
+ * for a pass on a later frame. A page held still, tremor included, scores
+ * well under it; a page leaving the frame far over.
+ */
+const WATCH_EVERY_MS = 100;
+const WATCH_MOVED = 0.05;
+/** The probe's first step: the preview drawn this wide, then down to the probe (one step aliases the texture of a desk into "motion"). */
+const WATCH_STAGE_WIDTH = 96;
+/** A found sheet whose paper runs on past the viewfinder's edge on this many confirming readings in a row is cut off. */
+const OPEN_READINGS = 2;
 
 /**
  * The bench's view of the overlay (`lib/probe.ts`) is sampled, not streamed: a
@@ -455,6 +549,37 @@ interface Runtime {
    * so a pause never pairs two probes that are minutes apart.
    */
   motionHistory: { at: number; luma: Uint8ClampedArray }[];
+  /** The latest focus/light reading of a live frame (`lib/hints.ts`). */
+  reading: { at: number; sharp: boolean; luma: number; bright: number } | null;
+  /** The found sheet's recent readings (as drawn, in the visible crop): its motion. */
+  sheetReadings: { at: number; quad: NormalizedQuad }[];
+  /** Share of the found sheet's interior clipped white, from its latest evidence. */
+  glare: number | null;
+  /** A page suspected but not found (see {@link CANDIDATE_READINGS}), in frame fractions. */
+  candidate: { quad: NormalizedQuad; at: number; hits: number; cutOff: boolean } | null;
+  /** The motion probe's luma at the last auto-capture: a scene changed since re-arms it. */
+  firedLuma: Uint8ClampedArray | null;
+  /** When a page (found or suspected) was last seen. */
+  sheetSeenAt: number | null;
+  /** The auto-capture countdown on the brackets (0–1), null when not counting. */
+  countdown: number | null;
+  /** The sheet the overlay held is known to have gone: fade it out fast. */
+  dropFast: boolean;
+  /** The frame time of the newest pass that found the locked sheet where it was (the ready cue's footing). */
+  confirmedAt: number | null;
+  /** A pass said the page may not be where the brackets are (its frame time); cleared by a confirming pass on a later frame. */
+  suspectAt: number | null;
+  /** The newest confirming pass's readings say still, on enough of them ({@link READY_MIN_READINGS}). */
+  readyVerdict: boolean;
+  /** The preview's luma probe at the newest confirming pass's frame, and the one being taken for the pass in flight. */
+  watchBase: Uint8ClampedArray | null;
+  /** When the preview was last watched while the cue was on, and whether it has moved off the confirmed frame since. */
+  watchAt: number;
+  watchMoved: boolean;
+  /** The last watch score (the bench's overlay probe). */
+  watchScore: number | null;
+  /** Confirming readings in a row whose paper runs on past an edgeless side ({@link OPEN_READINGS}). */
+  openHits: number;
 }
 
 function freshRuntime(): Runtime {
@@ -487,6 +612,22 @@ function freshRuntime(): Runtime {
     live: false,
     mlEpoch: 0,
     motionHistory: [],
+    reading: null,
+    sheetReadings: [],
+    glare: null,
+    candidate: null,
+    sheetSeenAt: null,
+    countdown: null,
+    dropFast: false,
+    firedLuma: null,
+    confirmedAt: null,
+    suspectAt: null,
+    readyVerdict: false,
+    watchBase: null,
+    watchAt: Number.NEGATIVE_INFINITY,
+    watchMoved: false,
+    watchScore: null,
+    openHits: 0,
   };
 }
 
@@ -535,8 +676,19 @@ function clearTracking(runtime: Runtime, overlay: LiveOverlayRefs): void {
   runtime.evidenceMisses = 0;
   runtime.evidenceHits = 0;
   runtime.filter.reset();
+  runtime.sheetReadings = [];
+  runtime.glare = null;
+  runtime.candidate = null;
+  runtime.countdown = null;
+  runtime.confirmedAt = null;
+  runtime.suspectAt = null;
+  runtime.readyVerdict = false;
+  runtime.watchBase = null;
+  runtime.watchMoved = false;
+  runtime.openHits = 0;
   overlay.bracketsHalo.current?.setAttribute("d", "");
   overlay.brackets.current?.setAttribute("d", "");
+  overlay.countdown.current?.setAttribute("d", "");
   const group = overlay.group.current;
   if (group !== null) group.style.opacity = "0";
 }
@@ -573,6 +725,10 @@ export interface UseLiveDetectOptions {
   active: boolean;
   /** Frozen without being torn down: capture in flight, sheet open, tab hidden. */
   paused: boolean;
+  /** The person switched auto-capture on (`lib/guidance.ts`, {@link AutoCapture}). */
+  autoCapture?: boolean;
+  /** Called when auto-capture fires: take the photo exactly as a tap would. */
+  onAutoCapture?: () => void;
 }
 
 /**
@@ -597,6 +753,11 @@ export interface LiveOverlayRefs {
   /** The four corner brackets, halo under them. Both take `d`. */
   bracketsHalo: React.MutableRefObject<SVGPathElement | null>;
   brackets: React.MutableRefObject<SVGPathElement | null>;
+  /**
+   * The auto-capture countdown: the same brackets, grown from each corner
+   * along its marks as the countdown runs (empty `d` when it is not).
+   */
+  countdown: React.MutableRefObject<SVGPathElement | null>;
 }
 
 /** An accepted quad, with the detection that produced it. */
@@ -643,11 +804,12 @@ export interface LiveDetect {
   takeQuadForCapture: () => BufferedQuad | null;
   /** A capture just happened: the next page is a new question for the ML policy. */
   noteCapture: () => void;
-  /**
-   * The hint chip's reading, when the live loop takes it (the worker lane) —
-   * then the capture screen runs no hint timer of its own. `null` otherwise.
-   */
-  hint: FrameHint | null;
+  /** The one hint over the viewfinder (`lib/guidance.ts`), or none. */
+  hint: HintKey | null;
+  /** The ready cue: a found sheet, framed, sharp and still. */
+  ready: boolean;
+  /** Bumped once per page as the ready cue comes on: the one haptic tick (and a spoken "ready"). */
+  readyTick: number;
 }
 
 /** One pass, whichever lane ran it. */
@@ -680,6 +842,8 @@ interface PassOutcome {
   queueMs: number | null;
   /** The model's call failed at runtime (worker lane): the lane moves. */
   mlFailed: boolean;
+  /** The frame's focus and light, when this pass read them. */
+  reading: FrameReading | null;
   /**
    * Worker lane: why the pass got no answer — `timeout` (the worker is busy
    * or stuck), `grab` (the frame could not be grabbed, drawn or read), or
@@ -693,6 +857,8 @@ export function useLiveDetect({
   containerRef,
   active,
   paused,
+  autoCapture = false,
+  onAutoCapture,
 }: UseLiveDetectOptions): LiveDetect {
   /**
    * Where the corner-detection model lives. Read from the flow's runtime rather
@@ -708,6 +874,7 @@ export function useLiveDetect({
   const groupRef = React.useRef<SVGGElement | null>(null);
   const bracketsHaloRef = React.useRef<SVGPathElement | null>(null);
   const bracketsRef = React.useRef<SVGPathElement | null>(null);
+  const countdownRef = React.useRef<SVGPathElement | null>(null);
   // One stable object so the consumer can spread it into JSX without giving the
   // stage a new set of ref identities on every render.
   const overlay = React.useMemo<LiveOverlayRefs>(
@@ -715,12 +882,33 @@ export function useLiveDetect({
       group: groupRef,
       bracketsHalo: bracketsHaloRef,
       brackets: bracketsRef,
+      countdown: countdownRef,
     }),
     [],
   );
+  /**
+   * The guidance (`lib/guidance.ts`): the hint slot's debounce, the ready cue
+   * and auto-capture. Per mount, and — auto-capture's memory of the page it
+   * took above all — kept across the pauses a capture and its confirm screen
+   * put the loop through.
+   */
+  const guidanceRef = React.useRef({ hints: new HintDebounce(), ready: new ReadyCue(), tick: new ReadyTick(), auto: new AutoCapture() });
+  const autoCaptureRef = React.useRef(autoCapture);
+  const onAutoCaptureRef = React.useRef(onAutoCapture);
+  onAutoCaptureRef.current = onAutoCapture;
+  React.useEffect(() => {
+    // Switched on: count from now, whatever was ready before.
+    if (autoCapture && !autoCaptureRef.current) guidanceRef.current.auto.enable(performance.now());
+    autoCaptureRef.current = autoCapture;
+  }, [autoCapture]);
+  /** The main-thread lane's 320 px copy of the sample, for the focus/light reading. */
+  const readingCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   const sampleRef = React.useRef<HTMLCanvasElement | null>(null);
   /** The 24×24 scratch the motion probe redraws every pass. */
   const motionScratchRef = React.useRef<HTMLCanvasElement | null>(null);
+  /** The watch's own two canvases (the preview at {@link WATCH_STAGE_WIDTH}, then the probe): never the pass's. */
+  const watchStageRef = React.useRef<HTMLCanvasElement | null>(null);
+  const watchScratchRef = React.useRef<HTMLCanvasElement | null>(null);
   /**
    * The warm-up pass gets its own copy of the frame (main-thread lane).
    *
@@ -736,15 +924,20 @@ export function useLiveDetect({
   const frameBoxRef = React.useRef<FrameBox | null>(null);
   /** The video's own size at the last measure: a change is a new sensor frame (a rotation). */
   const videoSizeRef = React.useRef<{ width: number; height: number } | null>(null);
+  /** The part of the frame the viewfinder shows (its object-cover crop): what the hints judge. */
+  const visibleRef = React.useRef<VisibleRect>(WHOLE_FRAME);
 
   const [available, setAvailable] = React.useState(true);
   const [hasQuad, setHasQuad] = React.useState(false);
   const [searching, setSearching] = React.useState(false);
   const [frameBox, setFrameBox] = React.useState<FrameBox | null>(null);
   const [tabHidden, setTabHidden] = React.useState(false);
-  const [hint, setHint] = React.useState<FrameHint | null>(null);
-  /** When the worker last read the hint, and what it said (state updates only on change). */
-  const hintRef = React.useRef<{ at: number; hint: FrameHint | null }>({ at: Number.NEGATIVE_INFINITY, hint: null });
+  const [hint, setHint] = React.useState<HintKey | null>(null);
+  const [ready, setReady] = React.useState(false);
+  /** Bumped once per page when the ready cue comes on: the haptic tick and the spoken "ready" ({@link ReadyTick}). */
+  const [readyTick, setReadyTick] = React.useState(0);
+  /** When the frame's focus and light were last read. */
+  const hintRef = React.useRef<{ at: number }>({ at: Number.NEGATIVE_INFINITY });
 
   // Start deciding where detection runs — and, on the worker lane, the
   // model's download — the moment the capture screen mounts, whether or not
@@ -808,6 +1001,12 @@ export function useLiveDetect({
       clearTracking(runtimeRef.current, overlay);
     }
     videoSizeRef.current = { width: video.videoWidth, height: video.videoHeight };
+    visibleRef.current = {
+      x: -next.left / width,
+      y: -next.top / height,
+      width: rect.width / width,
+      height: rect.height / height,
+    };
     frameBoxRef.current = next;
     setFrameBox((current) => (same && current !== null ? current : next));
   }, [containerRef, overlay, videoRef]);
@@ -844,18 +1043,32 @@ export function useLiveDetect({
     runtime.mlEpoch += 1;
     setHasQuad(false);
     setSearching(false);
-    // The worker's hint reading stops with the loop: the capture screen's own
-    // timer takes the chip back (a stale "low light" must not stay up, nor
-    // keep that timer off, for the rest of the session).
-    hintRef.current = { at: Number.NEGATIVE_INFINITY, hint: null };
+    // The guidance stops with the loop: no hint, no cue, and a stale reading
+    // ("low light") never outlives it. Auto-capture keeps its memory of the
+    // page it took — this pause is its confirm screen.
+    hintRef.current = { at: Number.NEGATIVE_INFINITY };
+    runtime.reading = null;
+    runtime.sheetSeenAt = null;
+    const guidance = guidanceRef.current;
+    guidance.hints.reset();
+    guidance.ready.reset();
+    // The next cue is another page's (or this one retaken): it ticks.
+    guidance.tick.reset();
+    guidance.auto.pause();
     setHint(null);
+    setReady(false);
   }, [loopLive, overlay]);
 
   const noteCapture = React.useCallback(() => {
     // The next page is a new question, so a warm-up pass still in flight over
     // the sheet that was just photographed no longer has one to answer. The
     // download itself is untouched — it is a fact about the page.
-    runtimeRef.current.mlEpoch += 1;
+    const runtime = runtimeRef.current;
+    runtime.mlEpoch += 1;
+    // This page is taken, whoever took it: auto-capture waits for another.
+    const sheet = runtime.locked && runtime.shown !== null ? toVisible(runtime.shown, visibleRef.current) : null;
+    guidanceRef.current.auto.took(performance.now(), sheet);
+    if (sheet !== null) runtime.firedLuma = runtime.motionHistory[runtime.motionHistory.length - 1]?.luma ?? null;
   }, []);
 
   /**
@@ -903,12 +1116,20 @@ export function useLiveDetect({
     let frameHandle: number | null = null;
     let trackedQuad = false;
     let announcedSearching = false;
+    let announcedHint: HintKey | null = null;
+    let announcedReady = false;
     // What the probe last reported of the overlay (`lib/probe.ts`).
     let overlayProbedAt = Number.NEGATIVE_INFINITY;
     let probedTracking = false;
     let probedSearching = false;
+    let probedReady = false;
     runtime.mlEpoch += 1;
     runtime.live = true;
+    // Back from the confirm screen (or any pause): auto-capture's "another
+    // page" is judged from now, against the scene as it is now — the first
+    // motion probe of this run replaces the one from before the capture.
+    guidanceRef.current.auto.resume(performance.now());
+    runtime.firedLuma = null;
     // A probe kept across a pause would pair two frames minutes apart and read
     // the difference as a swing; the loop re-learns stillness from scratch.
     runtime.motionHistory = [];
@@ -937,6 +1158,31 @@ export function useLiveDetect({
         width: Math.max(1, Math.round(video.videoWidth * scale)),
         height: Math.max(1, Math.round(video.videoHeight * scale)),
       };
+    }
+
+    /**
+     * The preview's luma probe for the watch ({@link WATCH_MOVED}): drawn at
+     * {@link WATCH_STAGE_WIDTH} first, then down to the probe — the same two
+     * steps every time, so two probes differ by what the camera saw.
+     */
+    function watchProbe(video: HTMLVideoElement): Uint8ClampedArray | null {
+      if (video.videoWidth === 0 || video.videoHeight === 0) return null;
+      try {
+        const stage = watchStageRef.current ?? document.createElement("canvas");
+        watchStageRef.current = stage;
+        const width = WATCH_STAGE_WIDTH;
+        const height = Math.max(MOTION_PROBE_SIZE, Math.round((WATCH_STAGE_WIDTH * video.videoHeight) / video.videoWidth));
+        if (stage.width !== width) stage.width = width;
+        if (stage.height !== height) stage.height = height;
+        const context = stage.getContext("2d", { willReadFrequently: true });
+        if (context === null) return null;
+        context.drawImage(video, 0, 0, width, height);
+        const scratch = watchScratchRef.current ?? document.createElement("canvas");
+        watchScratchRef.current = scratch;
+        return probeLuma(stage, scratch);
+      } catch {
+        return null;
+      }
     }
 
     /** The reused sample canvas, redrawn from the preview on every main-lane pass. */
@@ -1041,6 +1287,8 @@ export function useLiveDetect({
           ? await detectOnCanvasMl(canvas, profile.budgetMs, assetsRef.current)
           : await detectOnCanvas(canvas, profile.budgetMs, assetsRef.current);
       const detectMs = performance.now() - started;
+      // Focus and light, off the same frame, outside the detector's own time.
+      const reading = started - hintRef.current.at >= HINT_EVERY_MS ? readOn(canvas) : null;
       let evidence: EvidenceReading = null;
       let refined: CornerPoints | null = null;
       let refineMs: number | null = null;
@@ -1067,7 +1315,10 @@ export function useLiveDetect({
       }
       let heldEvidence: PaperEvidence | null = null;
       const held = heldQuad(canvas.width, canvas.height);
-      if (detection === null && held !== null) {
+      const heldAt = held === null ? null : normalizeQuad(held, canvas.width, canvas.height);
+      const foundAt = detection === null ? null : normalizeQuad(detection.corners, canvas.width, canvas.height);
+      // Nothing found, or a quad found away from the held sheet: is it still there?
+      if (held !== null && heldAt !== null && (foundAt === null || quadJump(foundAt, heldAt, canvas.height / canvas.width) > JUMP_RESET_DIAG)) {
         try {
           const pixels = canvas.getContext("2d", { willReadFrequently: true })?.getImageData(0, 0, canvas.width, canvas.height) ?? null;
           heldEvidence = pixels === null ? null : paperEvidence(pixels.data, canvas.width, canvas.height, held);
@@ -1093,7 +1344,26 @@ export function useLiveDetect({
         queueMs: null,
         mlFailed: false,
         miss: null,
+        reading,
       };
+    }
+
+    /** The frame's focus and light on the main-thread lane: the sample at the reading's 320 px. */
+    function readOn(canvas: HTMLCanvasElement): FrameReading | null {
+      try {
+        const target = readingCanvasRef.current ?? document.createElement("canvas");
+        readingCanvasRef.current = target;
+        const width = HINT_SAMPLE_WIDTH;
+        const height = Math.max(1, Math.round((HINT_SAMPLE_WIDTH * canvas.height) / canvas.width));
+        if (target.width !== width) target.width = width;
+        if (target.height !== height) target.height = height;
+        const context = target.getContext("2d", { willReadFrequently: true });
+        if (context === null) return null;
+        context.drawImage(canvas, 0, 0, width, height);
+        return readFrame(context.getImageData(0, 0, width, height));
+      } catch {
+        return null;
+      }
     }
 
     /**
@@ -1122,6 +1392,7 @@ export function useLiveDetect({
         queueMs: null,
         mlFailed: false,
         miss,
+        reading: null,
       });
       let frame: ImageBitmap;
       try {
@@ -1158,13 +1429,6 @@ export function useLiveDetect({
         // not answer in time, is counted by the caller.
         return reply.why === "timeout" ? missed("timeout", mainMs) : reply.why === "error" ? missed("grab", mainMs) : null;
       }
-      if (reply.hint) {
-        hintRef.current.at = frameAt;
-        if (reply.hint.hint !== hintRef.current.hint) {
-          hintRef.current.hint = reply.hint.hint;
-          setHint(reply.hint.hint);
-        }
-      }
       const detection: FrameDetection | null =
         reply.success && reply.corners !== null && reply.detector !== null
           ? { corners: reply.corners, confidence: reply.confidence, source: reply.detector }
@@ -1191,6 +1455,7 @@ export function useLiveDetect({
         queueMs: reply.queueMs,
         mlFailed: reply.mlFailed,
         miss: null,
+        reading: reply.hint,
       };
     }
 
@@ -1212,15 +1477,14 @@ export function useLiveDetect({
       const lane: DetectLaneKind = detectLane() ?? "main";
       if (runtime.laneGeneration !== detectLaneGeneration()) {
         // The lane moved (the worker died, stalled or lost its model): the
-        // main thread warms its own model if it needs one, everything is
-        // measured afresh, and the capture screen takes the hint chip back.
+        // main thread warms its own model if it needs one, and everything is
+        // measured afresh — the frame's focus and light included.
         runtime.laneGeneration = detectLaneGeneration();
         runtime.workerTimeouts = 0;
         runtime.workerGrabFailures = 0;
         if (lane === "main") {
           runtime.mlWarmUpStarted = false;
-          hintRef.current = { at: Number.NEGATIVE_INFINITY, hint: null };
-          setHint(null);
+          hintRef.current = { at: Number.NEGATIVE_INFINITY };
           // scanic never loaded on this thread while the worker had it: pay
           // its import and WASM compile now, outside any measured pass — the
           // same reason the loop's start does on the main lane.
@@ -1247,6 +1511,9 @@ export function useLiveDetect({
       // on while the pass is out makes the answer nobody's.
       const epoch = runtime.mlEpoch;
       runtime.detecting = true;
+      // The watch's probe of the very frame this pass is about to read — the
+      // ready cue's footing if the pass finds the sheet where it was.
+      const watchLuma = runtime.locked ? watchProbe(video) : null;
       const started = performance.now();
       let outcome: PassOutcome | null = null;
       try {
@@ -1298,6 +1565,10 @@ export function useLiveDetect({
         fallBackToClassical();
         return runtime.intervalMs;
       }
+      if (outcome.reading !== null) {
+        hintRef.current.at = outcome.frameAt;
+        runtime.reading = { at: outcome.frameAt, sharp: outcome.reading.hint !== "hold_still", luma: outcome.reading.meanLuma, bright: outcome.reading.brightLuma };
+      }
       const motionScore = motionAgainst(outcome.frameAt, outcome.luma);
       // The frame this describes is the one the pass sampled, not the moment
       // the detector got round to answering.
@@ -1312,8 +1583,16 @@ export function useLiveDetect({
       // slid away (on a white table the motion probe barely notices) leaves
       // no edges there, and two such readings end the hold — the overlay, the
       // found state and the capture buffer with it.
-      const heldGone = outcome.detection === null && heldLost(outcome.heldEvidence);
-      const holdBroken = (outcome.detection === null && motionBreaksHold(motionScore)) || heldGone;
+      // A quad found somewhere else that the loop did not take (under its
+      // floor, superseded) says the same when nothing is left where the
+      // sheet was — and so does a single such reading on a scene that moved
+      // ({@link HELD_RELEASE_MOTION}): the page going is the motion.
+      const heldGone =
+        runtime.locked && outcome.heldEvidence !== null && !outcome.heldEvidence.ok && (outcome.detection !== null || (motionScore ?? 0) >= HELD_RELEASE_MOTION)
+          ? true
+          : outcome.detection === null && heldLost(outcome.heldEvidence);
+      const holdBroken = (outcome.detection === null && motionBreaksHold(motionScore)) || (!accepted && heldGone);
+      if (holdBroken) runtime.dropFast = true;
       if (holdBroken) {
         runtime.target = null;
         runtime.displayTarget = null;
@@ -1324,6 +1603,7 @@ export function useLiveDetect({
         runtime.evidenceHits = 0;
         runtime.filter.reset();
       }
+      noteGuidance(outcome, accepted, rejected, holdBroken, motionScore, watchLuma);
       const keepGoing = adapt(outcome.costMs, outcome.detectMs, profile);
       reportPass(source, false, outcome.detection, outcome, elapsed, accepted, motionScore, false, holdBroken, rejected);
       if (!keepGoing) return null;
@@ -1344,6 +1624,131 @@ export function useLiveDetect({
     }
 
     /**
+     * The ready cue's stillness, judged once per confirming pass (never per
+     * animation frame — a window that grows with every frame drops the cue
+     * for a frame at a time): still over the last {@link STILL_WINDOW_MS},
+     * not drifting since the conditions began, on enough readings — each
+     * window at least 1.2 of the loop's interval, which a slow phone stretches.
+     */
+    function stillEnough(at: number): boolean {
+      const aspect = visibleAspect();
+      const readings = runtime.sheetReadings;
+      const stillWindow = Math.max(STILL_WINDOW_MS, 1.2 * runtime.intervalMs);
+      const stillness = motionOf(readings, aspect, stillWindow);
+      const since = guidanceRef.current.ready.since;
+      // At least READY_MIN_READINGS readings' worth of time, however slowly the loop reads.
+      const driftWindow = Math.max((since === null ? 0 : at - since) + stillWindow, (READY_MIN_READINGS - 0.5) * runtime.intervalMs);
+      const drift = motionOf(readings, aspect, driftWindow);
+      const newest = readings[readings.length - 1]?.at ?? at;
+      const seen = readings.filter((r) => newest - r.at <= driftWindow).length;
+      return (
+        stillness !== null &&
+        stillness <= STILL_MAX &&
+        drift !== null &&
+        drift <= (seen >= READY_DENSE_READINGS ? READY_DRIFT_MAX : READY_DRIFT_MAX_SPARSE) &&
+        seen >= READY_MIN_READINGS
+      );
+    }
+
+    /**
+     * What a pass tells the guidance (`lib/guidance.ts`): the found sheet's
+     * reading (its motion) and its glare, or — no sheet found — a page
+     * suspected too far away or cut off by the viewfinder's edge
+     * ({@link CANDIDATE_READINGS}).
+     */
+    function noteGuidance(
+      outcome: PassOutcome,
+      accepted: boolean,
+      rejected: string | null,
+      holdBroken: boolean,
+      motionScore: number | null,
+      watch: Uint8ClampedArray | null,
+    ): void {
+      const aspect = outcome.height / outcome.width;
+      if (holdBroken || !runtime.locked) {
+        runtime.sheetReadings = [];
+        runtime.glare = null;
+        runtime.openHits = 0;
+      }
+      const detection = outcome.detection;
+      const confirmed = accepted && runtime.locked && !holdBroken && runtime.shown !== null;
+      if (confirmed && runtime.shown !== null) {
+        const readings = runtime.sheetReadings;
+        readings.push({ at: outcome.frameAt, quad: toVisible(runtime.shown, visibleRef.current) });
+        while (readings.length > 0 && outcome.frameAt - readings[0].at > SHEET_READINGS_MS) readings.shift();
+        if (outcome.evidence !== null && outcome.evidence !== "unavailable") {
+          runtime.glare = outcome.evidence.glare;
+          runtime.openHits = outcome.evidence.open > 0 ? runtime.openHits + 1 : 0;
+        }
+        // The ready cue's footing: this frame, found where it was.
+        runtime.confirmedAt = Math.max(runtime.confirmedAt ?? outcome.frameAt, outcome.frameAt);
+        if (runtime.suspectAt !== null && outcome.frameAt > runtime.suspectAt) runtime.suspectAt = null;
+        if (watch !== null || runtime.watchBase === null) {
+          runtime.watchBase = watch;
+          runtime.watchMoved = false;
+        }
+        runtime.readyVerdict = stillEnough(outcome.frameAt);
+      } else {
+        // A miss on a still scene with the held sheet still paper where it
+        // was is the flicker the hold is for: it changes nothing. Anything
+        // else says the page may not be where the brackets are.
+        const neutral =
+          !holdBroken &&
+          detection === null &&
+          (outcome.heldEvidence === null || outcome.heldEvidence.ok) &&
+          (motionScore ?? 0) < HELD_RELEASE_MOTION;
+        if (!neutral) {
+          runtime.suspectAt = Math.max(runtime.suspectAt ?? outcome.frameAt, outcome.frameAt);
+          runtime.readyVerdict = false;
+        }
+      }
+      // A suspected page: only while nothing is found.
+      const evidence = outcome.evidence;
+      // A found sheet speaks for itself; a suspicion from just before it
+      // stands until it goes stale (a lock that comes and goes on a cut-off
+      // page must not reset it).
+      if (runtime.locked) return;
+      // Nothing answered: the suspicion stands until it goes stale.
+      if (detection === null) return;
+      if (evidence === null || evidence === "unavailable" || detection.source !== "ml") {
+        runtime.candidate = null;
+        return;
+      }
+      const quad = normalizeQuad(outcome.refined ?? detection.corners, outcome.width, outcome.height);
+      if (quad === null) {
+        runtime.candidate = null;
+        return;
+      }
+      const seen = toVisible(quad, visibleRef.current);
+      const confidence = detection.confidence ?? 0;
+      const onEdges = evidence.sideSupport.every((support) => support === null || support >= ENTRY_SIDE_SUPPORT);
+      // Far away the print blurs to a few specks and the surface reading may
+      // fail, but a small sheet the model is sure of still stands on four
+      // clean edges with a smooth, one-way interior.
+      const farPaper =
+        evidence.ok ||
+        (evidence.sidesKnown === 4 &&
+          evidence.sidesSupported === 4 &&
+          evidence.background >= FAR_MIN_BACKGROUND &&
+          evidence.counterInk <= evidence.ink * PAPER.maxCounterRatio + PAPER.counterFloor &&
+          evidence.solidInk <= PAPER.maxSolidInk);
+      const far = confidence >= ML_TRUSTED_CONFIDENCE && farPaper && onEdges && areaShare(seen) < AREA_EXIT && (rejected === "floor" || rejected === null);
+      // Cut off: a corner at or past the viewfinder's edge, or an edgeless
+      // side with the page's paper running on past it to the frame's edge.
+      const cutOff = evidence.open > 0;
+      const cut = confidence >= CUT_CANDIDATE_MIN_CONFIDENCE && (borderMargin(seen) < BORDER_EXIT || cutOff) && paperSurface(evidence) && evidence.sidesSupported >= 2;
+      if (!far && !cut) {
+        runtime.candidate = null;
+        return;
+      }
+      // Readings in a row, wherever they fall: the model's quad for a page
+      // the frame cuts off swings between readings, and the suspicion is
+      // about the page, not a place.
+      const previous = runtime.candidate;
+      runtime.candidate = { quad, at: outcome.frameAt, hits: previous === null ? 1 : previous.hits + 1, cutOff: cut && cutOff && borderMargin(seen) >= BORDER_EXIT };
+    }
+
+    /**
      * One pass, as the bench sees it (`lib/probe.ts`). Positional so a page
      * without a listener builds nothing: the check comes first.
      */
@@ -1352,7 +1757,7 @@ export function useLiveDetect({
       warmUp: boolean,
       detection: FrameDetection | null,
       outcome: Pick<PassOutcome, "width" | "height" | "frameAt" | "mainMs" | "computeMs" | "queueMs" | "evidence"> &
-        Partial<Pick<PassOutcome, "refined" | "refineMs">> & { lane?: DetectLaneKind },
+        Partial<Pick<PassOutcome, "refined" | "refineMs" | "heldEvidence" | "reading">> & { lane?: DetectLaneKind },
       passMs: number,
       accepted: boolean,
       motion: number | null,
@@ -1402,6 +1807,8 @@ export function useLiveDetect({
         refineMs: outcome.refineMs ?? null,
         locked: runtime.locked,
         rejected,
+        heldEvidence: outcome.heldEvidence ?? null,
+        reading: outcome.reading ?? null,
       });
     }
 
@@ -1575,8 +1982,10 @@ export function useLiveDetect({
         previous === null || runtime.tracked?.source !== detection.source || quadJump(previous, shown, aspect) > JUMP_RESET_DIAG;
       if (jumped) {
         // Another page, or the same one somewhere else: nothing to smooth
-        // from, and "found" is earned again.
+        // from, "found" is earned again, and its motion starts afresh.
+        if (runtime.locked) runtime.dropFast = true;
         runtime.filter.reset();
+        runtime.sheetReadings = [];
         runtime.locked = false;
         runtime.evidenceMisses = 0;
         runtime.evidenceHits = 0;
@@ -1701,15 +2110,140 @@ export function useLiveDetect({
       if (group === null) return;
       const quad = runtime.current;
       if (quad !== null) {
-        const brackets = cornerBracketPath(
-          quad,
-          BRACKET_EDGE_FRACTION,
-          bracketCap(),
-        );
+        const cap = bracketCap();
+        const brackets = cornerBracketPath(quad, BRACKET_EDGE_FRACTION, cap);
         overlay.bracketsHalo.current?.setAttribute("d", brackets);
         overlay.brackets.current?.setAttribute("d", brackets);
+        // The countdown grows along each mark from its corner.
+        const progress = runtime.countdown;
+        overlay.countdown.current?.setAttribute(
+          "d",
+          progress === null || progress <= 0
+            ? ""
+            : cornerBracketPath(quad, BRACKET_EDGE_FRACTION * progress, { ...cap, length: cap.length * progress }),
+        );
+      } else {
+        overlay.countdown.current?.setAttribute("d", "");
       }
       group.style.opacity = runtime.opacity.toFixed(3);
+    }
+
+    /** The visible crop's height over its width, in pixels of the frame. */
+    function visibleAspect(): number {
+      const size = videoSizeRef.current;
+      const visible = visibleRef.current;
+      if (size === null || size.width === 0 || visible.width === 0) return 1;
+      return (visible.height * size.height) / (visible.width * size.width);
+    }
+
+    /**
+     * One moment of guidance (`lib/guidance.ts`): the hint, the ready cue and
+     * auto-capture, from what the loop holds right now. Answers whether
+     * auto-capture fires.
+     */
+    function guide(now: number, tracking: boolean): boolean {
+      const guidance = guidanceRef.current;
+      const visible = visibleRef.current;
+      const aspect = visibleAspect();
+      const candidate = runtime.candidate;
+      const convincing =
+        !tracking && candidate !== null && candidate.hits >= CANDIDATE_READINGS && now - candidate.at <= staleHorizonMs("ml", runtime.intervalMs);
+      const suspected = convincing ? candidate.quad : null;
+      const sheetFrame = tracking ? runtime.shown : suspected;
+      const sheet = sheetFrame === null ? null : toVisible(sheetFrame, visible);
+      if (sheet !== null) runtime.sheetSeenAt = now;
+      // The hint's window over the found sheet's readings (a trembling hand)
+      // — at least 2.5 of the loop's interval, which a slow phone stretches.
+      const motion = tracking ? motionOf(runtime.sheetReadings, aspect, Math.max(SHAKE_WINDOW_MS, 2.5 * runtime.intervalMs)) : null;
+      const reading = runtime.reading !== null && now - runtime.reading.at <= READING_FRESH_MS ? runtime.reading : null;
+      const raw = rawHint(
+        {
+          now,
+          since: runtime.loopStartedAt,
+          locked: tracking,
+          sheet,
+          sheetSeenAt: runtime.sheetSeenAt,
+          cutOff: tracking ? runtime.openHits >= OPEN_READINGS : convincing && candidate.cutOff,
+          aspect,
+          motion,
+          sharp: reading?.sharp ?? null,
+          bright: reading?.bright ?? null,
+          glare: tracking ? runtime.glare : null,
+        },
+        guidance.hints.current,
+      );
+      // The camera watched between passes while the cue is on or counting.
+      const watching = tracking && (guidance.ready.since !== null || announcedReady || runtime.countdown !== null);
+      if (watching && now - runtime.watchAt >= WATCH_EVERY_MS) watch(now);
+      // On its footing: the page found where it was by a recent pass, and
+      // nothing since saying otherwise.
+      const footing =
+        tracking &&
+        runtime.suspectAt === null &&
+        !runtime.watchMoved &&
+        runtime.confirmedAt !== null &&
+        now - runtime.confirmedAt <= READY_STALE_MS + 2 * runtime.intervalMs;
+      // The hint slot and the brackets never disagree: the cue comes on only
+      // once the slot has emptied (at its own pace — a hint snatched away the
+      // moment it appeared is the flicker the debounce exists to prevent),
+      // and while the cue is on the slot stays empty.
+      const shown = announcedReady ? guidance.hints.value : guidance.hints.update(raw, now);
+      const strict = footing && raw === null && shown === null && runtime.readyVerdict && reading?.sharp !== false;
+      // A wobble keeps the cue; shaking (the hold-still hint owed) does not.
+      const keep = footing && shown === null && raw === null;
+      const isReady = guidance.ready.update(strict, keep, now);
+      if (guidance.tick.update(isReady, tracking, now)) setReadyTick((n) => n + 1);
+      let fire = false;
+      runtime.countdown = null;
+      if (autoCaptureRef.current) {
+        const latest = runtime.motionHistory[runtime.motionHistory.length - 1]?.luma ?? null;
+        // Back from the confirm screen, the scene is compared with itself as it was then.
+        if (!guidance.auto.armed && runtime.firedLuma === null) runtime.firedLuma = latest;
+        const auto = guidance.auto.update({
+          now,
+          readyOnSince: guidance.ready.onSince,
+          sheet: tracking ? sheet : null,
+          moving: motion !== null && motion > SHAKY_ENTER,
+          aspect,
+          sceneChange: runtime.firedLuma === null || latest === null ? null : frameMotionScore(runtime.firedLuma, latest),
+          confirmedAt: runtime.confirmedAt,
+        });
+        runtime.countdown = auto.countdown;
+        // One last look at the camera, at the instant of the photo.
+        fire = auto.fire && watch(now);
+        if (auto.fire && !fire) {
+          guidance.ready.update(false, false, now);
+          runtime.countdown = null;
+        }
+        if (fire) runtime.firedLuma = latest;
+        else if (guidance.auto.armed) runtime.firedLuma = null;
+      }
+      if (shown !== announcedHint) {
+        announcedHint = shown;
+        setHint(shown);
+      }
+      if (isReady !== announcedReady) {
+        announcedReady = isReady;
+        setReady(isReady);
+      }
+      return fire;
+    }
+
+    /**
+     * Look at the camera now ({@link WATCH_MOVED}): answers whether it still
+     * shows what the newest confirming pass read. A probe that cannot be
+     * taken, or nothing to compare it with, is no evidence either way.
+     */
+    function watch(now: number): boolean {
+      runtime.watchAt = now;
+      const video = videoRef.current;
+      const base = runtime.watchBase;
+      if (video === null || base === null) return !runtime.watchMoved;
+      const seen = watchProbe(video);
+      const score = seen === null ? null : frameMotionScore(base, seen);
+      runtime.watchScore = score;
+      if (score !== null && score >= WATCH_MOVED) runtime.watchMoved = true;
+      return !runtime.watchMoved;
     }
 
     function frame(now: number): void {
@@ -1748,16 +2282,18 @@ export function useLiveDetect({
             ? runtime.displayTarget
             : lerpQuad(runtime.current, runtime.displayTarget, 1 - Math.exp(-deltaMs / DISPLAY_EASE_MS));
       }
+      if (tracking) runtime.dropFast = false;
       if (reducedRef.current) {
         runtime.opacity = tracking ? 1 : 0;
       } else {
-        const step = deltaMs / (tracking ? FADE_IN_MS : FADE_OUT_MS);
+        const step = deltaMs / (tracking ? FADE_IN_MS : runtime.dropFast ? FADE_OUT_GONE_MS : FADE_OUT_MS);
         runtime.opacity = Math.min(
           1,
           Math.max(0, runtime.opacity + (tracking ? step : -step)),
         );
       }
       if (runtime.opacity === 0) runtime.current = null;
+      const fire = guide(now, tracking);
       paint();
 
       if (tracking !== trackedQuad) {
@@ -1777,11 +2313,13 @@ export function useLiveDetect({
         probing() &&
         (tracking !== probedTracking ||
           isSearching !== probedSearching ||
+          announcedReady !== probedReady ||
           now - overlayProbedAt >= OVERLAY_PROBE_INTERVAL_MS)
       ) {
         overlayProbedAt = now;
         probedTracking = tracking;
         probedSearching = isSearching;
+        probedReady = announcedReady;
         probe({
           type: "overlay",
           t: now,
@@ -1790,9 +2328,17 @@ export function useLiveDetect({
           hasQuad: tracking,
           searching: isSearching,
           locked: runtime.locked,
+          ready: announcedReady,
+          countdown: runtime.countdown,
+          watch: runtime.watchScore,
         });
       }
 
+      if (fire) {
+        // The same capture as a tap: the capture screen's path, which pauses
+        // this loop and opens the confirm screen.
+        onAutoCaptureRef.current?.();
+      }
       frameHandle = window.requestAnimationFrame(frame);
     }
 
@@ -1818,10 +2364,8 @@ export function useLiveDetect({
         primaryDetector({ ready: isMlDetectionReady(), disabled: isMlDetectionDisabled() }),
         lane,
       );
-      // The hint chip rides on the worker's frames; on the main-thread lane
-      // the capture screen keeps its own timer.
-      hintRef.current = { at: Number.NEGATIVE_INFINITY, hint: null };
-      setHint(lane === "worker" ? "good" : null);
+      // The focus/light reading rides on the loop's own frames, on either lane.
+      hintRef.current = { at: Number.NEGATIVE_INFINITY };
       if (lane === "main") await loadScanic(assetsRef.current);
       scheduleDetect(0);
     })().catch(() => setAvailable(false));
@@ -1843,5 +2387,7 @@ export function useLiveDetect({
     takeQuadForCapture,
     noteCapture,
     hint,
+    ready,
+    readyTick,
   };
 }
