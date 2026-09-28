@@ -14,6 +14,10 @@ npm run bench -- --suite detector --seeds 10 --compare .bench-out/latest-detecto
 npm run bench -- --suite detector --family F7 --setting screen,booklet --seeds 20   # 20 scenes of each setting
 npm run bench -- --suite session                           # every session once, ~7 min
 npm run bench -- --suite session --session page-swap --seeds 3 --cpu 4
+npm run bench -- --suite session --session sustained-hold --seeds 3 --cpu 4   # 75 s, remounts, leaks
+npm run bench -- --suite session --seeds 3 --lane main     # force the main-thread detection lane
+npm run bench -- --suite session --session regression --seeds 5   # the adversarial sessions (fast pans, steep tilts…)
+npm run bench:webkit                                       # the flow end to end in WebKit, both lanes
 npm run bench -- --suite emulator --seeds 10               # the emulator's own GT check
 npm run bench:play                                         # the playground, in a Chromium window
 npm run bench:play -- --no-browser                         # …or serve it and open the URL yourself
@@ -70,6 +74,8 @@ serves them, and drives the page in Chromium through `window.__bench`:
 | `scene(family, seed, { size })` | renders one scene; answers its params and ground truth |
 | `load(id, url, { thumbLongEdge })` | decodes a real image the way the app decodes a photo, keeps it by id |
 | `detect(variant, sceneId)` | runs one detector variant on that frame |
+| `evidence(sceneId, quads)` | the live loop's paper evidence (`src/lib/paper-evidence.ts`) for each quad on the frame's 640 px sample, with its raw readings — for tuning the rules in Node |
+| `refineLive(sceneId, quad)` | a quad refined on the frame's 640 px live sample, as the live loop refines the model's answer |
 | `sheet(spec)` | draws a contact sheet |
 | `selfCheck(family, seed)` | renders the scene as white-on-black and measures it against its GT |
 | `emulator` | the scene emulator module itself, for a console or a one-off script |
@@ -100,6 +106,7 @@ options, same coverage floors, same fallback chain.
 | `production` | the capture path **before** edge refinement: `detectInCanvas(…, { refine: false })` on the full frame — ML first, trusted floor, classical fallback |
 | `refined` | the capture path as the product runs it: `production` + the edge refinement (`src/lib/refine.ts`) on the full frame |
 | `ml+refine` | the `ml` pass, its quad then refined on the full frame the way a capture refines a carried live quad (`refineCorners`) |
+| `ml+live` | the `ml` pass, its quad refined on its own 640 px sample — what the live overlay draws; the real-video replay also scores the overlay against it |
 
 The refining variants carry the refinement's own report (`det.refine`: its
 input quad, ms, per-side mode and verdict). The report adds, per family, how
@@ -196,6 +203,145 @@ grows with the image or the side — ~2 ms of work between two checks on
 this bench's desktop) answers the input unchanged. Nothing is kept between
 calls: the working canvas is released as soon as it is read, and the planes
 are per call.
+
+## The live loop (`src/hooks/useLiveDetect.ts`)
+
+What the viewfinder draws while the person aims — tuned on this bench, and
+what the session suite measures. In order of a pass:
+
+1. **Where it runs** (`src/lib/detect-lane.ts`, `detect-protocol.ts`,
+   `detect.worker.ts`). The page decides once, with a reason (probe event
+   `lane`): the **worker** lane — scanic imported inside a module worker
+   from `assets/scanic/`, its ML detector on the same self-hosted ONNX
+   Runtime files, one worker per page, created as the capture screen mounts
+   (the model downloads and compiles while the primer is read) — or the
+   **main** lane, the path that shipped before: no `Worker` or
+   `createImageBitmap`, no hello within 5 s, a load error (a 404, or a CSP
+   header on the worker's *own* response), no 2-D `OffscreenCanvas` in the
+   worker, no WebAssembly there (`no-wasm-in-worker`: the worker compiles the
+   smallest module before its hello — a CSP on its response without
+   `'wasm-unsafe-eval'` refuses it), scanic not loading there, or, later in
+   the page, a worker that died (`worker-crashed`), whose model failed
+   (`worker-ml-failed` — not a latch: the main thread warms its own model
+   and latches only if that fails too), that timed out three passes running
+   (`worker-stalled`) or could not take five frames running
+   (`frame-grab-failed`, `createImageBitmap` rejecting or empty, or the
+   worker unable to draw it). On the worker lane a live pass that times out
+   is a missed pass, never the hopeless verdict or the ML latch: the worker
+   runs one job at a time, so a timeout there is a pass queued behind a
+   capture, not two detections overlapping; a pass whose budget ran out is
+   cancelled in the worker if it has not started. The loop's first measured
+   pass waits for the worker's `ready` (scanic loaded there), as the main
+   lane's waits for scanic's import. The worker is held by the mounted
+   capture screens and terminated a minute after the last one unmounts (a
+   remount within that minute gets it warm); a mount with other asset URLs
+   while nothing else holds it starts a new one. The main thread
+   grabs the frame with `createImageBitmap(video, { resizeWidth,
+   resizeHeight })` at the default resize quality (a finer one changed the
+   model's answers on half the spike's frames) and transfers it; the worker
+   keeps one live frame at most (a newer one replaces it) and puts a
+   capture's frame first, yielding to its event loop before each pick. While
+   the worker lane is on, the model never runs on the main thread (one ONNX
+   session per page).
+2. **How often** (`src/lib/cadence.ts`): `interval = clamp(ewma(cost) /
+   duty, min, max)` — worker lane 35 % of its thread, 120–700 ms; main lane
+   15 %, 150–700 ms, a pass over 50 ms charged double (the ceiling is the
+   old fixed beat: at 1400 ms the main lane under `--cpu 4` held the page
+   less of the time than before the rework). On this desktop the worker lane
+   settles at 120 ms (8 passes a second); under `--cpu 4` (worker slowed 4×)
+   it backs off by itself. The *hopeless* verdict (`adapt`) averages the
+   detector's own time, not the refinement and evidence riding on the pass:
+   charged with them, a main-lane classical loop under `--cpu 4` crossed its
+   250 ms line in 4 of 42 runs before the model was ready and live
+   detection stayed off for the whole session.
+3. **What it answers**: the model's quad, the motion probe's 24×24 luma of
+   the same frame, the hint chip's focus/light reading (every 200 ms — the
+   capture screen's own timer does not run on the worker lane), and:
+4. **Refined onto the paper's edges on its own frame** (`refineQuad`, the
+   refinement a capture runs, on the ~640 px sample, 60 ms budget). Measured
+   with `refineLive` on 58 F1/F2 scenes where the model answered: its live
+   answer within 2 % of the page went from 41 to 53, wrong crops from 13 to
+   4, corner error p50 from 1.01 to 0.08 % of the diagonal (two already-wrong
+   answers got slightly worse), for 6.8 ms p50 / 17 ms p95 a pass. The
+   refined quad is what is drawn, what the evidence reads, what a jump to
+   another page is judged on (the model's own answer can swing between two
+   readings of one page that the refinement puts back on the same edges) and
+   what the capture buffer carries — the corners the user was looking at;
+   acceptance (the coverage floor, arbitration) and the stale horizon read
+   the model's own answer and its frame's time.
+5. **Paper evidence** (`src/lib/paper-evidence.ts`): edges — per side, 20
+   profiles, the strongest inside/outside step within 2.5 % of the short
+   side, and the side is supported when most of them step the same way on
+   one straight line (a white page on a white table steps only 3–8 luma
+   levels, but steadily) — and a paper surface with print: most of the
+   interior on its own smooth background (block medians), ink deviating one
+   way, spread over the page, strokes rather than solid areas. The rules
+   (`PAPER`) were searched over the model's own quads on 186 synthetic pages
+   (F1–F7), 55 page-less F6 scenes it answered on and 94 real stills and clip
+   frames (numbers only): they keep 98.9 % of the synthetic pages and 94.7 %
+   of the real ones and pass 4 of the 55 laptops, keyboards, notebooks and
+   place mats. (A search on synthetic data alone found rules that passed 0 of
+   55 and failed all five capture-issue stills.) One allowance came from the
+   real-video replay: on the sparse, pale `pii_free` page at 1080p the ink
+   share sat under the 2.5 % floor, so the overlay was hidden on 36 % of the
+   hold. On an interior at least 92 % background, 1.2 % ink is enough — the
+   evidence then passed 102 of that clip's 107 readings instead of 74, the
+   real stills and frames 89 of 94 instead of 86, and one more place mat (4
+   of 55). It was chosen with that clip in view, so the replay's hidden share
+   is no longer an unseen measure. The background floor was then raised from
+   0.65 to 0.68 after a black keyboard on a wooden desk (`empty-desk-sweep`
+   seed 3) locked at ~0.67 and was captured as a page: over the model's
+   passes in 10-seed session runs, the empty-desk readings passing as paper
+   fell from 35 of 676 to 12, with none of the hold sessions' 7896 readings,
+   the synthetic pages or the real stills lost (3 of the 55 F6 scenes pass).
+6. **Found**: two readings in a row that say paper, with every visible side
+   at least 30 % supported (a quad with a corner pulled onto the text has a
+   side with no edge under it at all); let go after two readings that do not
+   (a thumb over an edge keeps it). Two allowances for a sheet this page has
+   just seen (both from the `regression` sessions): a reading within 8 % of
+   the diagonal of the last found sheet, seen in the last 10 s, with every
+   side at least 80 % supported, is found on one reading (a whip back, a
+   remount, a page put down where the last one was — under `--cpu 4` a second
+   reading is ~450 ms away); and a found sheet that is strongly foreshortened
+   (a pair of opposite sides at most 0.75 of each other) and whose sides all
+   stay 80 % supported does not lose a reading to its surface alone (a page tilted
+   45–55°, its print foreshortened into solid-looking blocks and its light
+   into a gradient, read as not paper: `steep-tilt` seed 1 hid a right quad
+   for the whole 2 s steep hold; the foreshortening condition keeps it
+   from a black keyboard seen head-on, whose four edges are as strong and
+   which, kept "found", was carried into an `empty-desk-sweep` capture). The 80 % bar is what keeps both from
+   carrying a quad with a corner pulled onto the table (`steep-tilt` seed 2,
+   whose sides stay at 5–65 %). A pass that finds nothing reads the
+   evidence where the found sheet was drawn: a page slid away — on a white
+   table the motion probe barely sees it go — leaves no edges there, and two
+   such readings end the hold (on `page-swap` the stale overlay's p95 went
+   from ~950 to ~590 ms). Only a found quad is drawn, says "sheet found", and
+   may travel with a capture as its buffered corners (an unconvincing quad
+   the model was sure of — a laptop lid — was never on screen, and on the
+   empty desk it had been carried into captures).
+7. **Classical quads** (before the model is ready, or after it failed): never
+   drawn once the model is ready; before that only if they touch at most one
+   frame border, have no interior angle under 35°, are not slivers (short
+   over long side ≥ 0.18) and pass the evidence.
+8. **Drawn** through a per-corner One-Euro filter (`src/lib/one-euro.ts`,
+   min cutoff 1 Hz, β 64, derivative cutoff 5 Hz) and a 16 ms glide, reset on
+   a new detector, a jump of 8 % of the diagonal, a lost hold or a new frame
+   box. Replaying the recorded detections through a grid of settings, every
+   setting kept the overlay on the page within a point of drawing each
+   answer as it came; this one cut the drawn corners' frame-to-frame motion
+   by ~8 %, and the overlay's RMS motion over a hold now matches the page's
+   own (the old two-sample average and 35 %-per-frame easing lagged it).
+
+**Capture: the classical fall-through.** When the model is ready and answers
+"no page", the capture path still asks the classical detector
+(`CAPTURE_CLASSICAL_FALL_THROUGH`, `src/lib/flatten.ts`). Both policies are
+scored on every capture where it matters (the capture's probe carries
+`alternative`: what the no-fall-through policy would have opened with) and on
+the detector suite's `refined` rows: on 300 F7 field-case scenes the
+fall-through answered 26, 16 of them right and 10 wrong (without it: 26 more
+"no corners"); on F1–F7 × 20 it answered 2 (one wrong, one on an empty desk).
+Counting a capture with no corners as the failure it is for the user, the
+fall-through fails fewer captures, so it stays.
 
 ## Metrics and verdicts (`metrics.mjs`)
 
@@ -388,13 +534,32 @@ exact ground truth.
 | `partial-frame` | 1–2 corners out of frame, shutter there; then backs off, holds, shoots again |
 | `wider-still` | `approach-hold`, but `takePhoto()` returns the whole 4:3 sensor — wider than the 16:9 preview (D-343 RC1) |
 | `wider-still-eis` | the still comes back at the preview's shape but 25 % wider (a stabilization crop): it passes the shape check |
+| `sustained-hold` | **not in a plain run** (name it): framed and held 75 s — 10 s of frames played forward and back — with the shutter at 20, 40 and 60 s; then the page unmounts and remounts the flow three times (warm start-up), unmounts it for good and counts what outlived it |
+| `sustained-90` | **not in a plain run**: 90 s on one page — a hold, a pan off and back, a tilt to 35° and back — the shutter at 20, 40, 60 and 80 s; then three remounts and a final unmount |
 
-**The camera.** `app/fake-camera.js` answers `getUserMedia` with a
-`canvas.captureStream()`, `permissions.query({ name: "camera" })` with `prompt`
-until the app has asked (then `granted`), `ImageCapture` with a 4000×3000
-sensor whose `takePhoto()` renders the pose at the moment of exposure, and the
-pointer queries with a coarse pointer — so the phone flow mounts. Each run gets
-a fresh 390×844 @ DPR 3 touch context with an Android user agent.
+**The `regression` group** — **not in a plain run**; `--session regression`
+runs all seven (`--session all` runs every session). Adversarial sessions the
+live loop is re-checked on before it changes, each with its own windows,
+events and locks:
+
+| session | what happens |
+|---|---|
+| `fast-pan` | framed and held; at 1.6 s the camera whips off the page in 250 ms, stays off 1 s, whips back in 300 ms; at 5 s a fast half-pan puts half the page out for 0.7 s; shutter at 7.5 s |
+| `swap-rush` | at 1.8 s the page is slid away and a second document slid in (600 ms); at 3.6 s that one goes and the first comes back elsewhere, turned; shutter at 6.2 s |
+| `light-flicker` | exposure steps (0.45×, 1.6× clipping the paper, 0.5×), then 2 s of flicker between 0.6× and 1.35× every 120–220 ms with the light's gradient swinging; shutter at 6.8 s |
+| `steep-tilt` | framed flat; at 1.5 s the phone tilts to 45–55° over 1 s and shoots at the slant at 4.5 s; tilts back from 6.5 s and shoots again at 10.5 s |
+| `hand-pass` | a hand reaches over the page (fingertip well inside) at 1.5–3 s; another from a different side at 4.5–5.8 s; shutter at 7.2 s |
+| `slide-across` | camera still; the page slides in from half out of frame (turning 12°) over 2.5 s, rests, is slid quickly (0.8 s) elsewhere, rests; shutter at 8.5 s |
+| `paper-lookalikes` | no document: a closed white laptop, a white place mat, a white box and a cream book, each framed 1.8 s; shutter at 10 s over the last |
+
+**The camera.** `app/fake-camera.js` answers `getUserMedia` with a stream the
+player feeds, `permissions.query({ name: "camera" })` with `prompt` until the
+app has asked (then `granted`), `ImageCapture` with a 4000×3000 sensor whose
+`takePhoto()` answers with the pose at the moment of exposure, and the pointer
+queries with a coarse pointer — so the phone flow mounts. Each run gets a
+fresh 390×844 @ DPR 3 touch context with an Android user agent. Asked for the
+camera again after the app stopped it (a remounted flow), it answers a new
+track on the same clock.
 
 **Rendered ahead, played in real time.** SwiftShader draws a session frame in
 ~0.1 s, too slow to render thirty a second next to the app. So the page first
@@ -404,7 +569,33 @@ JPEGs with their ground truth, and when the app opens the camera pushes frame
 *k* at camera time *k*/30 s. Late frames are skipped, never slowed; the report
 gives the achieved rate. The stream is 720×1280 by default (`--stream WxH`):
 the live loop samples 640 px either way; only a capture that falls back to the
-preview frame sees the difference.
+preview frame sees the difference. A looped script (`loop.frames`) renders
+that many frames and plays them forward and back (`loopedFrame`), so a 75 s
+hold costs 10 s of rendering.
+
+**The frame cache.** Rendering is two thirds of a run, and a script's frames
+depend only on the script, the stream size, the emulator's source and the
+browser build — so the first run of a session writes its JPEGs and their
+truth to `.bench-out/frame-cache/<key>/` (`PUT /frame-cache/…`, synthetic only)
+and every later run with the same key reads them back (`--no-frame-cache`
+renders anyway). The key hashes `emulator/*.js`, the player's
+`FRAME_CACHE_VERSION` (bump it when rendering or encoding changes there) and
+the browser version, so a stale frame is never replayed.
+
+**A camera the page's main thread cannot slow down.** Where the browser has
+`MediaStreamTrackGenerator` (Chromium), frames are pumped by a worker
+(`app/camera-worker.js`) on its own clock and written as `VideoFrame`s stamped
+with their camera time — a phone's camera does not slow down with the page,
+and CDP's `--cpu N` throttles only the page's own thread. (Pumped from the
+page, a `--cpu 4` run's camera fell to 6–18 fps and most captures could not be
+named.) Stills a script's taps will ask for are **rendered before the clock
+starts** — at the tap's scripted time plus the exposure delay, at the size the
+app's own `pickPhotoSize` requests — and a `takePhoto()` within 400 ms of it
+gets that one: rendering on demand blocked the page's main thread for as long
+as the software GPU took (2.6 s under `--cpu 4`), which a phone's still
+pipeline never does. A tap far from its time (a person in the playground) is
+rendered on demand, as before. WebKit has neither: it plays frames from the
+page (`canvas.captureStream()`) and has no still pipeline at all.
 
 **The flow.** The scripted user taps "Permitir a câmera" on the primer, taps the
 shutter at the script's times, and confirms the corners 1.1 s after the confirm
@@ -423,12 +614,14 @@ draws to make a page (probe event `grab`) and the still attempts it hands the
 camera (`still-call`, emitted synchronously right before `takePhoto()`); its
 `capture` event carries both. The page's probe listener, called inside the
 app's draw, names each grab by the **timestamp of the frame the `<video>`
-holds** (`new VideoFrame(video)`, the frame `drawImage` just took): the canvas
-capture stamps every pushed frame with its capture time, one fixed offset
-from its push (learnt from the timestamps of the frames the `<video>`
-presented), to a millisecond or two against 33 ms between frames — not the
-last presentation callback, which lags the frame a draw takes about half the
-time — and a timestamp that matches no push names nothing. The fake camera
+holds** (`new VideoFrame(video)`, the frame `drawImage` just took). From the
+worker camera that timestamp *is* the frame's camera time, so the name is
+exact; from a page-pumped camera the canvas capture stamps every pushed frame
+with its capture time, one fixed offset from its push (learnt from the
+timestamps of the frames the `<video>` presented), to a millisecond or two
+against 33 ms between frames — not the last presentation callback, which lags
+the frame a draw takes about half the time — and a timestamp that matches no
+push names nothing. The fake camera
 stamps each still with the attempt it answered — so a capture is scored
 against the image it actually took, and one whose ids name nothing is
 **unscored** (missing data), never guessed by time. Each capture is judged
@@ -448,6 +641,66 @@ never see the same frames). Output: `report.md`, `results.json`
 (every event and every frame's truth), and a film strip per session (truth
 green; the overlay magenta when on the page, red when not; the last accepted
 pass dashed amber; and each capture's image with its confirm corners).
+
+**What it cost** (`app/perf-watch.js`, installed before the flow mounts).
+Over the live part of each run — camera live to the end of the script — the
+report's *What it cost* table gives main-thread **long tasks** (> 50 ms,
+`PerformanceObserver`) per minute and their share of the time, attributed to
+the scripts that ran in them (`long-animation-frame`, kept in `results.json`);
+the **heap** (`performance.memory`, precise: the browser is launched with
+`--enable-precise-memory-info`) at the start and end and its slope; the
+detection loop's **cadence** as it ran (interval between regular passes,
+captures excluded; pass time, and the main thread's own share of a pass where
+the probe reports it); the **lane** each run's detection took and why; and
+start-up on the camera clock (camera open → the model's first answer → first
+lock). Chromium only; elsewhere the numbers say they are unknown, never 0.
+A script with `remounts` (`sustained-hold`) then unmounts and remounts the flow
+— warm start-up: mount → the model's first answer → lock — and finally
+unmounts it, collects garbage (`--js-flags=--expose-gc`) and counts what
+outlived it: **workers** constructed and not terminated, and **image bitmaps**
+the app made (through the global `createImageBitmap`) that were neither
+closed nor transferred to a worker — open, or collected by the GC while still
+open (the one that holds a camera frame until a collection happens to run).
+
+**Lanes and a slow phone's worker.** `--lane main|worker` forces the app's
+detection lane through the probe (a bench-only setting the page hangs on its
+listener, `probeSetting` in `src/lib/probe.ts`, compiled out of the library).
+CDP's `--cpu N` throttles the page's own thread and never a worker's, so a
+throttled run also tells the app's detection worker to stretch every pass —
+and its warm-up — to N times what it cost (`workerSlowdown`): an upper bound
+on a slow phone's core, honoured only by the bench's own build of the worker
+(`build-app.mjs` builds `src/lib/detect.worker.ts` with the probe on and the
+server serves it ahead of `assets/`). Without it the worker lane would look
+better under `--cpu 4` than it is.
+
+## WebKit (`npm run bench:webkit`)
+
+The flow end to end in Playwright's WebKit — primer, a live viewfinder that
+finds the page, a capture, the confirm screen — on one session
+(`--session tremor-hold --seed 1` by default), twice: on the lane the app picks
+by itself (and the reason it gives) and on the main-thread lane forced.
+Chromium renders the session's frames into the frame cache first; WebKit plays
+them from the page (no `MediaStreamTrackGenerator` there) with no still
+pipeline (Safari has no `ImageCapture`), so every capture is a preview frame.
+It checks the camera went live, the lane was reported, the model answered,
+the overlay found the page, every tap made a capture whose confirm screen
+opened, and the page threw nothing; it writes
+`.bench-out/webkit-smoke-<stamp>/results.json` and exits non-zero on any
+failure. Linux WebKit is not iOS Safari: it proves the paths run, not how a
+phone feels.
+
+Two things the page camera does differently for WebKit: its canvas stream runs
+at the session's frame rate (`captureStream(fps)` — WebKit's
+`captureStream(0)` + `requestFrame()` delivered no frame), and the fake
+`getUserMedia` is defined (`Object.defineProperty`) on `mediaDevices` and
+the object kept referenced for the page's life (with a plain assignment the
+app was seen to meet WebKit's real, denied camera). The first runs found an app bug: the capture screen
+hid its `<video>` with `display: none` until the viewfinder went live, and
+WebKit gives a stream attached to an undisplayed video no frame, then or
+later — the screen said "no camera". It is now transparent instead. With
+that, WebKit 26.6 passes on both lanes: the worker lane (reason `worker`)
+50 model passes, the page under the overlay 70 % of the hold; the main lane
+29 passes, 67 %; one capture each, confirm opened, no page errors.
 
 ## Real media (`--suite real-stills`, `--suite real-video`)
 
@@ -592,11 +845,16 @@ headless and checks the HUD received events and a capture was scored
 ## The probe (`src/lib/probe.ts`)
 
 The one seam in the library: at the points where the scanner already knows
-them, it reports `detect` (every live-loop pass), `overlay` (the drawn quad,
-≤ every 100 ms), `hint`, `still` (with its `attempt`), `still-call` (right
+them, it reports `detect` (every live-loop pass: its lane, the main thread's
+share of it, the worker's compute and queue time, the live-refined quad, the
+paper evidence and whether the sheet counts as found), `overlay` (the drawn
+quad, ≤ every 100 ms, and whether it is a found sheet), `hint`, `still` (with its `attempt`), `still-call` (right
 before `takePhoto()`), `grab` (a preview frame drawn to make a page),
 `capture-detect` (`on: "frame"` at capture, `"canonical"` for a confirm/adjust
-screen's fresh detect), `refine` (the edge refinement's input, output,
+screen's fresh detect; with its lane, its wait in the worker's queue, whether
+it fell through to the classical detector and why the model was skipped —
+`busy` is a downgrade), `lane` (the session's detection lane and why),
+`ml-ready` (the model came up or was latched off), `refine` (the edge refinement's input, output,
 per-side verdicts, time, and whose corners it refined: `detected`, `live`,
 `fallback` or `canonical`), `capture` (with the `stillAttempt` and `grab` that
 name its image), `confirm-open` (the seed, and `shownCorners` — what the editor
@@ -619,6 +877,12 @@ reach a quad the scanner is using. Nothing is buffered or sent; events are
 numbers and normalized corners, never pixels.
 
 ## Status
+
+Phase 3 (the live loop) added the sustained session, remounts and leak
+counts, the frame cache, the worker camera and stills rendered ahead, the
+cost report (long tasks, heap, cadence, lanes, start-up), `--lane`, the
+worker slowdown, the `ml+live` variant, the evidence and live-refinement
+APIs, the paired capture-policy scoring and the WebKit smoke.
 
 Implemented: probe, server, bench page, the `detector`, `session`,
 `real-stills`, `real-video` and `emulator` suites, metrics, report,

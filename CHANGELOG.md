@@ -32,6 +32,46 @@ freezes at 1.0.
   keeps no copy of the page once it returns; and gives up — keeping the
   detector's corners — on any doubt or after 250 ms, checking the clock every
   few milliseconds of work (`src/lib/refine.ts`).
+- **The viewfinder's brackets are where the page is.** The live loop was
+  rebuilt around what the person holding the phone sees:
+  - **Detection runs in a worker** (`assets/workers/detect.worker.js`, scanic
+    itself inside it) where the browser allows one; the main thread only
+    grabs the frame. The choice is made once per page, with a reason, and the
+    main-thread path that shipped before stays a first-class fallback (no
+    `Worker` or `createImageBitmap`, no 2-D `OffscreenCanvas` or no
+    WebAssembly in a worker, a worker script that will not load, does not
+    answer, stalls, cannot take the camera's frames, loses its model, or
+    dies — a model that fails in the worker moves detection to the main
+    thread rather than switching the model off). The model's download and
+    compile start in the worker while the permission primer is still on
+    screen, and the worker is terminated a minute after the last scanner on
+    the page unmounts. The viewfinder's focus/light hint is read from the same
+    frames there instead of by a second timer on the main thread.
+  - **It looks as often as the device can afford** — a share of its thread's
+    time, not a fixed 700 ms — up to about eight times a second.
+  - **The model's live answer is moved onto the paper's edges** on the frame
+    it was found on (the same refinement a capture runs, on the ~640 px
+    sample), and drawn through a One-Euro filter that is calm when the page is
+    still and quick when it moves. The refined corners are also what a
+    capture's buffered quad carries (the corners the user was looking at);
+    acceptance — the coverage floor, arbitration — still reads the model's
+    own answer.
+  - **"Sheet found" needs paper.** A quad is drawn only when the pixels in and
+    around it show a page's edges and print (`src/lib/paper-evidence.ts`): the
+    model is as sure of a laptop lid as of a page. A sheet the viewfinder
+    has just found comes back on one reading (a whip back, a remount), and
+    a found sheet still standing on its edges keeps "found" when a steep
+    tilt makes its print read as not paper. The classical detector's
+    quads are never drawn once the model is ready, and before that only when
+    they pass sanity checks (not the frame's border, not a sliver, paper
+    inside).
+  - The camera's `<video>` is kept rendered (transparent) until the
+    viewfinder is live, instead of `display: none`: WebKit left a stream
+    attached to an undisplayed video without a frame, and the capture screen
+    reported no camera (found by the new WebKit session smoke).
+  - `selfTest()` also reports `detectWorker`: whether the worker could start
+    on this page (a 404 or a CSP header on its response are the usual
+    reasons it could not).
 
 ### Changed before first publish — host integration
 Found by embedding 0.1.0 in a host page. None of these is on npm yet, so they
@@ -130,6 +170,11 @@ land in 0.1.0 itself; each is a behaviour a host can observe.
   own root, with the global reset switched off, so importing it cannot restyle
   the host's page.
 - **GSAP is a peer dependency**, shared with the host rather than bundled.
+- **A capture still falls through to the classical detector** when the model
+  answers that there is no page. Measured both ways on the bench's scenes, the
+  fall-through turns more "no corners" into right crops than into wrong ones
+  (300 F7 field-case scenes: of the 26 it answered, 16 right, 10 wrong), and
+  a confirm screen opening with no corners leaves the user to place all four.
 
 ### Known limitations
 - The Rust crate ships its in-module unit tests but no golden/parity suite: the
@@ -137,6 +182,11 @@ land in 0.1.0 itself; each is a behaviour a host can observe.
   admits no photograph of a real document. Restoring it means generating the
   fixtures synthetically first.
 - Only one `<ScanFlow>` may be mounted at a time.
+- Safari before 16.4 has no 2-D `OffscreenCanvas` in a worker, so live
+  detection runs on the main thread there, as it did before the worker
+  existed. A host that sends CSP headers on its asset files must allow the
+  worker's own response (see the README's host checklist) or it, too, runs
+  detection on the main thread.
 - The ONNX Runtime runs single-threaded. Threads need a cross-origin-isolated
   page, which a static export cannot arrange for itself.
 - Copy is built in: `lang` chooses pt-BR or en-US and a host cannot reword a

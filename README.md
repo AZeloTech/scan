@@ -191,11 +191,12 @@ browser:
 import { selfTest } from "@azelotech/scan/self-test";
 
 const r = await selfTest({ assetBaseUrl: "/scan-assets" });
-// { mlReady: true, pdfBytes: 82259, pages: 1, pdfImportReady: null, ms: 1840 }
+// { mlReady: true, detectWorker: "worker", pdfBytes: 82259, pages: 1, pdfImportReady: null, ms: 1840 }
 ```
 
-It loads the model, runs one inference and builds a PDF from a drawn
-placeholder. Run it once behind a feature flag after wiring `assetBaseUrl` for
+It loads the model, runs one inference, starts the detection worker once
+(`detectWorker` says `"worker"`, or why it could not — see the CSP note in the
+host checklist) and builds a PDF from a drawn placeholder. Run it once behind a feature flag after wiring `assetBaseUrl` for
 the first time, and get a plain answer instead of a mystery 404 in somebody's
 console three weeks later.
 
@@ -212,6 +213,19 @@ connect-src 'self'
 
 `connect-src 'self'` is enough because nothing off-origin is ever fetched. If a
 request to another host appears, that is a bug — please report it.
+
+**Workers obey their own response's CSP.** Page detection runs in a module
+worker served from your asset directory (`workers/detect.worker.js`), and a
+worker is governed by the `Content-Security-Policy` header on *its own* script
+response, not by the page's. If your server sends CSP headers on the asset
+files, the ones on `<assetBaseUrl>/workers/*.js` must allow at least
+`script-src 'self' 'wasm-unsafe-eval'` and `connect-src 'self'` (or send no CSP
+there at all). A worker that cannot start — or cannot compile WebAssembly
+under its own CSP — is not an error: the scanner detects on the main thread
+instead, exactly as it did before the worker existed — it just costs the page
+more. `selfTest()` reports which (`detectWorker`: `"worker"`, or the reason,
+e.g. `"no-wasm-in-worker"`). The worker lives while a scanner is mounted and
+is terminated a minute after the last one unmounts.
 
 One place this is kept rather than given: the vendored scanic runtime, left
 unmodified, falls back to a jsDelivr CDN for its model and ONNX Runtime files
@@ -294,7 +308,8 @@ them, and every answer is scored against exact ground truth into `.bench-out/`
 (git-ignored). `npm run bench -- --suite session` does the same for the whole
 flow: the real `<ScanFlow>` on an emulated phone, fed by an emulated camera
 watching a document being scanned; `npm run bench:play` opens the same flow in
-a playground with a live HUD. With `SCAN_REAL_MEDIA` pointing at real photos
+a playground with a live HUD, and `npm run bench:webkit` plays one session end
+to end in WebKit. With `SCAN_REAL_MEDIA` pointing at real photos
 and clips **outside** the repository, `--suite real-stills` and
 `--suite real-video` score them too, and `npm run bench:label` serves a page
 for labelling their corners by hand. Nothing it renders is committed, and
