@@ -1017,6 +1017,12 @@ export function useLiveDetect({
    */
   const visibleRef = React.useRef<VisibleRect>(WHOLE_FRAME);
   const [visible, setVisible] = React.useState<FrameRegion>(WHOLE_FRAME);
+  /**
+   * Whether any of the frame is on screen at all. A stage scrolled or pinched
+   * out of the visual viewport shows nothing: the loop stops (and with it the
+   * ready cue and auto-capture) until it is back, and then starts afresh.
+   */
+  const [onScreen, setOnScreen] = React.useState(true);
   const [videoBox, setVideoBox] = React.useState<VideoBox | null>(null);
   const fitRef = React.useRef<FitPolicy>(fit);
   fitRef.current = fit;
@@ -1076,7 +1082,11 @@ export function useLiveDetect({
     if (video === null || host === null) return;
     if (video.videoWidth === 0 || video.videoHeight === 0) return;
     const rect = host.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return;
+    if (rect.width === 0 || rect.height === 0) {
+      // A stage with no size shows nothing.
+      setOnScreen(false);
+      return;
+    }
     const stageSize = { width: rect.width, height: rect.height };
     const occluders: Occluder[] = [];
     const layoutRoot = host.closest("[data-scan-layout]");
@@ -1132,9 +1142,11 @@ export function useLiveDetect({
       clearTracking(runtimeRef.current, overlay);
     }
     videoSizeRef.current = { width: video.videoWidth, height: video.videoHeight };
-    // Nothing of the frame on screen (a stage scrolled or zoomed away): keep
-    // judging the last region rather than divide by nothing.
-    if (region !== null && region.width > 0 && region.height > 0) {
+    // Nothing of the frame on screen (a stage scrolled or pinched away):
+    // the loop stops until it is back — no region is judged, none is kept.
+    const shown = region !== null && region.width > 0 && region.height > 0;
+    setOnScreen(shown);
+    if (shown) {
       if (!sameRegion(visibleRef.current, region)) visibleRef.current = region;
       setVisible((current) => (sameRegion(current, region) ? current : region));
     }
@@ -1186,7 +1198,7 @@ export function useLiveDetect({
   // covers it, the tab is hidden, the device was written off. Everything the
   // last pass left behind goes now: it would otherwise be drawn by nobody,
   // outlive the frame it describes, and still be there for the next capture.
-  const loopLive = active && !paused && !tabHidden && available;
+  const loopLive = active && !paused && !tabHidden && available && onScreen;
   React.useEffect(() => {
     if (loopLive) return;
     const runtime = runtimeRef.current;
