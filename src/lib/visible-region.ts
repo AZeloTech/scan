@@ -189,3 +189,42 @@ export function sameRegion(a: FrameRegion | null, b: FrameRegion | null): boolea
   const close = (p: number, q: number) => Math.abs(p - q) < 2.5e-5;
   return close(a.x, b.x) && close(a.y, b.y) && close(a.width, b.width) && close(a.height, b.height);
 }
+
+/**
+ * A control drawn OVER the picture somewhere other than along an edge — a
+ * glass button in the top row, the hint pill, a diagnostics HUD — marked
+ * `data-scan-occluder="spot"` by the layout. An edge band cannot stand for
+ * it (trimming the clear area to clear a 44 px button would shrink the whole
+ * camera); instead each is carried as its own rectangle, in frame fractions
+ * ({@link spotsInFrame}), and a page with a corner under one is not "fully
+ * visible" ({@link cornerUnderSpot}).
+ */
+export function spotsInFrame(frame: Box, spots: readonly Box[]): FrameRegion[] {
+  if (!(frame.width > 0 && frame.height > 0)) return [];
+  const out: FrameRegion[] = [];
+  for (const s of spots) {
+    if (!(s.width > 0 && s.height > 0)) continue;
+    const x = (s.left - frame.left) / frame.width;
+    const y = (s.top - frame.top) / frame.height;
+    const width = s.width / frame.width;
+    const height = s.height / frame.height;
+    if (x >= 1 || y >= 1 || x + width <= 0 || y + height <= 0) continue;
+    out.push({ x, y, width, height });
+  }
+  return out;
+}
+
+/**
+ * Whether any of the four corners (frame fractions) lies under a spot,
+ * grown by `pad` (a share of the frame's width and height) — a corner
+ * peeking out by a pixel from under a button is not one the person can see.
+ */
+export function cornerUnderSpot(
+  corners: readonly { x: number; y: number }[],
+  spots: readonly FrameRegion[],
+  pad = 0.01,
+): boolean {
+  return corners.some((p) =>
+    spots.some((s) => p.x >= s.x - pad && p.x <= s.x + s.width + pad && p.y >= s.y - pad && p.y <= s.y + s.height + pad),
+  );
+}

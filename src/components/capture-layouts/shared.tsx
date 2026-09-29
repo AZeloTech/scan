@@ -58,6 +58,15 @@ export const SAFE_TOP = "pt-[max(env(safe-area-inset-top),12px)]";
  * under a band is cut off to the person holding the phone. A band hugs its
  * edge; only its inner side counts.
  */
+/**
+ * An opaque band along one stage edge, for the live loop (`lib/visible-region.ts`):
+ * an invisible mark sized to where the chrome hides the picture. A control
+ * drawn over the picture AWAY from an edge (a glass button, the hint pill)
+ * is not a band: it carries `data-scan-occluder="spot"` on itself, so the
+ * loop measures its actual box while it is drawn. A band can also be the
+ * control itself (`data-scan-occluder="bottom"` on the mode rail): its
+ * real box then follows large text rather than a fixed height.
+ */
 export function OccluderMark({ edge, className }: { edge: OccluderEdge; className: string }) {
   return (
     <div
@@ -107,6 +116,7 @@ export function GlassButton({
       aria-pressed={pressed}
       aria-hidden={hidden || undefined}
       tabIndex={hidden ? -1 : tabIndex}
+      data-scan-occluder="spot"
       onClick={onClick}
       className={clsx(
         "flex h-11 w-11 shrink-0 items-center justify-center rounded-full",
@@ -185,6 +195,7 @@ export function HintPill({ parts, className }: { parts: CaptureChromeParts; clas
         <button
           type="button"
           onClick={parts.torchOffer}
+          data-scan-occluder="spot"
           className="pointer-events-auto -my-1 inline-flex min-h-11 items-center"
         >
           <span className="inline-flex items-center gap-1.5 rounded-full bg-warm px-3 py-1.5 text-sm font-semibold text-deep shadow-sm">
@@ -200,7 +211,7 @@ export function HintPill({ parts, className }: { parts: CaptureChromeParts; clas
 /** The pill itself: dark glass, one line where it can, a tone dot where the hint wants action. */
 export function HintBubble({ text, tone }: { text: string; tone: "night" | "alert" | "warning" }) {
   return (
-    <span className="inline-flex max-w-full items-center gap-2 rounded-full bg-night/75 px-4 py-2 text-center text-base font-semibold leading-tight text-warm shadow-sm">
+    <span data-scan-occluder="spot" className="inline-flex max-w-full items-center gap-2 rounded-full bg-night/75 px-4 py-2 text-center text-base font-semibold leading-tight text-warm shadow-sm">
       {tone !== "night" && (
         <span
           aria-hidden="true"

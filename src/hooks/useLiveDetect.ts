@@ -154,10 +154,13 @@ import { probe, probing } from "@/lib/probe";
 import { ringOffset } from "@/lib/capture-layout";
 import {
   clearArea,
+  cornerUnderSpot,
   frameBoxFor,
   sameRegion,
+  spotsInFrame,
   videoBoxFor,
   visibleRegionOf,
+  type Box,
   type FitPolicy,
   type FrameRegion,
   type Occluder,
@@ -442,6 +445,21 @@ const OVERLAY_PROBE_INTERVAL_MS = 100;
  */
 const BRACKET_EDGE_FRACTION = 0.12;
 const BRACKET_CAP_PX = 28;
+/**
+ * Whether a marked control is drawn at least half opaque right now: shown,
+ * and its opacity (and every ancestor's) multiplied out over one half.
+ */
+function shownOpaque(element: HTMLElement): boolean {
+  let opacity = 1;
+  for (let node: HTMLElement | null = element; node !== null && opacity >= 0.5; node = node.parentElement) {
+    const style = window.getComputedStyle(node);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    const value = Number.parseFloat(style.opacity);
+    if (Number.isFinite(value)) opacity *= value;
+  }
+  return opacity >= 0.5;
+}
+
 /** Used until the frame has been measured — ~9 % of the frame. */
 const BRACKET_CAP_FALLBACK = 0.09;
 
@@ -1018,6 +1036,12 @@ export function useLiveDetect({
   const visibleRef = React.useRef<VisibleRect>(WHOLE_FRAME);
   const [visible, setVisible] = React.useState<FrameRegion>(WHOLE_FRAME);
   /**
+   * The controls drawn over the picture away from its edges
+   * (`[data-scan-occluder="spot"]`: a glass button, the hint pill),
+   * in frame fractions — a page with a corner under one is not fully visible.
+   */
+  const spotsRef = React.useRef<FrameRegion[]>([]);
+  /**
    * Whether any of the frame is on screen at all. A stage scrolled or pinched
    * out of the visual viewport shows nothing: the loop stops (and with it the
    * ready cue and auto-capture) until it is back, and then starts afresh.
@@ -1089,15 +1113,20 @@ export function useLiveDetect({
     }
     const stageSize = { width: rect.width, height: rect.height };
     const occluders: Occluder[] = [];
-    const layoutRoot = host.closest("[data-scan-layout]");
-    if (layoutRoot !== null) {
-      for (const element of layoutRoot.querySelectorAll<HTMLElement>("[data-scan-occluder]")) {
-        const edge = element.dataset.scanOccluder as OccluderEdge;
-        if (edge !== "top" && edge !== "bottom" && edge !== "left" && edge !== "right") continue;
-        const r = element.getBoundingClientRect();
-        occluders.push({ edge, box: { left: r.left - rect.left, top: r.top - rect.top, width: r.width, height: r.height } });
-        occluderObserverRef.current?.observe(element);
-      }
+    const spots: Box[] = [];
+    const layoutRoot = host.closest("[data-scan-layout]") ?? host;
+    for (const element of layoutRoot.querySelectorAll<HTMLElement>("[data-scan-occluder]")) {
+      const edge = element.dataset.scanOccluder;
+      const r = element.getBoundingClientRect();
+      const box = { left: r.left - rect.left, top: r.top - rect.top, width: r.width, height: r.height };
+      if (edge === "spot") {
+        // Only while it is actually drawn: a faded-out control hides nothing.
+        if (!shownOpaque(element)) continue;
+        spots.push(box);
+      } else if (edge === "top" || edge === "bottom" || edge === "left" || edge === "right") {
+        occluders.push({ edge: edge as OccluderEdge, box });
+      } else continue;
+      occluderObserverRef.current?.observe(element);
     }
     const vv = typeof window.visualViewport === "object" ? window.visualViewport : null;
     const viewport =
@@ -1150,6 +1179,7 @@ export function useLiveDetect({
       if (!sameRegion(visibleRef.current, region)) visibleRef.current = region;
       setVisible((current) => (sameRegion(current, region) ? current : region));
     }
+    spotsRef.current = spotsInFrame(next, spots);
     frameBoxRef.current = next;
     setFrameBox((current) => (same && current !== null ? current : next));
   }, [containerRef, overlay, videoRef]);
@@ -2336,6 +2366,12 @@ export function useLiveDetect({
       const sheetFrame = tracking ? runtime.shown : suspected;
       const sheet = sheetFrame === null ? null : toVisible(sheetFrame, visible);
       if (sheet !== null) runtime.sheetSeenAt = now;
+      // A corner under a control drawn over the picture is a corner the
+      // person cannot see: the page is cut off to them, as at an edge.
+      const covered =
+        sheetFrame !== null &&
+        spotsRef.current.length > 0 &&
+        cornerUnderSpot([sheetFrame.topLeft, sheetFrame.topRight, sheetFrame.bottomRight, sheetFrame.bottomLeft], spotsRef.current);
       // The hint's window over the found sheet's readings (a trembling hand)
       // — at least 2.5 of the loop's interval, which a slow phone stretches.
       const motion = tracking ? motionOf(runtime.sheetReadings, aspect, Math.max(SHAKE_WINDOW_MS, 2.5 * runtime.intervalMs)) : null;
@@ -2347,7 +2383,7 @@ export function useLiveDetect({
           locked: tracking,
           sheet,
           sheetSeenAt: runtime.sheetSeenAt,
-          cutOff: tracking ? runtime.openHits >= OPEN_READINGS : convincing && candidate.cutOff,
+          cutOff: covered || (tracking ? runtime.openHits >= OPEN_READINGS : convincing && candidate.cutOff),
           aspect,
           motion,
           sharp: reading?.sharp ?? null,
@@ -2372,9 +2408,9 @@ export function useLiveDetect({
       // moment it appeared is the flicker the debounce exists to prevent),
       // and while the cue is on the slot stays empty.
       const shown = announcedReady ? guidance.hints.value : guidance.hints.update(raw, now);
-      const strict = footing && raw === null && shown === null && runtime.readyVerdict && reading?.sharp !== false;
+      const strict = footing && !covered && raw === null && shown === null && runtime.readyVerdict && reading?.sharp !== false;
       // A wobble keeps the cue; shaking (the hold-still hint owed) does not.
-      const keep = footing && shown === null && raw === null;
+      const keep = footing && !covered && shown === null && raw === null;
       const isReady = guidance.ready.update(strict, keep, now);
       if (guidance.tick.update(isReady, tracking, now)) setReadyTick((n) => n + 1);
       let fire = false;

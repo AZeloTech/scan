@@ -57,6 +57,10 @@ export const RAIL_FIT = "contain" as const;
  * The controls' band, for the live loop: from the safe area up to the top of
  * the mode rail (9 rem + its 44 px) — where the fade under the controls is
  * past half opaque and the rail, the shutter row and the gallery line sit.
+ * A floor, not the whole story: the mode rail, the shutter row and the
+ * gallery line are bands themselves (`data-scan-occluder="bottom"`), so
+ * text enlarged past this line pushes the band up with it; the top row's
+ * glass buttons and the hint pill are spots.
  */
 const RAIL_BAND = "inset-x-0 bottom-0 h-[calc(max(env(safe-area-inset-bottom),14px)+11.75rem)]";
 
@@ -98,7 +102,7 @@ export function RailChrome({ parts, bits }: LayoutChromeProps) {
         />
       )}
 
-      <div className="pointer-events-none absolute inset-x-0 bottom-[calc(max(env(safe-area-inset-bottom),14px)+2.25rem)] grid h-[100px] grid-cols-[1fr_auto_1fr] items-center px-6">
+      <div data-scan-occluder="bottom" className="pointer-events-none absolute inset-x-0 bottom-[calc(max(env(safe-area-inset-bottom),14px)+2.25rem)] grid h-[100px] grid-cols-[1fr_auto_1fr] items-center px-6">
         <button
           type="button"
           aria-label={pagesLabel}
@@ -127,7 +131,7 @@ export function RailChrome({ parts, bits }: LayoutChromeProps) {
         </button>
       </div>
 
-      <div className="pointer-events-none absolute inset-x-0 bottom-[max(env(safe-area-inset-bottom),14px)] flex justify-center">
+      <div data-scan-occluder="bottom" className="pointer-events-none absolute inset-x-0 bottom-[max(env(safe-area-inset-bottom),14px)] flex justify-center">
         <GalleryLink parts={parts} />
       </div>
     </>
@@ -209,7 +213,7 @@ export function ModeRail({ on, toggle, className }: { on: boolean; toggle: () =>
     );
   };
   return (
-    <div className={clsx("pointer-events-none flex justify-center", className)}>
+    <div data-scan-occluder="bottom" className={clsx("pointer-events-none flex justify-center", className)}>
       <div role="radiogroup" aria-label={copy.captureLayout.modeLabel} className="flex gap-6">
         {option(false)}
         {option(true)}

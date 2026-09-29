@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   clearArea,
+  cornerUnderSpot,
+  spotsInFrame,
   frameBoxFor,
   MAX_CROP_PER_SIDE,
   resolveFit,
@@ -119,4 +121,27 @@ test("fit values are read defensively", () => {
   assert.equal(resolveFit("stretch", "maxcrop"), "maxcrop");
   assert.equal(resolveFit(undefined, "cover"), "cover");
   assert.equal(visibleRegionOf({ left: 0, top: 0, width: 0, height: 0 }, clearArea(STAGE, null, [])), null);
+});
+
+test("spots: a control over the picture, in frame fractions; a corner under one is hidden", () => {
+  const frame = { left: 0, top: 40, width: 400, height: 800 };
+  // The close button at 16–60 px across, 52–96 down; and one off the frame altogether.
+  const spots = spotsInFrame(frame, [
+    { left: 16, top: 52, width: 44, height: 44 },
+    { left: 500, top: 0, width: 44, height: 44 },
+    { left: 10, top: 10, width: 0, height: 44 },
+  ]);
+  assert.equal(spots.length, 1);
+  assert.ok(Math.abs(spots[0].x - 0.04) < 1e-9 && Math.abs(spots[0].y - 0.015) < 1e-9);
+  const page = [
+    { x: 0.08, y: 0.03 },
+    { x: 0.9, y: 0.03 },
+    { x: 0.9, y: 0.9 },
+    { x: 0.08, y: 0.9 },
+  ];
+  assert.equal(cornerUnderSpot(page, spots), true);
+  assert.equal(cornerUnderSpot(page.map((p) => ({ x: p.x, y: p.y + 0.1 })), spots), false);
+  // Just past the button's edge, inside the pad: still hidden.
+  assert.equal(cornerUnderSpot([{ x: 0.155, y: 0.05 }], spots), true);
+  assert.equal(cornerUnderSpot([{ x: 0.155, y: 0.05 }], spots, 0), false);
 });
