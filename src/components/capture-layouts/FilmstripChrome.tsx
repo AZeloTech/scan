@@ -12,6 +12,7 @@ import {
   HintPill,
   LayoutShutter,
   SAFE_TOP,
+  SafeAreaOccluders,
   type LayoutChromeProps,
 } from "@/components/capture-layouts/shared";
 
@@ -47,6 +48,8 @@ export function FilmstripChrome({ parts, bits }: LayoutChromeProps) {
     <div className="absolute inset-0 flex flex-col bg-night-2">
       <div className="relative min-h-0 flex-1 overflow-hidden rounded-b-[28px]">
         {parts.stage}
+
+        <SafeAreaOccluders bottom={false} />
 
         <div className={`pointer-events-none absolute inset-x-0 top-0 flex items-center gap-2.5 px-4 ${SAFE_TOP}`}>
           <CloseButton pages={bits.pageCount} onClick={bits.onClose} />

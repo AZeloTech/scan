@@ -6,7 +6,8 @@ import type { Capture } from "@/lib/capture-intake";
 import { CaptureStage, type CaptureChrome } from "@/components/CaptureStage";
 import { LiveRegion } from "@/components/ui";
 import { ClassicChrome, CLASSIC_FRAMING } from "@/components/capture-layouts/ClassicChrome";
-import { RailChrome, RAIL_FRAMING } from "@/components/capture-layouts/RailChrome";
+import { RailChrome, RAIL_FIT, RAIL_FRAMING } from "@/components/capture-layouts/RailChrome";
+import type { FitPolicy } from "@/lib/visible-region";
 import { FilmstripChrome, FILMSTRIP_FRAMING } from "@/components/capture-layouts/FilmstripChrome";
 import { OneHandChrome, ONEHAND_FRAMING } from "@/components/capture-layouts/OneHandChrome";
 import { CollapseChrome, COLLAPSE_FRAMING } from "@/components/capture-layouts/CollapseChrome";
@@ -28,9 +29,9 @@ import { LAYOUT_STAGE_CLASS, type LayoutScreenBits } from "@/components/capture-
 
 type Layout = Exclude<CaptureLayout, "standard">;
 
-const CHROME: Record<Layout, { framing: string; Component: React.ComponentType<{ parts: Parameters<CaptureChrome["render"]>[0]; bits: LayoutScreenBits }> }> = {
+const CHROME: Record<Layout, { framing: string; fit?: FitPolicy; Component: React.ComponentType<{ parts: Parameters<CaptureChrome["render"]>[0]; bits: LayoutScreenBits }> }> = {
   classic: { framing: CLASSIC_FRAMING, Component: ClassicChrome },
-  rail: { framing: RAIL_FRAMING, Component: RailChrome },
+  rail: { framing: RAIL_FRAMING, fit: RAIL_FIT, Component: RailChrome },
   filmstrip: { framing: FILMSTRIP_FRAMING, Component: FilmstripChrome },
   onehand: { framing: ONEHAND_FRAMING, Component: OneHandChrome },
   collapse: { framing: COLLAPSE_FRAMING, Component: CollapseChrome },
@@ -50,13 +51,15 @@ export interface LayoutCaptureScreenProps {
   autoCaptureOffered: boolean;
   autoCaptureOn: boolean;
   onAutoCaptureChange: (on: boolean) => void;
+  diagnostics: boolean;
 }
 
 export function LayoutCaptureScreen({ layout, bits, announcement, ...stage }: LayoutCaptureScreenProps) {
-  const { framing, Component } = CHROME[layout];
+  const { framing, fit, Component } = CHROME[layout];
   const chrome: CaptureChrome = {
     stageClassName: LAYOUT_STAGE_CLASS,
     framingClassName: framing,
+    fit,
     render: (parts) => <Component parts={parts} bits={bits} />,
   };
 

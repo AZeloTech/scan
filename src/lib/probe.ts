@@ -164,10 +164,13 @@ export interface CaptureProbe {
   previewW: number;
   previewH: number;
   /**
-   * The part of the preview the user could see, after object-cover — as
-   * fractions of the preview frame. `null` when it could not be measured.
+   * The part of the preview the user could see (`lib/visible-region.ts`: the
+   * fit, the viewport and the layout's opaque bands) — as fractions of the
+   * preview frame. `null` when it could not be measured.
    */
   visible: { x: number; y: number; width: number; height: number } | null;
+  /** The photo's check before the confirm screen (`lib/still-check.ts`): why it is flagged, or null. */
+  attention?: "no-page" | "corner-outside" | "moved" | null;
   /** The canvas that became the page. */
   frameW: number;
   frameH: number;
@@ -323,6 +326,8 @@ export interface ConfirmOpenProbe {
   seededFrom: "capture" | "detected" | "editor-default";
   width: number;
   height: number;
+  /** The flag the screen opened with (`Capture.attention`), or null. */
+  attention?: "no-page" | "corner-outside" | "moved" | null;
 }
 
 /** The user left the confirm screen with these corners. */

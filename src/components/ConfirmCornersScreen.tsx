@@ -242,6 +242,7 @@ export function ConfirmCornersScreen({
                   : "editor-default",
             width: canvas.width,
             height: canvas.height,
+            attention: capture.attention ?? null,
           });
         }
         setPhase("ready");
@@ -284,6 +285,14 @@ export function ConfirmCornersScreen({
           <p className="text-base leading-snug text-shell-ink2">
             {copy.confirm.help}
           </p>
+          {/* The photo's own check asked for a closer look (`lib/still-check.ts`):
+              said once, in words, before the handles — never a silent accept. */}
+          {capture.attention != null && (
+            <p role="status" data-scan-attention={capture.attention} className="flex items-start gap-2 text-base font-semibold leading-snug text-shell-ink">
+              <span aria-hidden="true" className="mt-[0.45em] h-2 w-2 shrink-0 rounded-full bg-peach" />
+              {copy.confirm.attention[capture.attention]}
+            </p>
+          )}
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col gap-2 px-4 pb-2">

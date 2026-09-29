@@ -56,6 +56,7 @@ export function ScanFlow(props: ScanFlowProps) {
     // Left `undefined` when omitted: omitted and `false` mean different things
     // (`autoCaptureOffered`).
     experimentalAutoCapture,
+    experimentalDiagnostics = false,
     captureLayout: captureLayoutProp,
     experimentalCaptureLayout,
   } = props;
@@ -168,10 +169,11 @@ export function ScanFlow(props: ScanFlowProps) {
         chosen: autoCaptureChosen,
       },
       captureLayout,
+      diagnostics: experimentalDiagnostics === true,
       emit,
       reportError,
     }),
-    [urls, lang, maxPages, maxBytes, fileNameProp, intake?.camera, intake?.images, intake?.pdf, experimentalAutoCapture, captureLayout, emit]
+    [urls, lang, maxPages, maxBytes, fileNameProp, intake?.camera, intake?.images, intake?.pdf, experimentalAutoCapture, experimentalDiagnostics, captureLayout, emit]
   );
 
   const handleStep = useCallback((step: ScanStep) => emit({ name: "step", step }), [emit]);

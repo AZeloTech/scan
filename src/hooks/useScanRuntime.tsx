@@ -44,6 +44,8 @@ export interface ScanRuntime {
   };
   /** The capture screen's layout (`captureLayout`), already validated. */
   readonly captureLayout: CaptureLayout;
+  /** The diagnostics HUD over the viewfinder (`experimentalDiagnostics`). */
+  readonly diagnostics: boolean;
   /** Report something that happened. Numbers and enums only. */
   emit(event: ScanEvent): void;
   /**

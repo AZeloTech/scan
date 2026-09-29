@@ -205,6 +205,16 @@ export interface ScanFlowProps {
   experimentalAutoCapture?: boolean;
 
   /**
+   * A small diagnostics HUD over the viewfinder, for testing on a real
+   * phone: the detection lane, detection time and cadence, frame age, the
+   * stream and photo sizes, the part of the frame the person can see and the
+   * layout's fit, torch and vibration support, the ready cue and
+   * auto-capture's state. Default `false`. It stores nothing, sends nothing
+   * and reads no pixels. Experimental: its content may change in any release.
+   */
+  experimentalDiagnostics?: boolean;
+
+  /**
    * The capture screen's layout (step 1). Default `"rail"`.
    *
    * Every layout is the same capture stage — the same detection, hints,

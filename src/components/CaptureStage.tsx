@@ -36,8 +36,11 @@ import { assessSource, type GateReading } from "@/lib/capture-gate";
 import { normalizedCoverage, type NormalizedQuad } from "@/lib/quad";
 import { refineOnCanvas } from "@/lib/refine";
 import { flash, shutterPulse } from "@/lib/motion";
-import { probe, probing, type CaptureProbe, type CornersFrom } from "@/lib/probe";
-import { useLiveDetect, type FrameBox } from "@/hooks/useLiveDetect";
+import { probe, probeSetting, probing, type CaptureProbe, type CornersFrom } from "@/lib/probe";
+import { useLiveDetect } from "@/hooks/useLiveDetect";
+import { checkStill } from "@/lib/still-check";
+import { resolveFit, type FitPolicy } from "@/lib/visible-region";
+import { DiagnosticsHud } from "@/components/DiagnosticsHud";
 import { useAssetUrls, useScanRuntime } from "@/hooks/useScanRuntime";
 import { useCopy } from "@/components/I18n";
 import { AutoCaptureIcon, CameraIcon, ImageIcon, SpinnerIcon, TorchIcon } from "@/components/icons";
@@ -232,6 +235,12 @@ export interface CaptureChrome {
   stageClassName: string;
   /** Where the framing brackets sit while no page is tracked (default: 16px in from the stage). */
   framingClassName?: string;
+  /**
+   * How the camera frame is scaled into the stage (`lib/visible-region.ts`;
+   * default `cover`). The layout's opaque bands are declared in its chrome
+   * with `data-scan-occluder` (see `OccluderMark`).
+   */
+  fit?: FitPolicy;
   render: (parts: CaptureChromeParts) => React.ReactNode;
 }
 
@@ -286,6 +295,12 @@ interface CaptureStageProps {
    * `rightAction`, `children` and the control row are only read without it.
    */
   chrome?: CaptureChrome;
+  /**
+   * The diagnostics HUD (`experimentalDiagnostics` on `<ScanFlow>`): numbers
+   * about the live loop for a real-phone test. Off by default; no storage,
+   * no network, no images.
+   */
+  diagnostics?: boolean;
 }
 
 export function CaptureStage({
@@ -304,6 +319,7 @@ export function CaptureStage({
   autoCaptureOn = false,
   onAutoCaptureChange,
   chrome,
+  diagnostics = false,
 }: CaptureStageProps) {
   const copy = useCopy();
   // The asset base the host gave the flow. Every loader below is handed it
@@ -500,7 +516,14 @@ export function CaptureStage({
    */
   const autoFireRef = React.useRef<() => void>(() => undefined);
   const handleAutoCapture = React.useCallback(() => autoFireRef.current(), []);
+  // The layout's fit — or, on the bench only, the one a run forces.
+  const fit = resolveFit(probeSetting("fit"), chrome?.fit ?? "cover");
+  /** Automatic captures this mount fired (the diagnostics HUD). */
+  const autoFiresRef = React.useRef(0);
+  /** The last photo's size (the diagnostics HUD). */
+  const lastStillRef = React.useRef<{ width: number; height: number; attention: string | null } | null>(null);
   const detect = useLiveDetect({
+    fit,
     videoRef,
     containerRef: stageRef,
     active: mode === "live" && !disabled && !cameraLost,
@@ -632,6 +655,7 @@ export function CaptureStage({
       fallback: NormalizedQuad | null = null,
       trace: CaptureTrace | null = null,
       carriedSource: DetectionSource | null = null,
+      check: { live: NormalizedQuad | null; preview: { width: number; height: number } } | null = null,
     ) => {
       // Run only when it can change the answer: this is a ~3 s WASM detect and
       // step 1 already outranks it. Only the corners are wanted from it — how
@@ -653,6 +677,20 @@ export function CaptureStage({
       if (corners !== null && corners !== detected) {
         corners = refineCorners(frame, corners, carriedSource, live !== null ? "live" : "fallback");
       }
+      // The photo is checked before it is offered (`lib/still-check.ts`): the
+      // page the viewfinder vouched for, mapped onto this image, against the
+      // corners found on it. A flag never stops the capture — the confirm
+      // screen opens either way, asking for a closer look.
+      const attention =
+        check === null
+          ? null
+          : checkStill({
+              live: check.live,
+              corners,
+              cornersFromPhoto: corners !== null && detected !== null && live === null,
+              mapping: { preview: check.preview, still: { width: frame.width, height: frame.height } },
+            }).attention;
+      lastStillRef.current = { width: frame.width, height: frame.height, attention };
       if (trace !== null) {
         const cornersFrom: CornersFrom =
           live !== null
@@ -698,6 +736,7 @@ export function CaptureStage({
               : bufferedConfidence,
           coverage: corners === null ? null : normalizedCoverage(corners),
           mlWaitMs,
+          attention,
         });
       }
       onCapture({
@@ -705,6 +744,7 @@ export function CaptureStage({
         corners,
         gate,
         path: path ?? taken,
+        attention,
       });
     },
     [onCapture, path, urls],
@@ -866,7 +906,7 @@ export function CaptureStage({
             stillH,
             previewW: video.videoWidth,
             previewH: video.videoHeight,
-            visible: visibleRect(detect.frameBox, stageRef.current),
+            visible: detect.frameBox === null ? null : { ...detect.visible },
             bufferAgeMs: grabbed?.ageMs ?? null,
             bufferedSource: grabbed?.source ?? null,
             bufferedConfidence: grabbed?.confidence ?? null,
@@ -875,6 +915,7 @@ export function CaptureStage({
             grabbedAt,
           }
         : null;
+      if (trigger === "auto") autoFiresRef.current += 1;
       await emit(
         frame,
         corners,
@@ -883,6 +924,10 @@ export function CaptureStage({
         fallbackCorners,
         trace,
         grabbed?.source ?? null,
+        {
+          live: bufferedQuad,
+          preview: { width: video.videoWidth, height: video.videoHeight },
+        },
       );
       setAnnouncement(copy.capture.captured(pageNumber));
     } catch (error) {
@@ -988,6 +1033,14 @@ export function CaptureStage({
     }
   }, [shownHints]);
 
+  // The HUD reads these through a stable callback: its timer is not restarted by every render.
+  const hudStateRef = React.useRef({ torch: false, autoOffered: false, autoOn: false });
+  hudStateRef.current = { torch: torchAvailable, autoOffered: autoCaptureOffered, autoOn: autoCapture };
+  const hudExtras = React.useCallback(
+    () => ({ ...hudStateRef.current, autoFires: autoFiresRef.current, still: lastStillRef.current }),
+    [],
+  );
+
   const stage = (
       <div
         ref={stageRef}
@@ -1010,9 +1063,22 @@ export function CaptureStage({
           aria-label={copy.capture.videoLabel}
           aria-hidden={mode !== "live" || undefined}
           className={clsx(
-            "absolute inset-0 h-full w-full object-cover",
+            // `cover` fills the stage; another fit is placed by the live
+            // loop (`lib/visible-region.ts`), the frame box clipped to the stage.
+            detect.videoBox === null ? "absolute inset-0 h-full w-full object-cover" : "absolute object-cover",
             mode !== "live" && "pointer-events-none opacity-0",
           )}
+          style={
+            detect.videoBox === null
+              ? undefined
+              : {
+                  left: detect.videoBox.left,
+                  top: detect.videoBox.top,
+                  width: detect.videoBox.width,
+                  height: detect.videoBox.height,
+                  objectPosition: `${(detect.videoBox.positionX * 100).toFixed(3)}% ${(detect.videoBox.positionY * 100).toFixed(3)}%`,
+                }
+          }
         />
 
         {/* Tapping the frame takes the photo — the caption says so, and on a
@@ -1291,6 +1357,8 @@ export function CaptureStage({
           aria-hidden="true"
           className="pointer-events-none absolute inset-0 bg-shell-ink opacity-0"
         />
+
+        {diagnostics && mode === "live" && <DiagnosticsHud read={detect.diagnostics} extras={hudExtras} />}
       </div>
   );
 
@@ -1459,27 +1527,6 @@ async function applyTorch(track: MediaStreamTrack, on: boolean): Promise<boolean
   } catch {
     return true;
   }
-}
-
-/**
- * The part of the preview the user could actually see — the object-cover crop —
- * as fractions of the preview frame, for the probe. `null` before the frame box
- * has been measured.
- */
-function visibleRect(
-  box: FrameBox | null,
-  stage: HTMLElement | null,
-): CaptureProbe["visible"] {
-  if (box === null || stage === null || box.width <= 0 || box.height <= 0) {
-    return null;
-  }
-  const rect = stage.getBoundingClientRect();
-  return {
-    x: -box.left / box.width,
-    y: -box.top / box.height,
-    width: rect.width / box.width,
-    height: rect.height / box.height,
-  };
 }
 
 /**

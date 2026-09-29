@@ -8,6 +8,7 @@ import { useCopy } from "@/components/I18n";
 import { PageThumb } from "@/components/PageThumb";
 import { ChevronRightIcon, ImageIcon, SpinnerIcon, TorchIcon, XIcon } from "@/components/icons";
 import { ACCEPT_ATTRIBUTE } from "@/lib/image";
+import type { OccluderEdge } from "@/lib/visible-region";
 
 /**
  * The pieces the full-bleed capture layouts share (`captureLayout`: `rail`, the
@@ -47,6 +48,35 @@ export const LAYOUT_STAGE_CLASS = "absolute inset-0 overflow-hidden bg-night";
 
 /** The notch is the chrome's problem: the top row's padding. */
 export const SAFE_TOP = "pt-[max(env(safe-area-inset-top),12px)]";
+
+/**
+ * An opaque band over the camera, declared for the live loop
+ * (`lib/visible-region.ts`): an invisible box along one edge of the stage
+ * whose extent the person cannot see the picture through — the notch, the
+ * home indicator, a bar of controls. The loop measures it (and follows it
+ * when it resizes) and judges the page only against what is left: a corner
+ * under a band is cut off to the person holding the phone. A band hugs its
+ * edge; only its inner side counts.
+ */
+export function OccluderMark({ edge, className }: { edge: OccluderEdge; className: string }) {
+  return (
+    <div
+      aria-hidden="true"
+      data-scan-occluder={edge}
+      className={clsx("pointer-events-none invisible absolute", className)}
+    />
+  );
+}
+
+/** The notch and the home indicator — the safe areas a full-bleed stage runs under. */
+export function SafeAreaOccluders({ bottom = true }: { bottom?: boolean }) {
+  return (
+    <>
+      <OccluderMark edge="top" className="inset-x-0 top-0 h-[env(safe-area-inset-top)]" />
+      {bottom && <OccluderMark edge="bottom" className="inset-x-0 bottom-0 h-[env(safe-area-inset-bottom)]" />}
+    </>
+  );
+}
 
 /** A glass circle: close, torch. 44 px, named, and pressed state spoken where it has one. */
 export function GlassButton({

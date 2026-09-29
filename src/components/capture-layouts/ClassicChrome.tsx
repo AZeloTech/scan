@@ -7,6 +7,7 @@ import {
   LayoutShutter,
   ReviewPill,
   SAFE_TOP,
+  SafeAreaOccluders,
   StepPill,
   ThumbStack,
   TorchButton,
@@ -47,7 +48,10 @@ export function ClassicChrome({ parts, bits }: LayoutChromeProps) {
         className="absolute inset-x-0 bottom-[calc(max(env(safe-area-inset-bottom),14px)+10.25rem)]"
       />
 
-      <div className="absolute inset-x-0 bottom-0 bg-night/80 px-6 pb-[max(env(safe-area-inset-bottom),14px)] pt-5">
+      <SafeAreaOccluders bottom={false} />
+
+      {/* 80 % night: an opaque band for the live loop (`data-scan-occluder`). */}
+      <div data-scan-occluder="bottom" className="absolute inset-x-0 bottom-0 bg-night/80 px-6 pb-[max(env(safe-area-inset-bottom),14px)] pt-5">
         <div className="grid h-[118px] grid-cols-[1fr_auto_1fr] items-center">
           <span className="justify-self-start">
             <ThumbStack bits={bits} />

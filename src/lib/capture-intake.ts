@@ -24,6 +24,7 @@
 import { detectInBlob } from "@/lib/flatten";
 import { assessBlob, type GateReading } from "@/lib/capture-gate";
 import { type NormalizedQuad } from "@/lib/quad";
+import type { StillAttention } from "@/lib/still-check";
 import { isAcceptedImageType, prepareCapture, ImagePrepError } from "@/lib/image";
 import type { AssetUrls } from "@/lib/runtime-config";
 
@@ -58,6 +59,13 @@ export interface Capture {
   gate: GateReading | null;
   /** Which affordance produced it. */
   path: CapturePath;
+  /**
+   * The camera path's check of the photo (`lib/still-check.ts`): why the
+   * confirm screen should ask for a closer look — a corner on the photo's
+   * edge, the page not where the viewfinder had it, no page found — or
+   * absent/null when the photo holds the page whole. Never stops a capture.
+   */
+  attention?: StillAttention | null;
 }
 
 /**

@@ -268,6 +268,7 @@ export function EscanearScreen() {
     onAutoCaptureChange: (on: boolean) => {
       runtime.autoCapture.chosen.current = on;
     },
+    diagnostics: runtime.diagnostics,
   };
 
   const layout = runtime.captureLayout;
@@ -325,6 +326,7 @@ export function EscanearScreen() {
             onAutoCaptureChange={(on) => {
               runtime.autoCapture.chosen.current = on;
             }}
+            diagnostics={runtime.diagnostics}
             rightAction={
               <CameraPill
                 // Not filled while a sheet is flagged: carrying on is allowed

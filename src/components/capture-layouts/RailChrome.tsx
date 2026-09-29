@@ -12,7 +12,9 @@ import {
   HintPill,
   LayoutShutter,
   latestTile,
+  OccluderMark,
   SAFE_TOP,
+  SafeAreaOccluders,
   TorchButton,
   usePagesLabel,
   type LayoutChromeProps,
@@ -39,6 +41,22 @@ import {
 export const RAIL_FRAMING =
   "inset-x-6 top-[calc(max(env(safe-area-inset-top),12px)+7rem)] bottom-[calc(max(env(safe-area-inset-bottom),14px)+13.75rem)]";
 
+/**
+ * How the rail fits the camera frame (`lib/visible-region.ts`, Phase 5a):
+ * `maxcrop` — the frame covers the part of the screen above the controls,
+ * cropping at most 12 % off a side, so on a tall phone every part of the
+ * frame the scanner judges is on screen. See the README's "What the camera
+ * shows" for the evaluation behind it.
+ */
+export const RAIL_FIT = "maxcrop" as const;
+
+/**
+ * The controls' band, for the live loop: from the safe area up to the top of
+ * the mode rail (9 rem + its 44 px) — where the fade under the controls is
+ * past half opaque and the rail, the shutter row and the gallery line sit.
+ */
+const RAIL_BAND = "inset-x-0 bottom-0 h-[calc(max(env(safe-area-inset-bottom),14px)+11.75rem)]";
+
 export function RailChrome({ parts, bits }: LayoutChromeProps) {
   const copy = useCopy();
   const tile = latestTile(bits);
@@ -46,6 +64,9 @@ export function RailChrome({ parts, bits }: LayoutChromeProps) {
   return (
     <>
       {parts.stage}
+
+      <SafeAreaOccluders bottom={false} />
+      <OccluderMark edge="bottom" className={RAIL_BAND} />
 
       <div className={`pointer-events-none absolute inset-x-0 top-0 grid grid-cols-[1fr_auto_1fr] items-center gap-2 px-4 ${SAFE_TOP}`}>
         <span className="justify-self-start">

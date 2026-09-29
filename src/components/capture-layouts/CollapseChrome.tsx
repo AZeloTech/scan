@@ -13,6 +13,7 @@ import {
   LayoutShutter,
   latestTile,
   SAFE_TOP,
+  SafeAreaOccluders,
   StepPill,
   TorchButton,
   usePagesLabel,
@@ -127,9 +128,13 @@ export function CollapseChrome({ parts, bits }: LayoutChromeProps) {
         className="absolute inset-x-0 bottom-[calc(max(env(safe-area-inset-bottom),14px)+10.25rem)]"
       />
 
-      {/* The bar ↔ capsule: one surface whose box animates between the two. */}
+      <SafeAreaOccluders bottom={false} />
+
+      {/* The bar ↔ capsule: one surface whose box animates between the two —
+          an opaque band for the live loop either way (`data-scan-occluder`). */}
       <div
         aria-hidden="true"
+        data-scan-occluder="bottom"
         className={clsx(
           "pointer-events-auto absolute motion-safe:transition-[left,right,bottom,height,border-radius,background-color]",
           EASE,

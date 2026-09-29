@@ -11,6 +11,7 @@ import {
   hintLine,
   LayoutShutter,
   SAFE_TOP,
+  SafeAreaOccluders,
   type LayoutChromeProps,
 } from "@/components/capture-layouts/shared";
 
@@ -40,6 +41,8 @@ export function OneHandChrome({ parts, bits }: LayoutChromeProps) {
   return (
     <>
       {parts.stage}
+
+      <SafeAreaOccluders />
 
       <div className={`pointer-events-none absolute left-4 top-0 ${SAFE_TOP}`}>
         <CloseButton pages={bits.pageCount} onClick={bits.onClose} />

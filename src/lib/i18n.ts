@@ -270,6 +270,12 @@ export interface AppCopy {
     unavailableBody: string;
     announceReady: string;
     announceDone: (n: number) => string;
+    /**
+     * The photo's own check (`lib/still-check.ts`), one short line over the
+     * editor when it asks for a closer look: a corner on the photo's edge, the
+     * page not where the viewfinder had it, no page found in the photo.
+     */
+    attention: Record<"no-page" | "corner-outside" | "moved", string>;
   };
 
   review: {
@@ -1011,6 +1017,11 @@ const PT: AppCopy = {
       "Não conseguimos abrir a foto neste aparelho. Refaça a foto — leva alguns segundos.",
     announceReady: "Confira os quatro cantos da folha.",
     announceDone: (n) => `Página ${n} confirmada.`,
+    attention: {
+      "corner-outside": "Um canto pode ter ficado de fora da foto — confira.",
+      moved: "A foto saiu diferente do que a câmera mostrava — confira.",
+      "no-page": "Não achei a folha nesta foto — ajuste os cantos.",
+    },
   },
 
   review: {
@@ -1664,6 +1675,11 @@ const EN: AppCopy = {
       "We could not open the photo on this device. Take it again — it only takes a few seconds.",
     announceReady: "Check the four corners of the sheet.",
     announceDone: (n) => `Page ${n} confirmed.`,
+    attention: {
+      "corner-outside": "A corner may be outside the photo — check it.",
+      moved: "The photo came out different from what the camera showed — check it.",
+      "no-page": "No sheet found in this photo — adjust the corners.",
+    },
   },
 
   review: {

@@ -152,6 +152,17 @@ import { useAssetUrls } from "@/hooks/useScanRuntime";
 import { CAPTURE_GRACE_MS } from "@/lib/still-capture";
 import { probe, probing } from "@/lib/probe";
 import { ringOffset } from "@/lib/capture-layout";
+import {
+  clearArea,
+  frameBoxFor,
+  sameRegion,
+  videoBoxFor,
+  visibleRegionOf,
+  type FitPolicy,
+  type FrameRegion,
+  type Occluder,
+  type OccluderEdge,
+} from "@/lib/visible-region";
 
 /**
  * The window inside which the last *accepted* corners may still travel with a
@@ -741,6 +752,42 @@ export interface UseLiveDetectOptions {
   autoCapture?: boolean;
   /** Called when auto-capture fires: take the photo exactly as a tap would. */
   onAutoCapture?: () => void;
+  /**
+   * How the stage scales the frame (`lib/visible-region.ts`; default
+   * `cover`, the video filling the stage). Anything else is laid out here: the
+   * hook measures the layout's declared opaque bands and answers the video's
+   * own box ({@link LiveDetect.videoBox}).
+   */
+  fit?: FitPolicy;
+}
+
+/** The video element's box and `object-position` for a fit other than `cover` (stage pixels). */
+export interface VideoBox {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  positionX: number;
+  positionY: number;
+}
+
+/** What the diagnostics HUD reads, once per tick (`experimentalDiagnostics`). */
+export interface LiveDiagnostics {
+  lane: DetectLaneKind | null;
+  detector: DetectionSource;
+  /** The newest pass's detector time, and the median of the recent ones (ms). */
+  detectMs: number | null;
+  detectP50: number | null;
+  /** The loop's current interval between passes (ms). */
+  intervalMs: number;
+  /** How old the newest pass's frame was when its answer landed (ms). */
+  frameAgeMs: number | null;
+  stream: { width: number; height: number } | null;
+  visible: FrameRegion;
+  fit: FitPolicy;
+  locked: boolean;
+  ready: boolean;
+  autoArmed: boolean;
 }
 
 /**
@@ -835,6 +882,15 @@ export interface LiveDetect {
   ready: boolean;
   /** Bumped once per page as the ready cue comes on: the one haptic tick (and a spoken "ready"). */
   readyTick: number;
+  /**
+   * The part of the frame the person can see (`lib/visible-region.ts`), in
+   * frame fractions — what the hints, the ready cue and auto-capture judge.
+   */
+  visible: FrameRegion;
+  /** Where the video element goes for a fit other than `cover`; null: fill the stage. */
+  videoBox: VideoBox | null;
+  /** A snapshot for the diagnostics HUD — cheap, read on demand. */
+  diagnostics: () => LiveDiagnostics;
 }
 
 /** One pass, whichever lane ran it. */
@@ -884,6 +940,7 @@ export function useLiveDetect({
   paused,
   autoCapture = false,
   onAutoCapture,
+  fit = "cover",
 }: UseLiveDetectOptions): LiveDetect {
   /**
    * Where the corner-detection model lives. Read from the flow's runtime rather
@@ -953,8 +1010,19 @@ export function useLiveDetect({
   const frameBoxRef = React.useRef<FrameBox | null>(null);
   /** The video's own size at the last measure: a change is a new sensor frame (a rotation). */
   const videoSizeRef = React.useRef<{ width: number; height: number } | null>(null);
-  /** The part of the frame the viewfinder shows (its object-cover crop): what the hints judge. */
+  /**
+   * The part of the frame the person can see — the frame box ∩ the stage ∩
+   * the viewport, minus the layout's opaque bands (`lib/visible-region.ts`):
+   * what the hints, the ready cue and auto-capture judge.
+   */
   const visibleRef = React.useRef<VisibleRect>(WHOLE_FRAME);
+  const [visible, setVisible] = React.useState<FrameRegion>(WHOLE_FRAME);
+  const [videoBox, setVideoBox] = React.useState<VideoBox | null>(null);
+  const fitRef = React.useRef<FitPolicy>(fit);
+  fitRef.current = fit;
+  /** The newest passes' detector times, for the HUD's median. */
+  const passTimesRef = React.useRef<number[]>([]);
+  const frameAgeRef = React.useRef<number | null>(null);
 
   const [available, setAvailable] = React.useState(true);
   const [hasQuad, setHasQuad] = React.useState(false);
@@ -991,7 +1059,17 @@ export function useLiveDetect({
     reducedRef.current = prefersReducedMotion();
   }, []);
 
-  /** The rendered video box, which object-cover crops out of the stage. */
+  /** Watches the stage and the layout's opaque bands, as `measure` finds them. */
+  const occluderObserverRef = React.useRef<ResizeObserver | null>(null);
+  /**
+   * Where the frame renders in the stage under the fit policy, and the part
+   * of it the person can see (`lib/visible-region.ts`): the stage ∩ the
+   * visual viewport (pinch zoom), minus the opaque bands the layout declares
+   * (`[data-scan-occluder]` inside its `[data-scan-layout]` root — the notch,
+   * the shutter row over the rail's fade). Re-measured on any resize of the
+   * stage or a band, the viewport, the video's own size, and once a second
+   * while live (a chrome state change that moves a band without resizing it).
+   */
   const measure = React.useCallback(() => {
     const video = videoRef.current;
     const host = containerRef.current;
@@ -999,18 +1077,42 @@ export function useLiveDetect({
     if (video.videoWidth === 0 || video.videoHeight === 0) return;
     const rect = host.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return;
-    const scale = Math.max(
-      rect.width / video.videoWidth,
-      rect.height / video.videoHeight,
+    const stageSize = { width: rect.width, height: rect.height };
+    const occluders: Occluder[] = [];
+    const layoutRoot = host.closest("[data-scan-layout]");
+    if (layoutRoot !== null) {
+      for (const element of layoutRoot.querySelectorAll<HTMLElement>("[data-scan-occluder]")) {
+        const edge = element.dataset.scanOccluder as OccluderEdge;
+        if (edge !== "top" && edge !== "bottom" && edge !== "left" && edge !== "right") continue;
+        const r = element.getBoundingClientRect();
+        occluders.push({ edge, box: { left: r.left - rect.left, top: r.top - rect.top, width: r.width, height: r.height } });
+        occluderObserverRef.current?.observe(element);
+      }
+    }
+    const vv = typeof window.visualViewport === "object" ? window.visualViewport : null;
+    const viewport =
+      vv !== null
+        ? { left: vv.offsetLeft - rect.left, top: vv.offsetTop - rect.top, width: vv.width, height: vv.height }
+        : { left: -rect.left, top: -rect.top, width: window.innerWidth, height: window.innerHeight };
+    const clear = clearArea(stageSize, viewport, occluders);
+    const policy = fitRef.current;
+    const next: FrameBox = frameBoxFor(policy, { width: video.videoWidth, height: video.videoHeight }, stageSize, clear);
+    const region = visibleRegionOf(next, clear);
+    const placed = videoBoxFor(policy, next, stageSize);
+    const nextVideoBox: VideoBox | null =
+      placed === null ? null : { ...placed.box, positionX: placed.position.x, positionY: placed.position.y };
+    setVideoBox((current) =>
+      current === null || nextVideoBox === null
+        ? nextVideoBox
+        : Math.abs(current.left - nextVideoBox.left) < 0.5 &&
+            Math.abs(current.top - nextVideoBox.top) < 0.5 &&
+            Math.abs(current.width - nextVideoBox.width) < 0.5 &&
+            Math.abs(current.height - nextVideoBox.height) < 0.5 &&
+            Math.abs(current.positionX - nextVideoBox.positionX) < 1e-3 &&
+            Math.abs(current.positionY - nextVideoBox.positionY) < 1e-3
+          ? current
+          : nextVideoBox,
     );
-    const width = video.videoWidth * scale;
-    const height = video.videoHeight * scale;
-    const next: FrameBox = {
-      left: (rect.width - width) / 2,
-      top: (rect.height - height) / 2,
-      width,
-      height,
-    };
     const previous = frameBoxRef.current;
     const same =
       previous !== null &&
@@ -1030,12 +1132,12 @@ export function useLiveDetect({
       clearTracking(runtimeRef.current, overlay);
     }
     videoSizeRef.current = { width: video.videoWidth, height: video.videoHeight };
-    visibleRef.current = {
-      x: -next.left / width,
-      y: -next.top / height,
-      width: rect.width / width,
-      height: rect.height / height,
-    };
+    // Nothing of the frame on screen (a stage scrolled or zoomed away): keep
+    // judging the last region rather than divide by nothing.
+    if (region !== null && region.width > 0 && region.height > 0) {
+      if (!sameRegion(visibleRef.current, region)) visibleRef.current = region;
+      setVisible((current) => (sameRegion(current, region) ? current : region));
+    }
     frameBoxRef.current = next;
     setFrameBox((current) => (same && current !== null ? current : next));
   }, [containerRef, overlay, videoRef]);
@@ -1044,20 +1146,41 @@ export function useLiveDetect({
     if (!active) return;
     const video = videoRef.current;
     const host = containerRef.current;
-    measure();
     const observer =
       typeof ResizeObserver === "function" && host !== null
         ? new ResizeObserver(() => measure())
         : null;
+    occluderObserverRef.current = observer;
+    measure();
     if (observer !== null && host !== null) observer.observe(host);
     video?.addEventListener("loadedmetadata", measure);
     video?.addEventListener("resize", measure);
+    const vv = typeof window.visualViewport === "object" ? window.visualViewport : null;
+    vv?.addEventListener("resize", measure);
+    vv?.addEventListener("scroll", measure);
+    window.addEventListener("resize", measure);
+    window.addEventListener("orientationchange", measure);
+    // A band that moves without resizing (a chrome state change), a text
+    // size change the observers miss: a second is soon enough, and a
+    // measure is a handful of rect reads.
+    const tick = window.setInterval(measure, 1000);
     return () => {
       observer?.disconnect();
+      occluderObserverRef.current = null;
+      window.clearInterval(tick);
       video?.removeEventListener("loadedmetadata", measure);
       video?.removeEventListener("resize", measure);
+      vv?.removeEventListener("resize", measure);
+      vv?.removeEventListener("scroll", measure);
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("orientationchange", measure);
     };
   }, [active, containerRef, measure, videoRef]);
+
+  // A new fit is a new layout of the same stage.
+  React.useEffect(() => {
+    measure();
+  }, [fit, measure]);
 
   // Nothing to track while the loop is not running — the stage is gone, a sheet
   // covers it, the tab is hidden, the device was written off. Everything the
@@ -1633,6 +1756,11 @@ export function useLiveDetect({
         runtime.filter.reset();
       }
       noteGuidance(outcome, accepted, rejected, holdBroken, motionScore, watchLuma);
+      // The diagnostics HUD's numbers: a few floats, kept whether or not it is shown.
+      const times = passTimesRef.current;
+      times.push(outcome.detectMs);
+      if (times.length > 31) times.shift();
+      frameAgeRef.current = performance.now() - outcome.frameAt;
       const keepGoing = adapt(outcome.costMs, outcome.detectMs, profile);
       reportPass(source, false, outcome.detection, outcome, elapsed, accepted, motionScore, false, holdBroken, rejected);
       if (!keepGoing) return null;
@@ -2422,6 +2550,26 @@ export function useLiveDetect({
     };
   }, [loopLive, overlay, videoRef]);
 
+  const diagnostics = React.useCallback((): LiveDiagnostics => {
+    const runtime = runtimeRef.current;
+    const times = passTimesRef.current;
+    const sorted = [...times].sort((a, b) => a - b);
+    return {
+      lane: detectLane(),
+      detector: runtime.passSource,
+      detectMs: times.length === 0 ? null : times[times.length - 1],
+      detectP50: sorted.length === 0 ? null : sorted[Math.floor(sorted.length / 2)],
+      intervalMs: runtime.intervalMs,
+      frameAgeMs: frameAgeRef.current,
+      stream: videoSizeRef.current,
+      visible: visibleRef.current,
+      fit: fitRef.current,
+      locked: runtime.locked,
+      ready: guidanceRef.current.ready.onSince !== null,
+      autoArmed: guidanceRef.current.auto.armed,
+    };
+  }, []);
+
   return {
     available,
     hasQuad,
@@ -2433,5 +2581,8 @@ export function useLiveDetect({
     hint,
     ready,
     readyTick,
+    visible,
+    videoBox,
+    diagnostics,
   };
 }
