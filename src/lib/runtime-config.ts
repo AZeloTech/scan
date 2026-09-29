@@ -47,6 +47,15 @@ export interface AssetUrls {
   readonly renderWorker: string;
   readonly dewarpWorker: string;
   /**
+   * The detection worker (`lib/detect.worker.ts`): scanic, run off the main
+   * thread. Its response is a script like any other, and the page's CSP
+   * does not reach inside it — a worker obeys the policy on its *own*
+   * response, so a host that sends CSP headers on its assets must allow
+   * `script-src 'self' 'wasm-unsafe-eval'` and `connect-src 'self'` on this
+   * file (or send none there).
+   */
+  readonly detectWorker: string;
+  /**
    * scanic, pre-bundled with its ML detector and ONNX Runtime wrapper.
    *
    * Loaded with a runtime `import()` of this URL rather than a static import,
@@ -78,6 +87,7 @@ export function assetUrls(assetBaseUrl: string): AssetUrls {
     pdfWorker: `${pdfjsBase}pdf.worker.min.mjs`,
     renderWorker: `${base}workers/render.worker.js`,
     dewarpWorker: `${base}workers/dewarp-classical.worker.js`,
+    detectWorker: `${base}workers/detect.worker.js`,
     scanic: `${base}scanic/scanic-entry.js`,
   };
 }

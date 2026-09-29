@@ -232,3 +232,32 @@
     border-width: 0;
   }
 }
+
+@layer utilities {
+  /*
+   * The app shell's height, ported from the source app's `globals.css` — see
+   * `AppFrame` and `AppShellLock`, which both cite this class by name.
+   *
+   * `svh`, not `dvh`: `dvh` is the *dynamic* viewport and on a real phone can
+   * report the tall, toolbar-hidden height while the toolbar is still on
+   * screen, which would put the bottom action bar out of reach. `svh` is the
+   * *small* viewport — the height with every bit of chrome showing — so it is
+   * the unit that guarantees the bar stays reachable. `vh` first, as a
+   * fallback for browsers older than the 2023 units; `var(--app-h, 100svh)`
+   * last, for the pixel height `AppShellLock` measures from `visualViewport`
+   * when a host mounts it, `100svh` again when it has not.
+   *
+   * This assumes the full-screen embed the README documents and the consumer
+   * smoke test exercises (`position: fixed; inset: 0`): the containing block
+   * is then the real viewport, so these units and the host's own box agree. A
+   * host that instead embeds ScanFlow inside a smaller, non-fullscreen
+   * container would get a shell sized to the *browser* viewport rather than
+   * that container — carried over as-is from the source app, where the shell
+   * always owned the whole page. See README.md's "Use" section for the caveat.
+   */
+  .scan-root .app-h {
+    height: 100vh;
+    height: 100svh;
+    height: var(--app-h, 100svh);
+  }
+}

@@ -12,6 +12,7 @@ import {
   type NormalizedQuad,
 } from "@/lib/quad";
 import type { Capture } from "@/lib/capture-intake";
+import { probe, probing, quadMoved } from "@/lib/probe";
 import { deriveShellTheme, LOUPE_RING } from "@/lib/shell-theme";
 import { fillSlot, flyToSlot } from "@/lib/motion";
 import { useBlobUrl } from "@/hooks/useScanStore";
@@ -90,6 +91,8 @@ export function ConfirmCornersScreen({
   const canonical = capture.canonical;
   /** The pixel grid the editor is working on, for normalising its answer. */
   const frameRef = React.useRef<{ width: number; height: number } | null>(null);
+  /** What the editor showed at open, so the probe can tell an edit from a nod. */
+  const seededRef = React.useRef<NormalizedQuad | null>(null);
 
   /**
    * Keep this quad and fly the page into the slot.
@@ -105,6 +108,18 @@ export function ConfirmCornersScreen({
    */
   const land = React.useCallback(
     async (corners: NormalizedQuad | null) => {
+      if (probing()) {
+        probe({
+          type: "confirm-done",
+          t: performance.now(),
+          corners,
+          edited:
+            seededRef.current === null
+              ? null
+              : quadMoved(seededRef.current, corners),
+          wholePhoto: corners === FULL_FRAME_QUAD,
+        });
+      }
       setPhase("flying");
       await flyToSlot(flyerRef.current, stageRef.current, slotRef.current);
       setLanded(true);
@@ -199,6 +214,36 @@ export function ConfirmCornersScreen({
         editorRef.current = editor;
         // scanic names its handles in English and offers no option for it.
         localizeCornerHandles(host, handleLabels);
+        if (probing()) {
+          // What the user is looking at: the seed, or — with none — the
+          // editor's own inset quad, which is what "confirm" would hand back.
+          // Read defensively: the instrument must not be able to fail the boot.
+          let shown: NormalizedQuad | null = null;
+          try {
+            shown = normalizeQuad(
+              editor.getCorners(),
+              canvas.width,
+              canvas.height,
+            );
+          } catch {
+            shown = null;
+          }
+          seededRef.current = shown;
+          probe({
+            type: "confirm-open",
+            t: performance.now(),
+            corners: detected,
+            shownCorners: shown,
+            seededFrom:
+              capture.corners !== null
+                ? "capture"
+                : detected !== null
+                  ? "detected"
+                  : "editor-default",
+            width: canvas.width,
+            height: canvas.height,
+          });
+        }
         setPhase("ready");
       } catch {
         if (cancelled) return;

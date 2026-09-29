@@ -12,6 +12,7 @@ import {
   releaseCanvas,
 } from "@/lib/image";
 import {
+  lastStillAttempt,
   liveQuadFreshAtTap,
   liveQuadSurvives,
   noteStillFailure,
@@ -22,20 +23,24 @@ import {
 import {
   detectInCanvas,
   isMlDetectionReady,
+  refineCorners,
   waitForMlIdle,
+  type DetectionSource,
   type QuadDetection,
 } from "@/lib/flatten";
 import { prefetchDewarpAssets } from "@/lib/dewarp/prefetch";
 import { connectionKind, shouldPrefetchHeavyAssets } from "@/lib/network";
 import { captureFromFile, type Capture, type CapturePath } from "@/lib/capture-intake";
-import { HINT_SAMPLE_WIDTH, readFrame, type FrameHint } from "@/lib/hints";
+import type { HintKey } from "@/lib/guidance";
 import { assessSource, type GateReading } from "@/lib/capture-gate";
-import { type NormalizedQuad } from "@/lib/quad";
+import { normalizedCoverage, type NormalizedQuad } from "@/lib/quad";
+import { refineOnCanvas } from "@/lib/refine";
 import { flash, shutterPulse } from "@/lib/motion";
-import { useLiveDetect } from "@/hooks/useLiveDetect";
+import { probe, probing, type CaptureProbe, type CornersFrom } from "@/lib/probe";
+import { useLiveDetect, type FrameBox } from "@/hooks/useLiveDetect";
 import { useAssetUrls, useScanRuntime } from "@/hooks/useScanRuntime";
 import { useCopy } from "@/components/I18n";
-import { CameraIcon, ImageIcon, SpinnerIcon } from "@/components/icons";
+import { AutoCaptureIcon, CameraIcon, ImageIcon, SpinnerIcon, TorchIcon } from "@/components/icons";
 import {
   CameraActionBar,
   CameraPill,
@@ -63,15 +68,29 @@ export type { Capture } from "@/lib/capture-intake";
  *    glyph, and the page number — it reads as a place to put a photo, which is
  *    exactly what it is. Never a dead dark box with a small button under it.
  *
- * **Capture is manual, always.** The person holding the phone decides when the
- * picture is taken: the shutter and the frame tap are the only two things that
- * fire it, and there is no arming, no countdown and no switch. Detection is
- * what finds the corners the capture travels with and what the chips report —
- * it never *acts*.
+ * **The shutter is always the person's.** The shutter and the frame tap fire a
+ * capture in every state — no hint ever blocks them. Detection finds the
+ * corners the capture travels with and *guides* (`lib/guidance.ts`): one hint
+ * at a time in a reserved slot at the top, and a ready cue on the corner
+ * brackets once the page is framed, sharp and still (with one haptic tick and
+ * a spoken "ready" per page). **Auto-capture** is experimental: its toggle is
+ * offered only when the host asks for it (`experimentalAutoCapture` on
+ * `<ScanFlow>`), and only when the person switches it on (off in every new
+ * flow; the flow remembers the choice while it is open, never in storage)
+ * does the screen take a photo by itself: once the ready cue has held, with a
+ * countdown drawn along the brackets — through exactly the path a tap takes,
+ * confirm screen included — and once per page. A retake is always manual.
+ *
+ * **The torch** is offered only where the camera track says it has one
+ * (`getCapabilities().torch`), switched with `applyConstraints` one change at
+ * a time, re-applied to a new track, off while the viewfinder is covered or
+ * the page limit is reached, and a refusal costs nothing but the light — the
+ * toggle then shows it off, as it is.
  *
  * **The frame never changes size.** Everything transient this screen has to say
- * — the chips, the tap caption, the stuck-detector tip, an error — is drawn
- * *over* the frame, absolutely positioned at its top or foot.
+ * — the hint, the tap caption, an error — is drawn *over* the frame, absolutely
+ * positioned at its top or foot, in slots whose size does not depend on what
+ * they hold.
  * Nothing conditional is allowed to live between the frame and the control row,
  * because a box that appears there resizes the viewfinder while the user is
  * aiming through it, and a viewfinder that jumps mid-aim is the app moving the
@@ -89,16 +108,8 @@ export type { Capture } from "@/lib/capture-intake";
  * capture is byte-for-byte the one this screen always made.
  */
 
-const HINT_INTERVAL_MS = 200;
-
-/**
- * How long the detector may search before the screen starts *helping*.
- *
- * Short enough that a user pointing at a tablecloth gets told, long enough that
- * the normal case — half a second of hunting before the quad locks on — never
- * sees a word of it. A tip box that flashes on every capture is noise.
- */
-const TIP_DELAY_MS = 4000;
+/** The one haptic tick when the ready cue comes on (Android; iOS has no `vibrate`). */
+const READY_TICK_MS = 12;
 
 /**
  * How long the Wi-Fi prefetch waits for the corner detector to settle.
@@ -128,6 +139,37 @@ type IdleWindow = Window & {
 };
 
 type StageMode = "starting" | "live" | "fallback";
+
+/**
+ * Preview frames drawn to become a page this page load, numbered for the
+ * bench's probe (`lib/probe.ts`) — counted only while something listens.
+ */
+let previewGrabs = 0;
+
+/** Which of the two capture affordances the thumb landed on — or auto-capture. */
+type CaptureTrigger = "shutter" | "frame" | "auto";
+
+/**
+ * What a capture already knows before `emit` resolves its corners, for the
+ * bench's probe (`lib/probe.ts`). Built only while something is listening.
+ */
+type CaptureTrace = Omit<
+  CaptureProbe,
+  | "type"
+  | "doneAt"
+  | "frameW"
+  | "frameH"
+  | "cornersFrom"
+  | "corners"
+  | "detector"
+  | "confidence"
+  | "coverage"
+  | "mlWaitMs"
+> & {
+  /** Who measured the buffered quad, when one travelled. */
+  bufferedSource: CaptureProbe["detector"];
+  bufferedConfidence: number | null;
+};
 
 interface CaptureStageProps {
   onCapture: (capture: Capture) => void;
@@ -165,6 +207,16 @@ interface CaptureStageProps {
   /** Slotted between the frame and the controls: the thumbnail rail. */
   children?: React.ReactNode;
   className?: string;
+  /**
+   * Offer the auto-capture toggle (experimental; `experimentalAutoCapture`
+   * on `<ScanFlow>`). Absent or false: no toggle, and nothing ever captures
+   * by itself.
+   */
+  autoCaptureOffered?: boolean;
+  /** Auto-capture as the person left it in this flow (off in a new one). */
+  autoCaptureOn?: boolean;
+  /** They switched it: the flow keeps the choice while it is open — never in storage. */
+  onAutoCaptureChange?: (on: boolean) => void;
 }
 
 export function CaptureStage({
@@ -179,6 +231,9 @@ export function CaptureStage({
   rightAction,
   children,
   className,
+  autoCaptureOffered = false,
+  autoCaptureOn = false,
+  onAutoCaptureChange,
 }: CaptureStageProps) {
   const copy = useCopy();
   // The asset base the host gave the flow. Every loader below is handed it
@@ -212,8 +267,7 @@ export function CaptureStage({
   );
   const videoRef = React.useRef<HTMLVideoElement | null>(null);
   const stageRef = React.useRef<HTMLDivElement | null>(null);
-  const sampleCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
-  /** Separate from the hint sample: the 5 fps loop owns that one. */
+  /** The capture gate's scratch canvas. */
   const gateCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   /** The live video track, kept for the still-photo path only. */
   const trackRef = React.useRef<MediaStreamTrack | null>(null);
@@ -249,11 +303,19 @@ export function CaptureStage({
     setPickerOnly(!window.matchMedia("(pointer: coarse)").matches);
   }, []);
   const [cameraLost, setCameraLost] = React.useState(false);
-  const [hint, setHint] = React.useState<FrameHint>("good");
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState<string | null>(null);
   const [announcement, setAnnouncement] = React.useState("");
-  const [struggling, setStruggling] = React.useState(false);
+  /** The live track, as state: a new one (a restart) re-applies the torch. */
+  const [track, setTrack] = React.useState<MediaStreamTrack | null>(null);
+  /** The track says it has a torch. */
+  const [torchAvailable, setTorchAvailable] = React.useState(false);
+  /** The person wants the torch on (it is lit only while the viewfinder is uncovered). */
+  const [torchOn, setTorchOn] = React.useState(false);
+  const [autoCaptureChosen, setAutoCaptureChosen] = React.useState(autoCaptureOn);
+  const autoCapture = autoCaptureOffered && autoCaptureChosen;
+  /** The torch toggle, which the low-light offer hands focus to once it has lit the torch. */
+  const torchToggleRef = React.useRef<HTMLButtonElement | null>(null);
 
   // ── camera lifecycle ──────────────────────────────────────────────────────
   React.useEffect(() => {
@@ -262,6 +324,8 @@ export function CaptureStage({
 
     const handleTrackEnded = (): void => {
       trackRef.current = null;
+      setTrack(null);
+      setTorchAvailable(false);
       setCameraLost(true);
     };
 
@@ -331,6 +395,8 @@ export function CaptureStage({
         track.addEventListener("ended", handleTrackEnded);
       }
       trackRef.current = stream.getVideoTracks()[0] ?? null;
+      setTrack(trackRef.current);
+      setTorchAvailable(hasTorch(trackRef.current));
       const video = videoRef.current;
       if (video !== null) {
         video.srcObject = stream;
@@ -347,6 +413,8 @@ export function CaptureStage({
     return () => {
       cancelled = true;
       trackRef.current = null;
+      setTrack(null);
+      setTorchAvailable(false);
       if (stream !== null) {
         for (const track of stream.getTracks()) {
           track.removeEventListener("ended", handleTrackEnded);
@@ -356,25 +424,58 @@ export function CaptureStage({
     };
   }, [intakeImages, reportError, useCamera]);
 
-  // ── live hints (~5 fps on a 320 px sample) ────────────────────────────────
+  /**
+   * Auto-capture fires through the same path as a tap — set once the capture
+   * below exists; the live loop calls whatever this holds.
+   */
+  const autoFireRef = React.useRef<() => void>(() => undefined);
+  const handleAutoCapture = React.useCallback(() => autoFireRef.current(), []);
+  const detect = useLiveDetect({
+    videoRef,
+    containerRef: stageRef,
+    active: mode === "live" && !disabled && !cameraLost,
+    paused: paused || busy,
+    autoCapture: autoCapture && mode === "live" && !disabled,
+    onAutoCapture: handleAutoCapture,
+  });
+
+  // ── the ready cue: one haptic tick and one spoken "ready", per page ──────
+  // Not on every return of the cue: it can drop for a moment and come back,
+  // and a buzz each time would be a buzz train (`ReadyTick`).
+  const autoCaptureRef = React.useRef(autoCapture);
+  autoCaptureRef.current = autoCapture;
   React.useEffect(() => {
-    if (mode !== "live") return;
-    const timer = window.setInterval(() => {
-      const video = videoRef.current;
-      const canvas = sampleCanvasRef.current;
-      if (video === null || canvas === null) return;
-      if (video.videoWidth === 0 || video.videoHeight === 0) return;
-      const ratio = video.videoHeight / video.videoWidth;
-      canvas.width = HINT_SAMPLE_WIDTH;
-      canvas.height = Math.max(1, Math.round(HINT_SAMPLE_WIDTH * ratio));
-      const context = canvas.getContext("2d", { willReadFrequently: true });
-      if (context === null) return;
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const image = context.getImageData(0, 0, canvas.width, canvas.height);
-      setHint(readFrame(image).hint);
-    }, HINT_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [mode]);
+    if (detect.readyTick === 0) return;
+    if (typeof navigator.vibrate === "function") navigator.vibrate(READY_TICK_MS);
+    setAnnouncement(autoCaptureRef.current ? copy.capture.readyAuto : copy.capture.ready);
+  }, [copy, detect.readyTick]);
+
+  // ── the torch ─────────────────────────────────────────────────────────────
+  // Lit while wanted, the viewfinder uncovered and the stage taking pages;
+  // applied again to every new track. A refusal is silent — the light is a
+  // convenience, never a step — but the toggle then says it is off.
+  const torchLit = torchAvailable && torchOn && !paused && !disabled && mode === "live";
+  const torchQueueRef = React.useRef<Promise<void>>(Promise.resolve());
+  React.useEffect(() => {
+    if (track === null || !torchAvailable) return;
+    // One change at a time, in order: a quick on-off-on must end on.
+    const refused = (): void => {
+      if (torchLit) setTorchOn(false);
+    };
+    torchQueueRef.current = torchQueueRef.current.then(() => applyTorch(track, torchLit)).then((ok) => {
+      if (!ok) refused();
+    });
+    return () => {
+      if (torchLit) torchQueueRef.current = torchQueueRef.current.then(() => applyTorch(track, false)).then(() => undefined);
+    };
+  }, [track, torchAvailable, torchLit]);
+
+  const toggleAutoCapture = React.useCallback(() => {
+    const on = !autoCaptureChosen;
+    setAutoCaptureChosen(on);
+    onAutoCaptureChange?.(on);
+    setAnnouncement(on ? copy.capture.autoCaptureOnAnnounce : copy.capture.autoCaptureOffAnnounce);
+  }, [autoCaptureChosen, copy, onAutoCaptureChange]);
 
   /**
    * ── the curved-page engine, fetched on Wi-Fi before anyone asks ───────────
@@ -441,6 +542,13 @@ export function CaptureStage({
    *     here is only the priority, and measuring this frame always outranks
    *     remembering another one.
    *
+   * Whichever of the three wins is then **refined** onto the paper's edge on
+   * this frame ({@link refineCorners}) before it seeds the confirm screen: the
+   * detect refines its own answer; a `live` or `fallback` quad — measured on a
+   * 640 px sample of an earlier frame — is refined here, as the detector that
+   * measured it (`carriedSource`) allows. The priority above is untouched:
+   * refinement only ever moves corners that were already chosen.
+   *
    * The frame is encoded **once**, as the page's canonical. Nothing here warps
    * anything: the corners travel with the page and the warp happens inside its
    * single render, so a capture costs one encode instead of two.
@@ -452,6 +560,8 @@ export function CaptureStage({
       gate: GateReading | null,
       taken: CapturePath,
       fallback: NormalizedQuad | null = null,
+      trace: CaptureTrace | null = null,
+      carriedSource: DetectionSource | null = null,
     ) => {
       // Run only when it can change the answer: this is a ~3 s WASM detect and
       // step 1 already outranks it. Only the corners are wanted from it — how
@@ -460,12 +570,66 @@ export function CaptureStage({
       // at the tap would otherwise silently hand this one frame to the
       // classical detector.
       let detection: QuadDetection | null = null;
+      let mlWaitMs: number | null = null;
       if (live === null) {
+        const waitStarted = performance.now();
         await waitForMlIdle();
+        mlWaitMs = performance.now() - waitStarted;
         detection = await detectInCanvas(frame, urls);
       }
       const detected = detection?.corners ?? null;
-      const corners = resolveCaptureCorners(live, detected, fallback);
+      let corners = resolveCaptureCorners(live, detected, fallback);
+      // The detect refined its own answer; a carried quad is refined here.
+      if (corners !== null && corners !== detected) {
+        corners = refineCorners(frame, corners, carriedSource, live !== null ? "live" : "fallback");
+      }
+      if (trace !== null) {
+        const cornersFrom: CornersFrom =
+          live !== null
+            ? "live"
+            : detected !== null
+              ? "detected"
+              : fallback !== null
+                ? "fallback"
+                : null;
+        const { bufferedSource, bufferedConfidence, ...known } = trace;
+        const fromDetector = cornersFrom === "detected";
+        // The other capture policy, on the same capture: without the classical
+        // fall-through the detect would have come back empty and the buffered
+        // quad (if one could travel) would have seeded the screen instead.
+        let alternative: CaptureProbe["alternative"] = null;
+        if (fromDetector && detection?.fellThrough === true) {
+          alternative =
+            fallback === null
+              ? { corners: null, cornersFrom: null }
+              : {
+                  corners: refineOnCanvas(frame, fallback, { mode: carriedSource === "ml" ? "full" : "local" }).quad,
+                  cornersFrom: "fallback",
+                };
+        }
+        probe({
+          ...known,
+          alternative,
+          type: "capture",
+          doneAt: performance.now(),
+          frameW: frame.width,
+          frameH: frame.height,
+          cornersFrom,
+          corners,
+          detector: fromDetector
+            ? (detection?.source ?? null)
+            : cornersFrom === null
+              ? null
+              : bufferedSource,
+          confidence: fromDetector
+            ? (detection?.confidence ?? null)
+            : cornersFrom === null
+              ? null
+              : bufferedConfidence,
+          coverage: corners === null ? null : normalizedCoverage(corners),
+          mlWaitMs,
+        });
+      }
       onCapture({
         canonical: await encodeCanvas(frame, "canonical"),
         corners,
@@ -475,28 +639,6 @@ export function CaptureStage({
     },
     [onCapture, path, urls],
   );
-
-  const detect = useLiveDetect({
-    videoRef,
-    containerRef: stageRef,
-    active: mode === "live" && !disabled && !cameraLost,
-    paused: paused || busy,
-  });
-
-  /**
-   * The tip box only appears after the detector has genuinely been stuck, and
-   * disappears the instant it locks on — the timer restarts on every state
-   * change, so a quad that comes and goes never accumulates its way into a
-   * scolding.
-   */
-  React.useEffect(() => {
-    if (mode !== "live" || detect.hasQuad || busy || paused) {
-      setStruggling(false);
-      return;
-    }
-    const timer = window.setTimeout(() => setStruggling(true), TIP_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [mode, detect.hasQuad, busy, paused]);
 
   /**
    * One capture path for the shutter and the frame tap, because they must
@@ -533,9 +675,12 @@ export function CaptureStage({
    * screen — where the user drags the handles — is what protects the crop, which
    * is why a slightly drifted quad beats none at all.
    */
-  const runCapture = React.useCallback(async () => {
+  const runCapture = React.useCallback(async (trigger: CaptureTrigger) => {
     const video = videoRef.current;
     if (video === null || busyRef.current || disabled) return;
+    // Auto-capture only ever fires over an uncovered, live viewfinder.
+    if (trigger === "auto" && (paused || mode !== "live")) return;
+    const tappedAt = performance.now();
     // Both read synchronously, at the tap: everything below this line moves the
     // clock, and the whole point is to keep what the user was looking at.
     const grabbed = detect.takeQuadForCapture();
@@ -567,6 +712,8 @@ export function CaptureStage({
       // null corners = "detect on the frame you are given", inside `emit`.
       let corners: NormalizedQuad | null = null;
       let fallbackCorners: NormalizedQuad | null = null;
+      const stillW = still?.width ?? null;
+      const stillH = still?.height ?? null;
       if (still !== null) {
         try {
           frame = drawStill(still);
@@ -605,10 +752,20 @@ export function CaptureStage({
         liveQuadSurvives(grabbed.ageMs + (Date.now() - startedAt))
           ? grabbed.quad
           : null;
+      const stillUsed = frame !== null;
+      let grab: number | null = null;
+      let grabbedAt: number | null = null;
       if (frame === null) {
         // The preview path: same surface the quad was measured on, so it is the
         // capture's corners outright and no aspect check is owed.
         frame = frameToCanvas(video);
+        if (probing()) {
+          // Right after the draw, so the bench can name the frame it took.
+          grabbedAt = performance.now();
+          previewGrabs += 1;
+          grab = previewGrabs;
+          probe({ type: "grab", t: grabbedAt, id: grab });
+        }
         corners = bufferedQuad;
       } else if (previewAspect !== null) {
         // The still path: its own detection gets first refusal inside `emit`;
@@ -630,7 +787,33 @@ export function CaptureStage({
       } catch {
         gate = null;
       }
-      await emit(frame, corners, gate, "shutter", fallbackCorners);
+      const trace: CaptureTrace | null = probing()
+        ? {
+            t: tappedAt,
+            trigger,
+            stillUsed,
+            stillW,
+            stillH,
+            previewW: video.videoWidth,
+            previewH: video.videoHeight,
+            visible: visibleRect(detect.frameBox, stageRef.current),
+            bufferAgeMs: grabbed?.ageMs ?? null,
+            bufferedSource: grabbed?.source ?? null,
+            bufferedConfidence: grabbed?.confidence ?? null,
+            stillAttempt: lastStillAttempt(),
+            grab,
+            grabbedAt,
+          }
+        : null;
+      await emit(
+        frame,
+        corners,
+        gate,
+        "shutter",
+        fallbackCorners,
+        trace,
+        grabbed?.source ?? null,
+      );
       setAnnouncement(copy.capture.captured(pageNumber));
     } catch (error) {
       setMessage(
@@ -646,11 +829,14 @@ export function CaptureStage({
       busyRef.current = false;
       setBusy(false);
     }
-  }, [copy, detect, disabled, emit, pageNumber]);
+  }, [copy, detect, disabled, emit, mode, pageNumber, paused]);
+  autoFireRef.current = () => {
+    void runCapture("auto");
+  };
 
   const handleShutter = React.useCallback(() => {
     shutterPulse(shutterRef.current);
-    void runCapture();
+    void runCapture("shutter");
   }, [runCapture]);
 
   const handleFile = React.useCallback(
@@ -694,24 +880,43 @@ export function CaptureStage({
     [handleFile],
   );
 
-  // While the quad is on screen it IS the feedback: the blur chip would just
-  // argue with it. Poor light is the one thing the quad cannot tell the user.
-  const showLightWarning = hint === "low_light";
-  const showHint = !detect.hasQuad || showLightWarning;
+  /**
+   * The one hint over the viewfinder (`lib/guidance.ts`), while it is live.
+   * With no live detection on this device (it could not start, or it is too
+   * slow) nothing will find the page: the tap is the way, and the slot says so.
+   */
+  const shownHint: HintKey | null = mode === "live" && !disabled ? (detect.available ? detect.hint : "not-found") : null;
+  /** The low-light hint offers the torch where there is one and it is off. */
+  const offerTorch = shownHint === "low-light" && torchAvailable && !torchOn;
 
   /**
    * The one prose box the frame can show, and never more than one at a time —
-   * a failed capture, then "no more pages", then the stuck-detector tip. They
-   * were three separate boxes under the frame; stacked, they could take a third
-   * of the viewfinder's height away and hand it back a second later.
+   * a failed capture, then "no more pages". They were separate boxes under the
+   * frame; stacked, they could take a third of the viewfinder's height away and
+   * hand it back a second later. (The stuck-detector tip is the hint slot's
+   * "Não achei a folha" now.)
    */
-  const stageNotice =
-    message ??
-    (mode === "live" && disabled
-      ? (disabledReason ?? copy.capture.capacityFallback)
-      : struggling && mode === "live" && !disabled
-        ? copy.capture.tip
-        : null);
+  const stageNotice = message ?? (mode === "live" && disabled ? (disabledReason ?? copy.capture.capacityFallback) : null);
+
+  // What is over the viewfinder right now, as the bench's probe names it
+  // (`lib/probe.ts`) — the hint the markup below renders. Only worked out
+  // while something listens: a host pays one property read.
+  const shownHints = mode === "live" && probing() && shownHint !== null ? shownHint : "";
+  const reportedHintsRef = React.useRef("");
+  React.useEffect(() => {
+    const previous = reportedHintsRef.current;
+    reportedHintsRef.current = shownHints;
+    if (previous === shownHints || !probing()) return;
+    const before = previous === "" ? [] : previous.split(" ");
+    const after = shownHints === "" ? [] : shownHints.split(" ");
+    const t = performance.now();
+    for (const key of before) {
+      if (!after.includes(key)) probe({ type: "hint", t, key, shown: false });
+    }
+    for (const key of after) {
+      if (!before.includes(key)) probe({ type: "hint", t, key, shown: true });
+    }
+  }, [shownHints]);
 
   return (
     <div className={clsx("flex min-h-0 flex-1 flex-col gap-3", className)}>
@@ -720,16 +925,20 @@ export function CaptureStage({
         className="relative min-h-0 flex-1 overflow-hidden rounded-lg bg-shell-sunken"
       >
         {/* Always mounted: the stream is attached to this node before the mode
-            flips to "live", so it must exist from the first render. */}
+            flips to "live", so it must exist from the first render. Kept out
+            of sight by opacity, never by `display: none` or `visibility`:
+            WebKit leaves a camera stream attached to a video it does not
+            render without a frame for good, even once it is shown. */}
         <video
           ref={videoRef}
           playsInline
           muted
           autoPlay
           aria-label={copy.capture.videoLabel}
+          aria-hidden={mode !== "live" || undefined}
           className={clsx(
             "absolute inset-0 h-full w-full object-cover",
-            mode !== "live" && "hidden",
+            mode !== "live" && "pointer-events-none opacity-0",
           )}
         />
 
@@ -741,7 +950,7 @@ export function CaptureStage({
             type="button"
             aria-label={captureLabel}
             onClick={() => {
-              void runCapture();
+              void runCapture("frame");
             }}
             disabled={busy}
             className="absolute inset-0 h-full w-full cursor-pointer"
@@ -777,19 +986,38 @@ export function CaptureStage({
                 anything. Geometry and the fade come from the hook, on the
                 animation frame — never from React. */}
             <g ref={detect.overlay.group} style={{ opacity: 0 }}>
+              {/* Ready: heavier, and green — a saturated one that holds 3:1
+                  on white paper and on the halo, so it never reads as dimmer
+                  than the white it replaces; the weight says it too, for
+                  anyone who cannot tell the colours apart. A change of the
+                  marks themselves, never a new shape round the page. The
+                  countdown (auto-capture) grows along the marks from each
+                  corner, white and heavier than them. No transition under
+                  reduced motion. */}
               <path
                 ref={detect.overlay.bracketsHalo}
                 d=""
-                className="fill-none stroke-night/85"
-                strokeWidth={5.5}
+                className="fill-none stroke-night/85 motion-safe:transition-[stroke-width] motion-safe:duration-150"
+                strokeWidth={detect.ready ? 8.5 : 5.5}
                 strokeLinecap="round"
                 vectorEffect="non-scaling-stroke"
               />
               <path
                 ref={detect.overlay.brackets}
                 d=""
+                className={clsx(
+                  "fill-none motion-safe:transition-[stroke,stroke-width] motion-safe:duration-150",
+                  detect.ready ? "stroke-ready" : "stroke-warm",
+                )}
+                strokeWidth={detect.ready ? 5 : 3.5}
+                strokeLinecap="round"
+                vectorEffect="non-scaling-stroke"
+              />
+              <path
+                ref={detect.overlay.countdown}
+                d=""
                 className="fill-none stroke-warm"
-                strokeWidth={3.5}
+                strokeWidth={6.5}
                 strokeLinecap="round"
                 vectorEffect="non-scaling-stroke"
               />
@@ -798,32 +1026,37 @@ export function CaptureStage({
         )}
 
         {mode === "live" && (
-          // The aiming vocabulary, and nothing else: these chips report what the
-          // detector can see so the user can aim. None of them counts down to
-          // anything — the photo is taken when the user takes it.
-          <div className="pointer-events-none absolute inset-x-0 top-3 flex flex-col items-center gap-1.5 px-3">
-            {detect.hasQuad && (
-              <Chip mono tone="found" className="shadow-sm">
-                {copy.capture.sheetFound}
+          // The hint slot: one hint at a time, in a box of fixed height that
+          // is there whether it holds anything or not — a hint coming or
+          // going never moves anything else (and the frame never resizes).
+          // Polite: a screen reader hears the change after what it is saying.
+          <div
+            role="status"
+            aria-live="polite"
+            className="pointer-events-none absolute inset-x-0 top-3 flex min-h-7 flex-wrap items-center justify-center gap-1.5 px-3"
+          >
+            {shownHint !== null && (
+              <Chip mono tone={HINT_TONE[shownHint]} className="shadow-sm">
+                {hintCopy(copy.capture.hints, shownHint)}
               </Chip>
             )}
-            {showHint && !detect.hasQuad && (
-              <Chip
-                mono
-                tone={struggling ? "alert" : "night"}
-                className="shadow-sm"
+            {offerTorch && (
+              // A 44 px target (the pill inside it is smaller): a near miss
+              // here would land on the frame and take a photo in the dark.
+              // Focus goes to the torch toggle, which stays.
+              <button
+                type="button"
+                onClick={() => {
+                  setTorchOn(true);
+                  torchToggleRef.current?.focus();
+                }}
+                className="pointer-events-auto -my-2 inline-flex min-h-11 items-center px-1"
               >
-                {struggling
-                  ? copy.capture.edgesNotFound
-                  : detect.searching
-                    ? copy.capture.aimAtDocument
-                    : copy.capture.fitWholePage}
-              </Chip>
-            )}
-            {showLightWarning && (
-              <Chip mono tone="warning" className="shadow-sm">
-                {copy.capture.lowLight}
-              </Chip>
+                <span className="inline-flex items-center gap-1 rounded-full bg-shell-ink px-2.5 py-1 font-mono text-2xs leading-none text-shell-on shadow-sm">
+                  <TorchIcon size={14} on />
+                  {copy.capture.torchOffer}
+                </span>
+              </button>
             )}
           </div>
         )}
@@ -920,10 +1153,52 @@ export function CaptureStage({
           )}
 
           {mode === "live" && !disabled && (
-            // On its own pill: this caption is over the camera image, which is
-            // whatever the user is pointing at, so it cannot take its colour
-            // from the shell the way the chrome around it does.
-            <Chip mono tone="night">{copy.capture.tapToCapture}</Chip>
+            // Auto-capture on the left (when offered), the torch on the
+            // right, the caption between them in a middle column that does
+            // not move whether or not either control is there.
+            <div className="grid w-full grid-cols-[2.75rem_1fr_2.75rem] items-center gap-2">
+              {autoCaptureOffered ? (
+                <button
+                  type="button"
+                  aria-label={copy.capture.autoCapture}
+                  aria-pressed={autoCapture}
+                  onClick={toggleAutoCapture}
+                  className={clsx(
+                    "pointer-events-auto flex h-11 w-11 flex-col items-center justify-center gap-0.5 rounded-full font-mono text-4xs leading-none shadow-sm",
+                    autoCapture ? "bg-shell-ink text-shell-on" : "bg-shell-sunken/85 text-shell-ink",
+                  )}
+                >
+                  <AutoCaptureIcon size={16} />
+                  {/* Its state in words too, not only in the fill. */}
+                  <span aria-hidden="true">{autoCapture ? copy.capture.autoCaptureShortOn : copy.capture.autoCaptureShort}</span>
+                </button>
+              ) : (
+                <span aria-hidden="true" />
+              )}
+              <span className="flex justify-center">
+                {/* On its own pill: this caption is over the camera image,
+                    which is whatever the user is pointing at, so it cannot
+                    take its colour from the shell the way the chrome does. */}
+                <Chip mono tone="night">{copy.capture.tapToCapture}</Chip>
+              </span>
+              {torchAvailable ? (
+                <button
+                  ref={torchToggleRef}
+                  type="button"
+                  aria-label={copy.capture.torch}
+                  aria-pressed={torchOn}
+                  onClick={() => setTorchOn((on) => !on)}
+                  className={clsx(
+                    "pointer-events-auto flex h-11 w-11 items-center justify-center rounded-full shadow-sm",
+                    torchOn ? "bg-shell-ink text-shell-on" : "bg-shell-sunken/85 text-shell-ink",
+                  )}
+                >
+                  <TorchIcon size={18} on={torchOn} />
+                </button>
+              ) : (
+                <span aria-hidden="true" />
+              )}
+            </div>
           )}
         </div>
 
@@ -935,7 +1210,6 @@ export function CaptureStage({
         />
       </div>
 
-      <canvas ref={sampleCanvasRef} className="hidden" />
       <canvas ref={gateCanvasRef} className="hidden" />
 
       <LiveRegion message={announcement} />
@@ -985,6 +1259,92 @@ export function CaptureStage({
       </CameraActionBar>
     </div>
   );
+}
+
+/**
+ * Each hint's chip tone: the ones that ask for a change are the quiet night
+ * chip; "Não achei a folha" is the one that wants the user to act (tap), and
+ * low light is a warning.
+ */
+const HINT_TONE: Record<HintKey, "night" | "alert" | "warning"> = {
+  searching: "night",
+  "not-found": "alert",
+  "move-back": "night",
+  "move-closer": "night",
+  "low-light": "warning",
+  glare: "night",
+  "hold-still": "night",
+};
+
+/** A hint's words. */
+function hintCopy(hints: ReturnType<typeof useCopy>["capture"]["hints"], key: HintKey): string {
+  switch (key) {
+    case "searching":
+      return hints.searching;
+    case "not-found":
+      return hints.notFound;
+    case "move-back":
+      return hints.moveBack;
+    case "move-closer":
+      return hints.moveCloser;
+    case "low-light":
+      return hints.lowLight;
+    case "glare":
+      return hints.glare;
+    case "hold-still":
+      return hints.holdStill;
+  }
+}
+
+/** The track advertises a torch (`getCapabilities`, where the browser has it). */
+function hasTorch(track: MediaStreamTrack | null): boolean {
+  if (track === null || typeof track.getCapabilities !== "function") return false;
+  try {
+    return (track.getCapabilities() as MediaTrackCapabilities & { torch?: boolean }).torch === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Switch the torch; a refusal (or a browser without the constraint) costs
+ * only the light. Answers whether the torch is now as asked — read back from
+ * the track's settings where the browser reports them.
+ */
+async function applyTorch(track: MediaStreamTrack, on: boolean): Promise<boolean> {
+  if (track.readyState !== "live" || typeof track.applyConstraints !== "function") return !on;
+  try {
+    await track.applyConstraints({ advanced: [{ torch: on } as MediaTrackConstraintSet] });
+  } catch {
+    return !on;
+  }
+  try {
+    const lit = (track.getSettings() as MediaTrackSettings & { torch?: boolean }).torch;
+    return lit === undefined || lit === on;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The part of the preview the user could actually see — the object-cover crop —
+ * as fractions of the preview frame, for the probe. `null` before the frame box
+ * has been measured.
+ */
+function visibleRect(
+  box: FrameBox | null,
+  stage: HTMLElement | null,
+): CaptureProbe["visible"] {
+  if (box === null || stage === null || box.width <= 0 || box.height <= 0) {
+    return null;
+  }
+  const rect = stage.getBoundingClientRect();
+  return {
+    x: -box.left / box.width,
+    y: -box.top / box.height,
+    width: rect.width / box.width,
+    height: rect.height / box.height,
+  };
 }
 
 /**

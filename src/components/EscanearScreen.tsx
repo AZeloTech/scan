@@ -5,6 +5,7 @@ import { useScanStore, useStore } from "@/hooks/useScanStore";
 import { useFlowNavigation } from "@/hooks/useFlowNavigation";
 import { useScanRuntime } from "@/hooks/useScanRuntime";
 import { popIn } from "@/lib/motion";
+import { holdDetectLane } from "@/lib/detect-lane";
 import type { PageTile } from "@/lib/page-tiles";
 import type { Capture } from "@/lib/capture-intake";
 import { AppFrame, FrameStep } from "@/components/AppFrame";
@@ -100,6 +101,18 @@ export function EscanearScreen() {
       cancelled = true;
     };
   }, []);
+
+  /**
+   * Where detection will run, decided as this screen mounts — while the
+   * permission primer is still being read. On the worker lane that also
+   * starts the corner model's download and compile, in the worker, so the
+   * viewfinder opens onto a warm model instead of seconds of the classical
+   * fallback; the main thread pays nothing for it. Once per page while a
+   * scanner is on it (`holdDetectLane`: a remount within a minute gets the
+   * warm worker; after that its memory is given back).
+   */
+  const urls = runtime.urls;
+  React.useEffect(() => holdDetectLane(urls), [urls]);
 
   const pageCount = tiles.length;
   // The cap is the host's, not ours: a host that accepts six pages should
@@ -266,6 +279,11 @@ export function EscanearScreen() {
             useCamera={runtime.intake.camera && choice !== "gallery"}
             disabled={atCapacity}
             disabledReason={copy.capture.atCapacity(maxPages)}
+            autoCaptureOffered={runtime.autoCapture.offered}
+            autoCaptureOn={runtime.autoCapture.chosen.current}
+            onAutoCaptureChange={(on) => {
+              runtime.autoCapture.chosen.current = on;
+            }}
             rightAction={
               <CameraPill
                 // Not filled while a sheet is flagged: carrying on is allowed

@@ -70,6 +70,12 @@ const config: Config = {
         sand: "#E6E2D5",
         /** Sage read on a dark surface — chips and rules over the viewfinder. */
         mist: "#8FAB9B",
+        /**
+         * The viewfinder's "ready" brackets: a saturated green that holds 3:1
+         * against white paper (3.3:1) and against the night halo under it
+         * (5.3:1), so the cue reads as green, and as brighter, on either.
+         */
+        ready: "#1E9E4A",
         /** The secondary CTA's outline. */
         moss: "#B0C4B7",
         dew: "#C9D8CE",

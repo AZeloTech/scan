@@ -57,6 +57,27 @@ export function CameraIcon(props: IconProps) {
   );
 }
 
+/** The phone's torch: a flashlight, its beam drawn only while it is on. */
+export function TorchIcon({ on = false, ...props }: IconProps & { on?: boolean }) {
+  return (
+    <Glyph {...props}>
+      <path d="M9 3h6v3.5l-1.5 3v10A1.5 1.5 0 0 1 12 21a1.5 1.5 0 0 1-1.5-1.5v-10L9 6.5V3Z" />
+      <path d="M9 6.5h6" />
+      {on && <path d="M4.5 5.5 6.5 7M19.5 5.5 17.5 7M3.5 10.5h2M18.5 10.5h2" />}
+    </Glyph>
+  );
+}
+
+/** Auto-capture: the shutter with a clock hand — the photo that takes itself. */
+export function AutoCaptureIcon(props: IconProps) {
+  return (
+    <Glyph {...props}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </Glyph>
+  );
+}
+
 /** The gallery — a framed picture, distinct from the camera that takes one. */
 export function ImageIcon(props: IconProps) {
   return (

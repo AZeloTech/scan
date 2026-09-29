@@ -51,7 +51,7 @@ the person holding the phone — can make.
 
 | | |
 |---|---|
-| **Capture** | The camera opens, a neural corner detector finds the page in the frame, and a person confirms or drags the four corners. No camera? It falls back to picking image files on its own. |
+| **Capture** | The camera opens, a neural corner detector finds the page in the frame and guides the aim — one short hint at a time ("Aproxime", "Afaste um pouco", "Pouca luz", "Reflexo — incline o celular", "Segure firme"), a ready cue on the corner brackets, the torch where the phone has one — and a person confirms or drags the four corners. The shutter always works. Auto-capture (taking the photo once the page has been ready for a moment, still through the corner confirmation) is experimental and offered only when the host sets `experimentalAutoCapture`. No camera? It falls back to picking image files on its own. |
 | **Flatten** | A Rust/WebAssembly dewarp straightens curved paper — the bend of a page held in one hand — and falls back gracefully when the geometry is not trustworthy. |
 | **Review** | Pages as thumbnails: reorder, retake, remove. Blur and small-text warnings before it is too late to re-shoot. |
 | **Build** | One PDF, assembled in the browser. Given `maxBytes`, quality steps down a fixed ladder until the exact size fits — and refuses rather than exceed it. |
@@ -102,7 +102,11 @@ function ScanSheet({ onDone, onClose }) {
 ```
 
 `ScanFlow` fills whatever box you give it and expects to be full-screen on a
-phone. It does not render a backdrop, trap focus or handle the back button, and
+phone — give it a box the size of the viewport (`position: fixed; inset: 0`,
+as in the consumer smoke test), not a smaller panel. The app shell's height is
+`100svh` with a `100vh` fallback, not a percentage of its container, so a
+box smaller than the viewport will not shrink it to fit; it will overflow that
+box instead. It does not render a backdrop, trap focus or handle the back button, and
 it never pushes a history entry — not even for its own page preview, which
 closes through its own controls and Escape. Those belong to your dialog,
 because only you know your navigation. Inside, it
@@ -152,6 +156,7 @@ Full types ship with the package (`ScanFlowProps`). In short:
 | `onPagesChange` | how many pages are held, so you can ask before discarding. |
 | `onEvent` | step, capture, quality, size and error events. Numbers and enums only — never image data, never a file name. Safe to forward straight to analytics. |
 | `className` | applied to the library's root element, for layout only. |
+| `experimentalAutoCapture` | **experimental**, default `false`. Offers an auto-capture toggle on the capture screen (off in every new flow): switched on, the page is taken by itself once framed, sharp and still for about half a second, once per page, through the confirm screen. It still fires on some page-less scenes on the bench (a screen showing a page, two overlapping sheets), so leave it off for people who will not look at the confirm screen. |
 
 ### Theming
 
@@ -187,11 +192,12 @@ browser:
 import { selfTest } from "@azelotech/scan/self-test";
 
 const r = await selfTest({ assetBaseUrl: "/scan-assets" });
-// { mlReady: true, pdfBytes: 82259, pages: 1, pdfImportReady: null, ms: 1840 }
+// { mlReady: true, detectWorker: "worker", pdfBytes: 82259, pages: 1, pdfImportReady: null, ms: 1840 }
 ```
 
-It loads the model, runs one inference and builds a PDF from a drawn
-placeholder. Run it once behind a feature flag after wiring `assetBaseUrl` for
+It loads the model, runs one inference, starts the detection worker once
+(`detectWorker` says `"worker"`, or why it could not — see the CSP note in the
+host checklist) and builds a PDF from a drawn placeholder. Run it once behind a feature flag after wiring `assetBaseUrl` for
 the first time, and get a plain answer instead of a mystery 404 in somebody's
 console three weeks later.
 
@@ -208,6 +214,19 @@ connect-src 'self'
 
 `connect-src 'self'` is enough because nothing off-origin is ever fetched. If a
 request to another host appears, that is a bug — please report it.
+
+**Workers obey their own response's CSP.** Page detection runs in a module
+worker served from your asset directory (`workers/detect.worker.js`), and a
+worker is governed by the `Content-Security-Policy` header on *its own* script
+response, not by the page's. If your server sends CSP headers on the asset
+files, the ones on `<assetBaseUrl>/workers/*.js` must allow at least
+`script-src 'self' 'wasm-unsafe-eval'` and `connect-src 'self'` (or send no CSP
+there at all). A worker that cannot start — or cannot compile WebAssembly
+under its own CSP — is not an error: the scanner detects on the main thread
+instead, exactly as it did before the worker existed — it just costs the page
+more. `selfTest()` reports which (`detectWorker`: `"worker"`, or the reason,
+e.g. `"no-wasm-in-worker"`). The worker lives while a scanner is mounted and
+is terminated a minute after the last one unmounts.
 
 One place this is kept rather than given: the vendored scanic runtime, left
 unmodified, falls back to a jsDelivr CDN for its model and ONNX Runtime files
@@ -226,6 +245,17 @@ does not.
 **Browsers.** Chrome/Edge 91+, Firefox 90+, Safari 16+. Safari 15 works if your
 CSP includes `'unsafe-eval'`. Where there is no camera, the component falls back
 to the file intake on its own.
+
+**The torch and haptics.** The torch toggle appears only when the camera track
+advertises `torch` in `getCapabilities()` (Chrome on Android does; Safari on
+iOS does not, so an iPhone shows no toggle), and it is switched with
+`applyConstraints`. If your page sets a `Permissions-Policy`, nothing extra is
+needed for either. The ready cue's haptic tick uses `navigator.vibrate`, which
+iOS does not have — there it is silently skipped (the cue is also announced
+once per page to screen readers). Auto-capture is experimental: its toggle
+appears only with `experimentalAutoCapture`, it is off in every new flow, the
+flow keeps the choice while it is open, and the library writes nothing to
+storage for it. Retakes are always manual.
 
 **React.** 18.3 or 19, StrictMode-safe.
 
@@ -283,6 +313,20 @@ any off-origin request or any 404.
 > numbers or addresses. Fixtures are generated synthetically by scripts in this
 > repository and recorded in `fixtures/PROVENANCE.md`. The guard runs before
 > every commit and in CI, and has no override flag.
+
+`npm run bench` runs the detection bench: a seeded scene emulator renders
+documents on desks in headless Chromium, the library's own detectors run on
+them, and every answer is scored against exact ground truth into `.bench-out/`
+(git-ignored). `npm run bench -- --suite session` does the same for the whole
+flow: the real `<ScanFlow>` on an emulated phone, fed by an emulated camera
+watching a document being scanned; `npm run bench:play` opens the same flow in
+a playground with a live HUD, and `npm run bench:webkit` plays one session end
+to end in WebKit. With `SCAN_REAL_MEDIA` pointing at real photos
+and clips **outside** the repository, `--suite real-stills` and
+`--suite real-video` score them too, and `npm run bench:label` serves a page
+for labelling their corners by hand. Nothing it renders is committed, and
+anything derived from real photos stays outside the repository, in
+`~/.cache/scan-bench/`. See [`scripts/bench/README.md`](scripts/bench/README.md).
 
 If `npm run smoke` cannot download the Chromium build Playwright expects, point
 it at a browser you already have:
