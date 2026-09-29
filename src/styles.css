@@ -260,4 +260,22 @@
     height: 100svh;
     height: var(--app-h, 100svh);
   }
+
+  /*
+   * The bottom action bars' clearance — `AppFrame`'s footer, the confirm-
+   * corners buttons and the retake sheet all render this class by name.
+   *
+   * Like `.app-h` it came over from the source app's `globals.css` as a class
+   * name without its rule, and nothing failed: the bars simply sat flush on
+   * the bottom edge of the screen, "Usar a foto inteira" and the step-2
+   * primary with 0 and 4 px under them. On an iPhone (a host page with
+   * `viewport-fit=cover`) that edge is under the home indicator, and on
+   * Android's edge-to-edge Chrome under the gesture bar, so the last button
+   * read as cut off. The floor is the capture screen's own 14 px, and the
+   * inset wins wherever the phone reports one.
+   */
+  .scan-root .safe-bottom {
+    padding-bottom: 14px;
+    padding-bottom: max(env(safe-area-inset-bottom, 0px), 14px);
+  }
 }

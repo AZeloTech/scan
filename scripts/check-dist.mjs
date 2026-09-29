@@ -14,7 +14,7 @@
 //      assets/ names the global a listener would be installed on, no emitted
 //      script still reads the build switch at run time, and the hook's module
 //      is not there in any form (code, declarations, maps).
-//   7. The compiled stylesheet defines `.app-h`. Its classes are hand-written
+//   7. The compiled stylesheet defines `.app-h` and `.safe-bottom`. Its classes are hand-written
 //      and referenced by name (`AppFrame`, `DesktopFlow`), so nothing at build
 //      time checks that a rule exists for them the way Tailwind's own
 //      utilities are guaranteed to; a class that is used but never styled
@@ -186,7 +186,7 @@ for (const file of published) {
   }
 }
 
-// 7. `dist/styles.css` defines `.app-h`.
+// 7. `dist/styles.css` defines `.app-h` and `.safe-bottom`.
 //
 // `AppFrame` and `DesktopFlow` (src/components) render this class by name,
 // but it is hand-written CSS, not a Tailwind utility, so nothing at build
@@ -195,23 +195,43 @@ for (const file of published) {
 // compiles clean and ships broken: the class shows up in the DOM, no rule
 // gives it a height, and the viewfinder measures 0px tall in a plain host
 // page. See src/styles.css for the rule itself.
+//
+// The same holds for `.safe-bottom`, the bottom action bars' clearance
+// (`AppFrame`, `ConfirmCornersScreen`, `RetakeSheet`): it shipped without a
+// rule once, and the bars sat flush on the screen's bottom edge — under an
+// iPhone's home indicator — with nothing failing anywhere.
+const HAND_WRITTEN = [
+  {
+    className: "app-h",
+    property: "height",
+    why:
+      "AppFrame and DesktopFlow render this class but nothing styles it, so the viewfinder " +
+      "measures 0px tall in a plain host page",
+  },
+  {
+    className: "safe-bottom",
+    property: "padding-bottom",
+    why:
+      "AppFrame, ConfirmCornersScreen and RetakeSheet render this class but nothing styles it, " +
+      "so their bottom buttons sit flush on the screen edge, under the home indicator",
+  },
+];
 if (existsSync(STYLES)) {
   const { default: postcss } = await import("postcss");
   const styleRoot = postcss.parse(readFileSync(STYLES, "utf8"));
-  let hasAppHeightRule = false;
-  styleRoot.walkRules((rule) => {
-    if (hasAppHeightRule) return;
-    const targetsAppH = rule.selectors.some((part) => /(^|\s)\.app-h(?![\w-])/.test(part.trim()));
-    if (!targetsAppH) return;
-    rule.walkDecls("height", () => {
-      hasAppHeightRule = true;
+  for (const { className, property, why } of HAND_WRITTEN) {
+    const selector = new RegExp(`(^|\\s)\\.${className}(?![\\w-])`);
+    let found = false;
+    styleRoot.walkRules((rule) => {
+      if (found) return;
+      if (!rule.selectors.some((part) => selector.test(part.trim()))) return;
+      rule.walkDecls(property, () => {
+        found = true;
+      });
     });
-  });
-  if (!hasAppHeightRule) {
-    problems.push(
-      "dist/styles.css: no height rule for .app-h — AppFrame and DesktopFlow render this class " +
-        "but nothing styles it, so the viewfinder measures 0px tall in a plain host page. See src/styles.css."
-    );
+    if (!found) {
+      problems.push(`dist/styles.css: no ${property} rule for .${className} — ${why}. See src/styles.css.`);
+    }
   }
 }
 

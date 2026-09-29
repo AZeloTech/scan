@@ -187,6 +187,14 @@ land in 0.1.0 itself; each is a behaviour a host can observe.
   non-fullscreen container will get a shell sized to the browser viewport
   rather than that container (`src/styles.css`). The dist guard now fails the
   build if the compiled stylesheet lacks a height rule for `.app-h`.
+- **`.safe-bottom` was undefined too.** The bottom action bars (`AppFrame`'s
+  footer, the confirm-corners buttons, the retake sheet) render it, and no rule
+  answered it, so they sat flush on the bottom edge — 0 px under "Usar a foto
+  inteira", 4 px under step 2's primary — which on a phone with a home
+  indicator or gesture bar (a host page with `viewport-fit=cover`) put the
+  last button under it and read as cut off. `.scan-root .safe-bottom` now pads
+  `max(env(safe-area-inset-bottom), 14px)`, the capture screen's own floor, and
+  the dist guard fails the build if the rule goes missing again.
 - **Step 2's primary button is "Gerar PDF"** ("Generate PDF"), and it starts
   the file. It used to read "Ir para o passo 3" and open a form (marking grid,
   name, prévia, a second button) that most people left as it was; its defaults
