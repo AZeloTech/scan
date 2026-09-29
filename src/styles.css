@@ -47,7 +47,7 @@
     --scan-surface: #fafaf7;
     --scan-ink: #1b1f1a;
     --scan-ink-muted: #63645b;
-    --scan-accent: #5c7f6b;
+    --scan-accent: #74777c;
     --scan-accent-ink: #fafaf7;
     --scan-radius: 14px;
 
@@ -193,7 +193,7 @@
    * surface (3.4:1), so the ring does not need to know which one it is on.
    */
   .scan-root :focus-visible {
-    outline: 2px solid #5c7f6b;
+    outline: 2px solid #74777c;
     outline-offset: 2px;
   }
 

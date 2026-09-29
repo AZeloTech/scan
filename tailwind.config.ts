@@ -58,33 +58,35 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        sage: "#5C7F6B",
-        /** Link and "ótima" green — AA on `warm` and `cream`. */
-        pine: "#3E6250",
-        leaf: "#2D4A3A",
-        deep: "#1F3128",
+        sage: "#74777C",
+        /** Link and "ótima" graphite — AA on `warm` and `cream`. */
+        pine: "#585B5E",
+        leaf: "#424447",
+        deep: "#2C2D2F",
         warm: "#FAFAF7",
         cream: "#F0EDE5",
         /** The sheet of paper itself: previews, page stacks, thumbnails. */
         paper: "#F4F1E8",
         sand: "#E6E2D5",
         /** Sage read on a dark surface — chips and rules over the viewfinder. */
-        mist: "#8FAB9B",
+        mist: "#A2A5A8",
         /**
-         * The viewfinder's "ready" brackets: a saturated green that holds 3:1
-         * against white paper (3.3:1) and against the night halo under it
-         * (5.3:1), so the cue reads as green, and as brighter, on either.
+         * The viewfinder's "ready" brackets: graphite, drawn on a light
+         * (`warm`) halo where the idle marks are white on a `night` one. The
+         * core holds 12.7:1 on white paper and 12.2:1 on its halo; the halo
+         * holds 17.5:1 against a dark scene, so the inverted, heavier mark
+         * reads on either.
          */
-        ready: "#1E9E4A",
+        ready: "#2F3338",
         /** The secondary CTA's outline. */
-        moss: "#B0C4B7",
-        dew: "#C9D8CE",
+        moss: "#BEBFC2",
+        dew: "#D3D4D6",
         /** The pale sage fill: step-trail track, notes, category chips. */
-        frost: "#DDE5DC",
+        frost: "#E2E3E4",
         /** Paler and warmer than `frost` — the canvas's welcome-card fill. */
-        mint: "#E6EFE6",
+        mint: "#ECEDED",
         /** The rule around a `mint` card — one step darker than the fill. */
-        "mint-line": "#CFE0D3",
+        "mint-line": "#DBDCDD",
         /**
          * The problem row's own accent: chevron, icons and the ✎ of a page the
          * app could not read. Deeper than `peach` (4.0:1 on `peach-bg`), so it
@@ -160,9 +162,9 @@ const config: Config = {
           deep: "#6E4F1B",
         },
         ok: {
-          DEFAULT: "#5C7F6B",
-          bg: "#E3EAE2",
-          ink: "#3E5B4A",
+          DEFAULT: "#74777C",
+          bg: "#E7E8E9",
+          ink: "#535558",
         },
         destroyed: "#C0472E",
         border: "#E2DECF",
@@ -182,9 +184,9 @@ const config: Config = {
           /** The app background, a hair darker than `warm` — the desk itself. */
           bg: "#ECEADF",
           /** The dashed rule around the dropzone. */
-          dash: "#C6D2C4",
+          dash: "#CDCFD0",
           /** The outline button's border, one step warmer than `moss`. */
-          edge: "#CDD6C9",
+          edge: "#D2D3D5",
           /** Body copy inside the desktop cards. */
           body: "#3A3A35",
           /** The quieter sentence — the lead, the status line. */
@@ -192,9 +194,9 @@ const config: Config = {
           /** Mono micro-labels that carry no state: counters, file sizes. */
           faint: "#9A9A90",
           /** The ghost numerals of the empty-state explainer. */
-          ghost: "#D5DCD2",
+          ghost: "#D9DADB",
           /** The viewer canvas, where the page is the only lit thing. */
-          canvas: "#22271D",
+          canvas: "#242527",
           /** The one warning ink of the desktop mode ("bordas não encontradas"). */
           warn: "#A5613A",
           /** Its hairline — the `apagar` pill's border. */

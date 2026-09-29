@@ -246,5 +246,5 @@ export const DesktopCornerEditor = React.forwardRef<
 });
 
 /** The design's own handle values — see the component docblock. */
-const HANDLE_RING = "#8FAB9B";
+const HANDLE_RING = "#A2A5A8";
 const HANDLE_FILL = "#FAFAF7";

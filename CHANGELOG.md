@@ -87,8 +87,10 @@ freezes at 1.0.
     and stays at least a second. They replace the old chips ("folha
     encontrada", "aponte para o documento", "encaixe a página inteira", "não
     achei as bordas") and the stuck-detector tip box.
-  - **A ready cue on the brackets**: heavier and a saturated green (3:1 on
-    white paper and on the dark halo) once the page is found, framed, sharp
+  - **A ready cue on the brackets**: heavier and inverted — a graphite mark
+    (`ready`, #2F3338) on a light halo where the idle marks are white on a
+    dark one (graphite 12.7:1 on white paper and 12.2:1 on its halo; the halo
+    17.5:1 against a dark scene) — once the page is found, framed, sharp
     and still, on a detection pass of a recent frame that found it where the
     brackets are. It rides out a wobble shorter than 300 ms and drops at once
     when the page is lost or another hint is owed. It comes on only once the
@@ -106,7 +108,7 @@ freezes at 1.0.
     off in every new flow; the flow keeps the choice while it is open and
     nothing is written to storage. Retakes are always manual. Switched on,
     once the ready conditions have held half a second — a countdown grows
-    along the brackets — and a detection pass on a frame from within that
+    along the brackets as a white line inside the graphite marks — and a detection pass on a frame from within that
     half second found the page where it was, and a last look at the camera
     at that instant shows the same scene, the photo is taken through exactly
     the path a tap takes (still photo, refinement, the confirm-corners
@@ -118,6 +120,12 @@ freezes at 1.0.
     frame tap work in every state. It is experimental because it has not met
     its bar: on the bench it still fires on a screen showing a page and on
     two overlapping sheets the detector takes as one (see the bench README).
+- The visual style is graphite rather than green: every green token (`sage`,
+  `pine`, `leaf`, `deep`, `mist`, `moss`, `dew`, `frost`, `mint`,
+  `mint-line`, `ok.*`, the desktop greens, the loupe ring, the shell ramp and
+  its default, now `grafite` #454649) is swapped for a cool grey of the same
+  WCAG luminance, so every contrast pairing and floor holds exactly as
+  before. Token names are unchanged.
 - The live loop lets a page that was slid away go sooner: one reading that
   finds no paper where the page was is enough when the scene moved or the
   model sees a quad elsewhere, and the overlay fades out in 100 ms (instead

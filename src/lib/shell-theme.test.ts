@@ -98,12 +98,12 @@ test("the ramp runs carvão to papel and contains the default", () => {
 test("polarity follows readability, not a fixed luminance cut", () => {
   // The brief's `luminance > 0.55` cut called this one dark, which put warm
   // text on it at 2.4:1. It is light.
-  assert.equal(deriveShellTheme("#8FAB9B").light, true);
+  assert.equal(deriveShellTheme("#A2A5A8").light, true);
   assert.equal(deriveShellTheme("#12160F").light, false);
   assert.equal(deriveShellTheme(DEFAULT_SHELL).light, false);
 });
 
 test("the impossible shell is not in the ramp", () => {
-  // Neither brand ink clears 4.5:1 on #5C7F6B — it is the crossover.
-  assert.ok(!SHELL_RAMP.some((step) => step.hex === "#5C7F6B"));
+  // Neither brand ink clears 4.5:1 on #74777C — it is the crossover.
+  assert.ok(!SHELL_RAMP.some((step) => step.hex === "#74777C"));
 });

@@ -365,7 +365,7 @@ function PreviewRow({ label, value }: { label: string; value: string }) {
 function FirstPage({ tile }: { tile: PageTile | null }) {
   const url = useBlobUrl(tile?.page.thumb ?? null);
   return (
-    <span className="flex w-[120px] items-center justify-center overflow-hidden rounded-[3px] border border-border bg-white shadow-[0_12px_24px_-16px_rgba(31,49,40,.5)]">
+    <span className="flex w-[120px] items-center justify-center overflow-hidden rounded-[3px] border border-border bg-white shadow-[0_12px_24px_-16px_rgba(44,45,47,.5)]">
       {url === null ? (
         <span className="flex aspect-[210/297] w-full items-center justify-center">
           <SpinnerIcon size={18} className="text-mist" />

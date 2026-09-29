@@ -42,7 +42,7 @@ export type CorrectionTileState =
  * `mist` and `peach-soft` are fixed tokens, so their tints may carry an opacity
  * modifier; the border and the text take the **shell's** own accent and warn
  * values, which `lib/shell-theme.ts` guarantees against whatever surface colour
- * the user picked — a fixed `#8fab9b` label would be legible on the design's
+ * the user picked — a fixed `#a2a5a8` label would be legible on the design's
  * green and nowhere else on the ramp.
  */
 const TILE_STATE_CLASSES: Record<CorrectionTileState, string> = {

@@ -986,18 +986,26 @@ export function CaptureStage({
                 anything. Geometry and the fade come from the hook, on the
                 animation frame — never from React. */}
             <g ref={detect.overlay.group} style={{ opacity: 0 }}>
-              {/* Ready: heavier, and green — a saturated one that holds 3:1
-                  on white paper and on the halo, so it never reads as dimmer
-                  than the white it replaces; the weight says it too, for
-                  anyone who cannot tell the colours apart. A change of the
+              {/* Ready: heavier, and inverted — a graphite mark on a light
+                  halo where idle is a white mark on a dark one. Graphite
+                  alone would vanish on the dark halo (1.4:1), so the halo
+                  flips with it: the graphite core holds 12.7:1 on white
+                  paper and 12.2:1 on its own light halo, and the light halo
+                  holds 17.5:1 against a dark scene. The weight says it too,
+                  for anyone who cannot tell the two apart. A change of the
                   marks themselves, never a new shape round the page. The
-                  countdown (auto-capture) grows along the marks from each
-                  corner, white and heavier than them. No transition under
-                  reduced motion. */}
+                  countdown (auto-capture) only runs while ready: it grows
+                  along the marks from each corner as a white line inside the
+                  graphite core (12.2:1 against it) — a white mark heavier
+                  than the core would sink into the light halo. No
+                  transition under reduced motion. */}
               <path
                 ref={detect.overlay.bracketsHalo}
                 d=""
-                className="fill-none stroke-night/85 motion-safe:transition-[stroke-width] motion-safe:duration-150"
+                className={clsx(
+                  "fill-none motion-safe:transition-[stroke,stroke-width] motion-safe:duration-150",
+                  detect.ready ? "stroke-warm/90" : "stroke-night/85",
+                )}
                 strokeWidth={detect.ready ? 8.5 : 5.5}
                 strokeLinecap="round"
                 vectorEffect="non-scaling-stroke"
@@ -1017,7 +1025,7 @@ export function CaptureStage({
                 ref={detect.overlay.countdown}
                 d=""
                 className="fill-none stroke-warm"
-                strokeWidth={6.5}
+                strokeWidth={2.5}
                 strokeLinecap="round"
                 vectorEffect="non-scaling-stroke"
               />
