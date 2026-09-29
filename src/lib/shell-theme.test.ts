@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -6,6 +7,7 @@ import {
   DEFAULT_SHELL,
   deriveShellTheme,
   SHELL_RAMP,
+  SHELL_ROOT_STYLE,
   type ShellTheme,
 } from "./shell-theme.ts";
 
@@ -106,4 +108,21 @@ test("polarity follows readability, not a fixed luminance cut", () => {
 test("the impossible shell is not in the ramp", () => {
   // Neither brand ink clears 4.5:1 on #74777C — it is the crossover.
   assert.ok(!SHELL_RAMP.some((step) => step.hex === "#74777C"));
+});
+
+/**
+ * The `shell-*` Tailwind colours are `var(--shell…)`, and the library is the
+ * only thing that can set those variables. For a whole branch nothing did (the
+ * provider that wrote them was never mounted), so `bg-shell` was transparent
+ * and the confirm-corners screen lay see-through over the live camera.
+ */
+test("every shell variable Tailwind reads is set on the ScanFlow root", () => {
+  const config = readFileSync(new URL("../../tailwind.config.ts", import.meta.url), "utf8");
+  const read = new Set([...config.matchAll(/var\((--shell[\w-]*)\)/g)].map((m) => m[1]));
+  assert.ok(read.size > 0, "tailwind.config.ts reads no --shell variables");
+  for (const name of read) {
+    assert.match(SHELL_ROOT_STYLE[name] ?? "", /^#[0-9A-Fa-f]{6}$/, `${name} is not set`);
+  }
+  const scanFlow = readFileSync(new URL("../ScanFlow.tsx", import.meta.url), "utf8");
+  assert.match(scanFlow, /style=\{SHELL_ROOT_STYLE/, "ScanFlow's root does not apply SHELL_ROOT_STYLE");
 });

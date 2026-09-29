@@ -18,7 +18,7 @@
  * keep meaning what it meant before this component was mounted.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import clsx from "clsx";
 
 import type {
@@ -35,6 +35,7 @@ import { ScanRuntimeProvider, type ScanRuntime } from "./hooks/useScanRuntime";
 import { FlowScreens } from "./FlowScreens";
 import { LangProvider } from "./components/I18n";
 import { createExitGate, type ExitGate } from "./lib/exit-gate";
+import { SHELL_ROOT_STYLE } from "./lib/shell-theme";
 
 const DEFAULT_MAX_PAGES = 20;
 
@@ -165,7 +166,14 @@ export function ScanFlow(props: ScanFlowProps) {
   const handleStep = useCallback((step: ScanStep) => emit({ name: "step", step }), [emit]);
 
   return (
-    <div className={clsx("scan-root", className)} data-scan-lang={lang} lang={lang}>
+    <div
+      className={clsx("scan-root", className)}
+      // The camera shell's palette (`bg-shell`, `text-shell-ink`, …) — see
+      // SHELL_ROOT_STYLE. Nothing else sets these variables.
+      style={SHELL_ROOT_STYLE as CSSProperties}
+      data-scan-lang={lang}
+      lang={lang}
+    >
       <LangProvider lang={lang === "en-US" ? "en" : "pt"}>
         <ScanRuntimeProvider value={runtime}>
           <ScanStoreProvider

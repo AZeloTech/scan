@@ -267,3 +267,18 @@ export function shellCssVars(theme: ShellTheme): Record<string, string> {
     "--shell-warnline": theme.warnLine,
   };
 }
+
+/**
+ * The shipped shell's variables, as the inline style of the `.scan-root`
+ * element. Custom properties inherit through the DOM, not through layout, so
+ * every camera screen — the `position: fixed` confirm-corners screen and the
+ * sheets included — resolves `bg-shell`, `text-shell-ink`, … from here without
+ * the library writing to the host's `<html>`.
+ *
+ * Without it every `shell-*` colour is `var(--shell…)` of nothing: the
+ * confirm-corners screen paints no background and lies transparently over the
+ * live capture screen.
+ */
+export const SHELL_ROOT_STYLE: Readonly<Record<string, string>> = Object.freeze(
+  shellCssVars(deriveShellTheme(DEFAULT_SHELL))
+);
