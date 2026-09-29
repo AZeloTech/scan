@@ -665,6 +665,7 @@ test("visible region: holds, a false \"Afaste\", ready outside the region, auto 
   assert.equal(h.reached, true);
   assert.equal(h.visibleMs, 2000);
   assert.equal(h.hiddenMs, 2000);
+  assert.equal(h.clearMs, 2000);
   assert.equal(h.moveBackFalseMs, 500);
   assert.equal(h.moveBackRightMs, 1000);
   // Cue samples at 1.5 s (visible) and 2.5 s (a corner hidden): one violation, no onset violation.

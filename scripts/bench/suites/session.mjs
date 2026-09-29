@@ -247,7 +247,7 @@ function render(results) {
           "its object-fit, clipped by the stage and the viewport, minus the layout's declared opaque bands; a build that declares none is the crop alone). " +
           "**Holds**: framed holds (the ready windows where a script has them, else the default holds) where the ready cue came on / all; " +
           "**page visible**: share of hold time with all four corners inside the region; **Afaste false**: \"Afaste um pouco\" shown while the whole " +
-          "page was visible, over the time it was; **Afaste right**: shown while it was not, over that time. **Ready**: cue-on samples (onsets) with a " +
+          "page was clearly visible (every corner ≥ 3 % of the region in — the app's own exit threshold), over the time it was; **Afaste right**: shown while it was not, over that time. **Ready**: cue-on samples (onsets) with a " +
           "corner outside the region / all. **Auto**: automatic captures whose page has a corner outside the image / flagged of those / all fires. " +
           "**Area**: the visible region as a share of the viewport (median).",
       );
@@ -257,7 +257,7 @@ function render(results) {
       const bySession = new Map();
       for (const row of seen) {
         const acc = bySession.get(row.session) ?? {
-          holds: 0, reached: 0, visibleMs: 0, hiddenMs: 0, falseMs: 0, rightMs: 0,
+          holds: 0, reached: 0, visibleMs: 0, hiddenMs: 0, clearMs: 0, falseMs: 0, rightMs: 0,
           samples: 0, violations: 0, onsets: 0, onsetViolations: 0, fires: 0, outside: 0, flagged: 0, areas: [],
         };
         const v = row.score.visibility;
@@ -266,6 +266,7 @@ function render(results) {
           if (h.reached) acc.reached += 1;
           acc.visibleMs += h.visibleMs;
           acc.hiddenMs += h.hiddenMs;
+          acc.clearMs += h.clearMs ?? h.visibleMs;
           acc.falseMs += h.moveBackFalseMs;
           acc.rightMs += h.moveBackRightMs;
         }
@@ -284,7 +285,7 @@ function render(results) {
         const areas = a.areas.sort((x, y) => x - y);
         out.push(
           `| ${session} | ${a.holds === 0 ? "–" : `${a.reached} / ${a.holds}`} | ${pct(share(a.visibleMs, a.visibleMs + a.hiddenMs), 0)} | ` +
-            `${pct(share(a.falseMs, a.visibleMs), 0)} | ${pct(share(a.rightMs, a.hiddenMs), 0)} | ${a.violations} / ${a.samples} (${a.onsetViolations} / ${a.onsets}) | ` +
+            `${pct(share(a.falseMs, a.clearMs), 0)} | ${pct(share(a.rightMs, a.hiddenMs), 0)} | ${a.violations} / ${a.samples} (${a.onsetViolations} / ${a.onsets}) | ` +
             `${a.outside} / ${a.flagged} / ${a.fires} | ${areas.length === 0 ? "–" : pct(areas[Math.floor(areas.length / 2)], 0)} |`,
         );
       }

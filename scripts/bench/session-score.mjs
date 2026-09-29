@@ -989,6 +989,25 @@ export function scoreGuidance(script, record, gtAt, captures) {
 const VIS_STEP_MS = 50;
 
 /**
+ * "Clearly inside": every corner at least this far in from the region's
+ * edges (a share of its width and height) — the app's own exit threshold for
+ * "Afaste um pouco" (`BORDER_EXIT`, `src/lib/guidance.ts`). A page closer to
+ * the edge than that is *tight*: the hint may rightly still be up there
+ * (hysteresis, a detector a few pixels out), so it counts neither as a false
+ * "Afaste" nor as a right one.
+ */
+export const VIS_CLEAR_MARGIN = 0.03;
+
+/** Every corner of `quad` at least `share` of the region's own width/height inside it. */
+export function clearlyInside(quad, region, share = VIS_CLEAR_MARGIN) {
+  const mx = share * region.width;
+  const my = share * region.height;
+  return quad.every(
+    ([x, y]) => x >= region.x + mx && x <= region.x + region.width - mx && y >= region.y + my && y <= region.y + region.height - my,
+  );
+}
+
+/**
  * The visible region at page time `t`: the last `regions` sample the page
  * measured at or before it (`page-session.js`: the video's content box, its
  * clips and the layout's declared occluders), else the crop the page measured
@@ -1025,7 +1044,8 @@ export function insideRegion(quad, region, margin = 0) {
  *   them, else the default sessions' `holdFrom…holdTo` and
  *   `lockFrom2…holdTo2`): whether the ready cue came on in it (`reached`),
  *   the share of it the whole page was visible, and "Afaste um pouco" shown
- *   while the whole page was visible (`moveBackFalseMs` over `visibleMs`) or
+ *   while the whole page was clearly visible ({@link clearlyInside};
+ *   `moveBackFalseMs` over `clearMs`) or
  *   while it was not (`moveBackRightMs` over `hiddenMs`);
  * - `ready` — every overlay sample with the ready cue on, judged against
  *   the truth on screen: `violations` where a corner of the page lay outside
@@ -1059,7 +1079,7 @@ export function scoreVisibility(script, record, gtAt, captures) {
     return on;
   };
   const holds = windows.map(([from, to]) => {
-    const w = { ms: 0, readyMs: 0, visibleMs: 0, hiddenMs: 0, moveBackFalseMs: 0, moveBackRightMs: 0, unknownMs: 0 };
+    const w = { ms: 0, readyMs: 0, visibleMs: 0, hiddenMs: 0, clearMs: 0, moveBackFalseMs: 0, moveBackRightMs: 0, unknownMs: 0 };
     for (let t = at(from); t < at(to); t += VIS_STEP_MS) {
       w.ms += VIS_STEP_MS;
       if (readyAt(t)) w.readyMs += VIS_STEP_MS;
@@ -1068,11 +1088,15 @@ export function scoreVisibility(script, record, gtAt, captures) {
         w.unknownMs += VIS_STEP_MS;
         continue;
       }
-      const visible = insideRegion(toPoints(gt), region(t));
+      const r = region(t);
+      const visible = insideRegion(toPoints(gt), r);
       const moveBack = hintAt(series, t) === "move-back";
       if (visible) {
         w.visibleMs += VIS_STEP_MS;
-        if (moveBack) w.moveBackFalseMs += VIS_STEP_MS;
+        if (clearlyInside(toPoints(gt), r)) {
+          w.clearMs += VIS_STEP_MS;
+          if (moveBack) w.moveBackFalseMs += VIS_STEP_MS;
+        }
       } else {
         w.hiddenMs += VIS_STEP_MS;
         if (moveBack) w.moveBackRightMs += VIS_STEP_MS;
@@ -1084,7 +1108,7 @@ export function scoreVisibility(script, record, gtAt, captures) {
       ...w,
       reached: w.readyMs > 0,
       visibleShare: rate(w.visibleMs, w.visibleMs + w.hiddenMs),
-      moveBackFalseShare: rate(w.moveBackFalseMs, w.visibleMs),
+      moveBackFalseShare: rate(w.moveBackFalseMs, w.clearMs),
     };
   });
   const ready = { samples: 0, violations: 0, onsets: 0, onsetViolations: 0, worstOutside: 0 };

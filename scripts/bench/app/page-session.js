@@ -495,6 +495,8 @@ function flow() {
     // classic|filmstrip|onehand|collapse`, from `npm run bench -- --layout` or
     // the playground); the library's default (`rail`) otherwise.
     captureLayout: new URLSearchParams(location.search).get("layout") ?? undefined,
+    // `?diag=1`: the diagnostics HUD (`experimentalDiagnostics`), for screenshots.
+    experimentalDiagnostics: new URLSearchParams(location.search).get("diag") === "1" || undefined,
     onComplete: () => hostEvents.push({ name: "complete", at: performance.now() }),
     onCancel: (reason) => hostEvents.push({ name: "cancel", reason, at: performance.now() }),
     onEvent: (event) => hostEvents.push({ ...event, at: performance.now() }),
