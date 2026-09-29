@@ -160,6 +160,7 @@ Full types ship with the package (`ScanFlowProps`). In short:
 | `onEvent` | step, capture, quality, size and error events. Numbers and enums only — never image data, never a file name. Safe to forward straight to analytics. |
 | `className` | applied to the library's root element, for layout only. |
 | `captureLayout` | default `"rail"`. The capture screen (step 1). `"rail"`: the camera full-bleed, the hint under the top row, a MANUAL · AUTOMÁTICO (BETA) mode rail over the shutter (see `experimentalAutoCapture`), the newest page and the onward button either side of the shutter, and "Já tenho a foto" (when `intake.images` is on) as a small text button under it. `"standard"`: the screen that shipped before — header, viewfinder card, thumbnail rail, control row with the gallery pill — kept for hosts that want it (`"default"` is its deprecated old name and still works). **Experimental** alternatives, which may change or go away in any release and have no in-camera gallery pick: `"classic"` (translucent bottom bar), `"filmstrip"` (camera on top, the pages as a numbered strip under it), `"onehand"` (no bars, controls down the right edge, the hint hung on the page's corner), `"collapse"` (classic while searching, folding into one capsule while the page is ready). Every layout is the same capture stage — same detection, hints, ready cue on the brackets, torch, notices, page limit, confirm-corners screen after every photo, retake and corner editor, camera-refused file surface, and a shutter that works in every state. Unknown values fall back to `"rail"`. `experimentalCaptureLayout` is the deprecated old name of this prop (read only when `captureLayout` is absent). |
+| `experimentalDiagnostics` | **experimental**, default `false`. A small HUD over the viewfinder for testing on a real phone: detection lane (and why, if not the worker), detection time and its median, the loop's cadence, frame age, stream and photo size, the part of the frame the person can see and the layout's fit, torch and vibration support, the ready cue and auto-capture's state and fires. Numbers only: it stores nothing, sends nothing and reads no pixels. Leave it off in production. |
 | `experimentalAutoCapture` | **experimental.** Whether the auto-capture toggle is offered. **Omitted**: the layout decides — `"rail"` (the default), `"onehand"` and `"collapse"` show it, `"standard"` does not. **`false`**: no toggle on any layout, the photo is only ever taken by a tap — pass it for people who will not look at the confirm screen. **`true`**: shows it on `"standard"` too. `"classic"` and `"filmstrip"` never show it. Wherever it shows it starts OFF in every new flow, is never stored, and the shutter stays live in both modes; switched on, the page is taken by itself once framed, sharp and still for about half a second, once per page, through the confirm-corners screen. It still fires on some page-less scenes on the bench (a screen showing a page, two overlapping sheets). |
 
 ### Theming
@@ -256,7 +257,27 @@ iOS does not, so an iPhone shows no toggle), and it is switched with
 `applyConstraints`. If your page sets a `Permissions-Policy`, nothing extra is
 needed for either. The ready cue's haptic tick uses `navigator.vibrate`, which
 iOS does not have — there it is silently skipped (the cue is also announced
-once per page to screen readers). Auto-capture is experimental: its toggle
+once per page to screen readers).
+
+**What the camera shows is what is judged.** "Afaste um pouco", "Aproxime",
+the ready cue and auto-capture judge the page against the part of the frame
+the person can actually see — the video under the layout's fit, clipped by
+the screen (and a pinch zoom), minus the chrome drawn over it: the notch and
+home indicator (`env(safe-area-inset-*)`, so give your page
+`viewport-fit=cover` if it runs edge to edge) and, on `"rail"`, the band of
+controls over the dark fade. A corner hidden there counts as cut off.
+`"rail"` shows the camera's whole frame, as large as fits the screen above
+its controls (dark ground where it does not reach), so every part of the
+frame the scanner judges — and the photo keeps — is on screen; `"standard"` keeps its viewfinder
+card. Detection itself still looks at the whole frame, and the photo keeps
+the camera's full frame. Before the confirm screen the photo is checked
+against what the viewfinder showed — its shape, field of view and turn —
+and a photo with a corner on its edge, a page not where the viewfinder had
+it, or no page at all opens the confirm screen with one short line asking
+for a closer look ("Um canto pode ter ficado de fora da foto — confira.").
+Nothing is ever accepted silently, and nothing is blocked.
+
+Auto-capture is experimental: its toggle
 shows on the default `"rail"` layout unless the host passes
 `experimentalAutoCapture={false}`, it is off in every new flow, the
 flow keeps the choice while it is open, and the library writes nothing to

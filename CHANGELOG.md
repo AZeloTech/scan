@@ -7,6 +7,27 @@ freezes at 1.0.
 ## [Unreleased]
 
 ### Added
+- **The page is judged against what the person sees** (Phase 5a). The hints
+  ("Afaste um pouco", "Aproxime"), the ready cue and auto-capture now use the
+  visible part of the frame — the video under the layout's fit, clipped by
+  the screen and a pinch zoom, minus the safe areas and the chrome a layout
+  declares opaque — re-measured on every resize, rotation, zoom, text-size or
+  chrome change. On the default `rail` layout the camera now shows its whole
+  frame, as large as fits the screen above the controls, with dark ground
+  where it does not reach (it filled the whole screen before, cropping the
+  sides of a tall phone's frame and hiding its bottom under the controls — a
+  well-framed page read "Afaste um pouco" and never became ready). `standard` is unchanged. Detection still uses the
+  whole frame; the photo keeps the camera's full frame.
+- **Every photo is checked before the confirm screen.** The corners the
+  viewfinder vouched for are mapped onto the photo (its shape, field of view
+  and a quarter turn) and compared with the page found on it; a corner on the
+  photo's edge, a page not where the viewfinder had it, or no page opens the
+  confirm screen with one short line asking for a closer look. Automatic and
+  manual captures alike; nothing is blocked or accepted silently.
+- **`experimentalDiagnostics`** (default `false`): a small numbers-only HUD
+  over the viewfinder for real-phone tests (lane, detection time, cadence,
+  frame age, stream/photo size, visible region, fit, torch/vibrate support,
+  ready and auto state). Stores nothing, sends nothing.
 - **Capture layouts, and a new default capture screen** (`captureLayout`,
   default `"rail"`). Step 1 is now the full-bleed `rail` screen: the camera
   edge to edge, the hint under the top row, a MANUAL · AUTOMÁTICO (BETA)

@@ -774,6 +774,34 @@ on a slow phone's core, honoured only by the bench's own build of the worker
 server serves it ahead of `assets/`). Without it the worker lane would look
 better under `--cpu 4` than it is.
 
+### The visible region (Phase 5a)
+
+A full-bleed layout does not show the whole frame: its fit crops or
+letterboxes the video, and its chrome covers part of it. `page-session.js`
+measures the part the person can see on its own — the `<video>`'s content
+box under its computed `object-fit` / `object-position`, clipped by every
+clipping ancestor and the visual viewport, minus the opaque bands the layout
+declares (`[data-scan-occluder]`) — at every viewfinder box sample, and the
+report's **Visible region** table judges the page against it: framed holds
+that reached the ready cue; the share of hold time the whole page was
+visible; "Afaste um pouco" shown while it was **clearly** visible (every
+corner ≥ 3 % of the region inside it — the app's own exit threshold; a
+tighter page counts neither way) or while it was not; ready-cue samples
+(and onsets) with a corner outside the region; automatic captures whose page
+has a corner outside the photo, and how many of those the app flagged for
+the confirm screen (`attention`); and the region's share of the viewport
+(the camera the person perceives).
+
+`--viewport WxH` sets the phone's CSS viewport (default 390×844; the owner's
+phones are 412×891 and 440×956), `--stream` the camera's shape (`720x1280`
+9:16, `960x1280` 3:4, `1280x720` 16:9), and `--fit cover|contain|maxcrop`
+forces the layout's fit for an evaluation (`probeSetting("fit")`; absent,
+the layout's own). `--session default` names a plain run's sessions (to
+combine with a group: `--session default,guidance`).
+
+    npm run bench -- --suite session --layout rail --viewport 412x891 --stream 960x1280 --seeds 5
+    npm run bench -- --suite session --session approach-hold,wider-still --layout rail --viewport 440x956 --fit contain
+
 ## WebKit (`npm run bench:webkit`)
 
 The flow end to end in Playwright's WebKit — primer, a live viewfinder that
