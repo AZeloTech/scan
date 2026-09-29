@@ -14,6 +14,7 @@ import {
   type RenderedPage,
 } from "./page-processing.ts";
 import { pdfFileName } from "./naming.ts";
+import { startPdfBuild } from "./generate.ts";
 import type { GateReading } from "./capture-gate.ts";
 import type { NormalizedQuad } from "./quad.ts";
 import {
@@ -1421,4 +1422,74 @@ test("the store holds encoded bytes, never a decoded page", async () => {
       );
     }
   }
+});
+
+// ── "Gerar PDF" from step 2 ─────────────────────────────────────────────────
+
+test("step 2's Gerar PDF names an unnamed document the way step 3 would have", async () => {
+  const codec = new FakeCodec();
+  await onePage(codec);
+  assert.equal(store().getSnapshot().session?.documentName, null);
+
+  await startPdfBuild(store(), { documentName: "exame", hostFileName: null });
+  await settle();
+
+  const snapshot = store().getSnapshot();
+  assert.equal(snapshot.session?.documentName, "exame");
+  assert.equal(snapshot.build.phase, "done");
+  assert.match(snapshot.build.fileName ?? "", /^\d{8}-\d{4}_exame\.pdf$/);
+});
+
+test("step 2's Gerar PDF keeps a name somebody already chose", async () => {
+  const codec = new FakeCodec();
+  await onePage(codec);
+  store().setDocumentName("receita");
+
+  await startPdfBuild(store(), { documentName: "exame", hostFileName: null });
+  await settle();
+
+  const snapshot = store().getSnapshot();
+  assert.equal(snapshot.session?.documentName, "receita");
+  assert.match(snapshot.build.fileName ?? "", /_receita\.pdf$/);
+});
+
+test("step 2's Gerar PDF writes no marking when the host named the file", async () => {
+  const codec = new FakeCodec();
+  current?.dispose();
+  current = createScanStore({ pipeline: codec.pipeline(), fileName: "pedido-123.pdf" });
+  current.start();
+  store().addCapture({
+    canonical: codec.encodeCanonical("frame-1"),
+    corners: QUAD,
+    gate: reading("ok"),
+    path: "shutter",
+  });
+  await settle();
+
+  await startPdfBuild(store(), { documentName: "exame", hostFileName: "pedido-123.pdf" });
+  await settle();
+
+  const snapshot = store().getSnapshot();
+  assert.equal(snapshot.session?.documentName, null);
+  assert.equal(snapshot.build.phase, "done");
+  assert.equal(snapshot.build.fileName, "pedido-123.pdf");
+});
+
+test("step 2's Gerar PDF on a page still being prepared fails the build, with a reason", async () => {
+  const codec = new FakeCodec();
+  codec.manual = true;
+  begin(codec);
+  store().addCapture({
+    canonical: codec.encodeCanonical("frame-1"),
+    corners: QUAD,
+    gate: reading("ok"),
+    path: "shutter",
+  });
+
+  await startPdfBuild(store(), { documentName: "exame", hostFileName: null });
+
+  const build = store().getSnapshot().build;
+  assert.equal(build.phase, "failed");
+  assert.equal(build.error, "pages_processing");
+  assert.equal(codec.assembled.length, 0);
 });

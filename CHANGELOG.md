@@ -187,6 +187,18 @@ land in 0.1.0 itself; each is a behaviour a host can observe.
   non-fullscreen container will get a shell sized to the browser viewport
   rather than that container (`src/styles.css`). The dist guard now fails the
   build if the compiled stylesheet lacks a height rule for `.app-h`.
+- **Step 2's primary button is "Gerar PDF"** ("Generate PDF"), and it starts
+  the file. It used to read "Ir para o passo 3" and open a form (marking grid,
+  name, prévia, a second button) that most people left as it was; its defaults
+  are now applied when the build starts — the document is named "exame"
+  unless a name was already chosen, and not at all when the host passed
+  `defaultFileName` (`src/lib/generate.ts`). Step 3 is where the build is
+  watched: progress, and "Cancelar", which returns to step 2. When the build
+  fails or is over `maxBytes`, step 3 shows the reason with the form and a
+  second "Gerar PDF", as before. The trail keeps its three steps. The desktop
+  flow's step 2 does the same; its step 3 form is read-only while a build runs
+  or its receipt is up. The step-2 PDF preview's confirm now says "Confirmar e
+  gerar" and does exactly that. English "Create PDF" is now "Generate PDF".
 - **No spurious "second scan store" warning.** A render React discards before
   committing — a sibling suspending in the host's `<Suspense>`, a lazy chunk
   resolving into a retry, an interrupted transition — created a store that was

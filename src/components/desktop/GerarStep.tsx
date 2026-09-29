@@ -27,7 +27,13 @@ import { Meta } from "@/components/ui";
 import { CheckIcon, SpinnerIcon } from "@/components/icons";
 
 /**
- * Step 3 — the form, and then the file.
+ * Step 3 — the file being made, and the form it falls back to.
+ *
+ * Step 2's "Gerar PDF" starts the build with the defaults this form would
+ * have applied untouched (`useGeneratePdf`) and lands here, so the making card
+ * is usually the first thing on the right. The form stays on the left —
+ * read-only while a build runs or its receipt is up — and is live when the
+ * build failed or the trail brought the person here without one.
  *
  * Same decisions as the phone's step 3, laid out for a screen that can show the
  * form and its consequences side by side: the six markings still *derive* the
@@ -192,9 +198,14 @@ export function GerarStep({
                     key={mark}
                     type="button"
                     aria-pressed={selected === mark}
+                    // Step 2's "Gerar PDF" lands here with the build already
+                    // running: the name it is writing was read when it began,
+                    // so the form waits for a build that failed (or none).
+                    disabled={phase !== "form"}
                     onClick={() => store.setDocumentName(copy.gerar.marks[mark])}
                     className={clsx(
                       "flex h-11 items-center justify-center rounded-[11px] border text-xs font-semibold transition-colors duration-200",
+                      "disabled:cursor-not-allowed disabled:opacity-45",
                       selected === mark
                         ? "border-leaf bg-leaf text-warm"
                         : "border-border bg-warm text-desk-body hover:border-sage",
@@ -227,6 +238,7 @@ export function GerarStep({
                   type="text"
                   value={draft}
                   maxLength={SLUG_MAX_LENGTH}
+                  disabled={phase !== "form"}
                   autoComplete="off"
                   autoCapitalize="none"
                   aria-label={copy.desktop.gerar.nameField}
@@ -239,7 +251,7 @@ export function GerarStep({
                     setDraft(value);
                     store.setDocumentName(value);
                   }}
-                  className="min-w-0 flex-1 border-none bg-transparent text-sm text-ink outline-none"
+                  className="min-w-0 flex-1 border-none bg-transparent text-sm text-ink outline-none disabled:opacity-60"
                 />
                 <span className="shrink-0 font-mono text-2xs leading-none text-desk-faint">
                   .pdf

@@ -10,8 +10,9 @@
  * callbacks to the host:
  *
  *   "capture"        the viewfinder, and corner confirmation
- *   "review"         the page list
- *   "build"          file name, size, "Gerar PDF"
+ *   "review"         the page list, and "Gerar PDF", which starts the build
+ *   "build"          the build's progress; when it fails, the file name,
+ *                    size and a second "Gerar PDF"
  *   onComplete()     the PDF exists; the host takes it from here
  *   onCancel("user") leaving the flow backwards; the host decides
  *                    whether that closes anything

@@ -6,12 +6,12 @@ import { estimatedPdfBytes } from "@/lib/scan-store";
 import { useScanStore, useStore } from "@/hooks/useScanStore";
 import { useFlowNavigation } from "@/hooks/useFlowNavigation";
 import { useScanRuntime } from "@/hooks/useScanRuntime";
+import { useGeneratePdf } from "@/hooks/useGeneratePdf";
 import { useDialogChrome } from "@/hooks/useDialogChrome";
 import { useEntrance } from "@/hooks/useEntrance";
 import { formatBytes } from "@/lib/image";
 import { pdfFallbackName } from "@/lib/i18n";
 import {
-  DEFAULT_MARK,
   DOCUMENT_MARKS,
   documentSlug,
   pdfFileName,
@@ -26,7 +26,17 @@ import { PencilIcon } from "@/components/icons";
 import { Button, LiveRegion, Meta, Notice, useCancelOnEscape } from "@/components/ui";
 
 /**
- * Step 3 — the last screen before the file exists.
+ * Step 3 — the file being made, and the way back in when it could not be.
+ *
+ * **Step 2's "Gerar PDF" starts the build** (`useGeneratePdf`) and lands here,
+ * so the first thing this screen shows is the progress, not a form. The form
+ * below — the marking grid, the name, the prévia and the button — is what the
+ * screen falls back to when the build fails (or is over the host's size
+ * limit): the error on top, every page still there, and a second "Gerar PDF"
+ * one tap away. A build the person cancels goes back to step 2, where they
+ * pressed the button. The defaults the form would have applied untouched —
+ * the "exame" marking, the dated name — are applied by the hook before the
+ * build starts, so a build that never shows the form names its file the same.
  *
  * **The name is composed, not typed.** `20260817-1432_exame.pdf` is two halves
  * and the user writes neither of them by default: the front is the moment the
@@ -60,9 +70,9 @@ export function GerarScreen() {
   const { back } = useFlowNavigation();
   const { reportError, fileName: hostFileName } = useScanRuntime();
   const { session, tiles, build } = useScanStore();
+  const generatePdf = useGeneratePdf();
   const [preview, setPreview] = React.useState(false);
   const [renaming, setRenaming] = React.useState(false);
-  const [navigating, setNavigating] = React.useState(false);
   const scope = useEntrance<HTMLDivElement>({ y: 12, stagger: 0.05 });
 
   useCancelOnEscape();
@@ -82,17 +92,21 @@ export function GerarScreen() {
     reportError("build_failed", true);
   }, [failure, reportError]);
 
-  // The grid opens on "exame" — the marking most of this audience is holding.
-  // Written into the store rather than merely drawn, so the file the build
-  // names and the name on screen can never be two different strings.
+  // Already "exame" unless somebody changed it: `useGeneratePdf` writes the
+  // default marking into the store before the build it starts.
   const documentName = session?.documentName ?? null;
-  // A host that named the file gets no marking at all: there is nothing for
-  // one to change.
+
+  /**
+   * Only a failed build shows the form. `working` and `done` show the
+   * progress (a finished file is handed out centrally and the host takes it
+   * from there); `idle` means the build was cancelled — or never started — and
+   * the person goes back to step 2, where the button they pressed is.
+   */
+  const showForm = build.phase === "failed";
+  const cancelled = build.phase === "idle";
   React.useEffect(() => {
-    if (hostFileName !== null) return;
-    if (session === null || session.documentName !== null) return;
-    store.setDocumentName(copy.gerar.marks[DEFAULT_MARK]);
-  }, [session, copy, store, hostFileName]);
+    if (cancelled) back();
+  }, [cancelled, back]);
 
   const readyTiles = tiles.filter((tile) => tile.page.status === "ready");
   const pageCount = readyTiles.length;
@@ -128,15 +142,6 @@ export function GerarScreen() {
       (mark) => mark !== "outro" && documentSlug(copy.gerar.marks[mark]) === suffix,
     ) ?? null;
 
-  /**
-   * Start the build and stay. There is nowhere to push to: completion is
-   * detected centrally, and until it happens this screen is the progress.
-   */
-  const handleGenerate = React.useCallback(() => {
-    setNavigating(true);
-    void store.buildPdf();
-  }, [store]);
-
   const building = build.phase === "working";
 
   if (preview) {
@@ -145,7 +150,7 @@ export function GerarScreen() {
         tiles={readyTiles}
         onConfirm={() => {
           setPreview(false);
-          handleGenerate();
+          generatePdf();
         }}
         onClose={() => setPreview(false)}
       />
@@ -158,8 +163,8 @@ export function GerarScreen() {
         title={copy.gerar.title}
         step={3}
         // No way back out of a build that is reading the very pages the back
-        // button would let somebody edit.
-        onBack={building ? undefined : back}
+        // button would let somebody edit; "Cancelar" is the way out of that.
+        onBack={showForm ? back : undefined}
         aside={<FrameStep size="xs">{copy.common.pagesShort(pageCount)}</FrameStep>}
         footer={
           building ? (
@@ -173,7 +178,7 @@ export function GerarScreen() {
                 {build.cancelling ? copy.pronto.cancelling : copy.common.cancel}
               </Button>
             </div>
-          ) : (
+          ) : !showForm ? undefined : (
             <div className="flex flex-col gap-2 pb-1">
               {blocked && (
                 <Notice tone="warning">{copy.gerar.blocked(brokenCount)}</Notice>
@@ -181,15 +186,17 @@ export function GerarScreen() {
               <Button
                 variant="secondary"
                 fullWidth
-                disabled={pageCount === 0 || blocked || navigating}
+                disabled={pageCount === 0 || blocked}
                 onClick={() => setPreview(true)}
               >
                 {copy.gerar.previewCta}
               </Button>
               <Button
                 fullWidth
-                disabled={pageCount === 0 || stillWorking || blocked || navigating}
-                onClick={handleGenerate}
+                disabled={pageCount === 0 || stillWorking || blocked}
+                // Try again and stay: completion is detected centrally, and
+                // until it happens this screen is the progress.
+                onClick={generatePdf}
               >
                 {stillWorking ? copy.gerar.preparing : copy.gerar.generate}
               </Button>
@@ -197,7 +204,7 @@ export function GerarScreen() {
           )
         }
       >
-        {building ? (
+        {!showForm ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-8 text-center">
             <LiveRegion
               message={

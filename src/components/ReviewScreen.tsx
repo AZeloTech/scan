@@ -4,6 +4,7 @@ import * as React from "react";
 import clsx from "clsx";
 import { useScanStore, useStore } from "@/hooks/useScanStore";
 import { useFlowNavigation } from "@/hooks/useFlowNavigation";
+import { useGeneratePdf } from "@/hooks/useGeneratePdf";
 import { useEntrance } from "@/hooks/useEntrance";
 import { localeTag } from "@/lib/i18n";
 import { captureFlip, playFlip } from "@/lib/motion";
@@ -78,6 +79,19 @@ export function ReviewScreen() {
   const [adjustKey, setAdjustKey] = React.useState<string | null>(null);
   const [pdfPreview, setPdfPreview] = React.useState(false);
   const [navigating, setNavigating] = React.useState(false);
+  const generatePdf = useGeneratePdf();
+
+  /**
+   * "Gerar PDF": the build starts here and step 3 is where it is watched. The
+   * form that used to stand between this button and the file is gone — its
+   * defaults are applied by `useGeneratePdf` — and step 3 is now the build's
+   * progress, which falls back to the form only when the build fails.
+   */
+  const generate = React.useCallback(() => {
+    setNavigating(true);
+    generatePdf();
+    go("build");
+  }, [generatePdf, go]);
 
   const listRef = React.useRef<HTMLOListElement | null>(null);
   const scope = useEntrance<HTMLDivElement>({ y: 12 });
@@ -161,11 +175,9 @@ export function ReviewScreen() {
     return (
       <PdfPreviewSheet
         tiles={readyTiles}
-        confirmLabel={copy.review.next}
         onConfirm={() => {
           setPdfPreview(false);
-          setNavigating(true);
-          go("build");
+          generate();
         }}
         onClose={() => setPdfPreview(false)}
       />
@@ -217,12 +229,9 @@ export function ReviewScreen() {
             <Button
               fullWidth
               disabled={readyCount === 0 || stillWorking || blocked || navigating}
-              onClick={() => {
-                setNavigating(true);
-                go("build");
-              }}
+              onClick={generate}
             >
-              {stillWorking ? copy.review.preparing : copy.review.next}
+              {stillWorking ? copy.review.preparing : copy.gerar.generate}
             </Button>
           </div>
         }

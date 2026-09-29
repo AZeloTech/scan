@@ -264,7 +264,6 @@ export interface AppCopy {
       preview: readonly [string, string];
       add: readonly [string, string];
     };
-    next: string;
     preparing: string;
     emptyTitle: string;
     emptyBody: string;
@@ -785,7 +784,6 @@ export interface AppCopy {
       previous: string;
       next: string;
       shortcuts: string;
-      goGerar: string;
       empty: string;
       /** The confirm before a page goes away — it states the consequence. */
       removeDialog: {
@@ -968,7 +966,6 @@ const PT: AppCopy = {
       preview: ["prévia", "do PDF"],
       add: ["mais uma", "página"],
     },
-    next: "Ir para o passo 3",
     preparing: "Preparando suas páginas…",
     emptyTitle: "Nenhuma página ainda",
     emptyBody: "Volte e fotografe a primeira página — leva alguns segundos.",
@@ -1398,7 +1395,6 @@ const PT: AppCopy = {
       previous: "Página anterior",
       next: "Próxima página",
       shortcuts: "← → páginas · R girar · C cantos · ⌫ apagar",
-      goGerar: "Ir para o passo 3",
       empty: "Nenhuma página aberta. Volte ao passo 1 e escolha os arquivos.",
       removeDialog: {
         title: (n) => `Apagar a página ${n}?`,
@@ -1597,7 +1593,6 @@ const EN: AppCopy = {
       preview: ["preview", "of the PDF"],
       add: ["one more", "page"],
     },
-    next: "Go to step 3",
     preparing: "Preparing your pages…",
     emptyTitle: "No pages yet",
     emptyBody: "Go back and photograph the first page — it takes a few seconds.",
@@ -1623,7 +1618,7 @@ const EN: AppCopy = {
       outro: "other",
     },
     previewCta: "See the PDF preview",
-    generate: "Create PDF",
+    generate: "Generate PDF",
     preparing: "Preparing your pages…",
     blocked: (n) =>
       n === 1
@@ -2016,7 +2011,6 @@ const EN: AppCopy = {
       previous: "Previous page",
       next: "Next page",
       shortcuts: "← → pages · R turn · C corners · ⌫ delete",
-      goGerar: "Go to step 3",
       empty: "No page open. Go back to step 1 and choose the files.",
       removeDialog: {
         title: (n) => `Delete page ${n}?`,

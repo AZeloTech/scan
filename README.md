@@ -53,8 +53,8 @@ the person holding the phone — can make.
 |---|---|
 | **Capture** | The camera opens, a neural corner detector finds the page in the frame and guides the aim — one short hint at a time ("Aproxime", "Afaste um pouco", "Pouca luz", "Reflexo — incline o celular", "Segure firme"), a ready cue on the corner brackets, the torch where the phone has one — and a person confirms or drags the four corners. The shutter always works. Auto-capture (taking the photo once the page has been ready for a moment, still through the corner confirmation) is experimental and offered only when the host sets `experimentalAutoCapture`. No camera? It falls back to picking image files on its own. |
 | **Flatten** | A Rust/WebAssembly dewarp straightens curved paper — the bend of a page held in one hand — and falls back gracefully when the geometry is not trustworthy. |
-| **Review** | Pages as thumbnails: reorder, retake, remove. Blur and small-text warnings before it is too late to re-shoot. |
-| **Build** | One PDF, assembled in the browser. Given `maxBytes`, quality steps down a fixed ladder until the exact size fits — and refuses rather than exceed it. |
+| **Review** | Pages as thumbnails: reorder, retake, remove. Blur and small-text warnings before it is too late to re-shoot. Its primary button is "Gerar PDF": it starts the build straight from the page list. |
+| **Build** | One PDF, assembled in the browser, with a progress bar and a cancel (which returns to the page list). Given `maxBytes`, quality steps down a fixed ladder until the exact size fits — and refuses rather than exceed it. A build that fails or does not fit shows why, with every page still there, the file name and a second "Gerar PDF". |
 
 Then `onComplete` fires, once, with the finished `File`.
 
@@ -149,7 +149,7 @@ Full types ship with the package (`ScanFlowProps`). In short:
 | `lang` | `"pt-BR"` (default) or `"en-US"`. |
 | `maxPages` | default 20. |
 | `maxBytes` | a hard budget. Quality steps down a fixed ladder to fit, and refuses rather than exceed it. Pass the same limit your upload path enforces. |
-| `defaultFileName` | the finished file's name, used **verbatim**. When you pass it, the flow shows no way to name the document (no marking chips, no text field) and the PDF's `/Title` is this name without `.pdf`. Without it the flow composes `<yyyymmdd>-<hhmm>_<marking>.pdf` from the scan's start and a marking the person picks ("exame", "receita"…, or a short slugged text), and `/Title` is that file name without `.pdf` — typed text never reaches the metadata as typed. Keep personal data out of it; pass it if your application must not receive anything a person typed. |
+| `defaultFileName` | the finished file's name, used **verbatim**. When you pass it, the flow shows no way to name the document (no marking chips, no text field) and the PDF's `/Title` is this name without `.pdf`. Without it the flow composes `<yyyymmdd>-<hhmm>_<marking>.pdf` from the scan's start and a marking — "exame" unless the person picks another ("receita"…, or a short slugged text) on the screen a failed build falls back to, or on the desktop flow's step 3, and `/Title` is that file name without `.pdf` — typed text never reaches the metadata as typed. Keep personal data out of it; pass it if your application must not receive anything a person typed. |
 | `intake` | which sources are offered: `camera`, `images`, `pdf`. pdf.js loads only if you enable it, and the file-picker copy only mentions PDFs when it is on. |
 | `onComplete` | fires once, with the exact `File`, its page count and its byte size. Final. |
 | `onCancel` | a request to close, with `"user"` (never final — see above) or `"error"` (final). |
