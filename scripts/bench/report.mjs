@@ -387,7 +387,7 @@ export function renderDetectorReport(results) {
  */
 const MUST_MATCH = {
   detector: ["seeds", "settings", "frame", "cpu"],
-  session: ["seeds", "stream", "cpu"],
+  session: ["seeds", "stream", "cpu", "viewport"],
   "real-stills": ["media", "cpu"],
   "real-video": ["media", "cpu", "skipReplay"],
 };

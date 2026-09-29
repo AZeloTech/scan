@@ -9,6 +9,7 @@
  *   npm run bench -- --suite session [--session approach-hold,page-swap]
  *                    [--seeds 1] [--stream 720x1280] [--cpu 4] [--lane main|worker]
  *                    [--no-frame-cache] [--layout rail|standard|classic|…]
+ *                    [--viewport 390x844] [--fit cover|contain|maxcrop]
  *   SCAN_REAL_MEDIA=<dir> npm run bench -- --suite real-stills|real-video
  *                    [--variants …] [--cpu 4] [--skip-replay]
  *
@@ -50,7 +51,7 @@ import { DEFAULT_STREAM } from "./suites/session.mjs";
 const USAGE = `usage: npm run bench -- [--suite detector|session|real-stills|real-video|all|emulator]
        [--family F1,F2,…] [--setting name,…] [--seeds N] [--variants ml,classical,production,refined,ml+refine,ml+live]
        [--session approach-hold,…] [--stream WxH] [--skip-replay] [--lane main|worker] [--no-frame-cache]
-       [--layout rail|standard|classic|filmstrip|onehand|collapse]
+       [--layout rail|standard|classic|filmstrip|onehand|collapse] [--viewport WxH] [--fit cover|contain|maxcrop]
        [--cpu 1|4|6] [--size portrait|landscape|WxH] [--compare results.json]
        [--out dir] [--headed]
 real-stills / real-video need SCAN_REAL_MEDIA=<dir>; their output goes to the cache, never the repo.`;
@@ -87,6 +88,8 @@ function parse() {
       lane: { type: "string" },
       "no-frame-cache": { type: "boolean", default: false },
       layout: { type: "string" },
+      viewport: { type: "string" },
+      fit: { type: "string" },
       help: { type: "boolean", default: false },
     },
     strict: true,
@@ -127,7 +130,33 @@ function parse() {
     lane: parseLane(values.lane),
     frameCache: !values["no-frame-cache"],
     layout: parseLayout(values.layout),
+    viewport: parseViewport(values.viewport),
+    fit: parseFit(values.fit),
   };
+}
+
+/**
+ * `--viewport WxH`: the phone's CSS viewport for the session, real-video and
+ * WebKit runs (default 390×844). Tall phones crop a full-bleed layout's video
+ * differently, so a run records it (`config.viewport`, null = the default).
+ */
+function parseViewport(value) {
+  if (value === undefined) return null;
+  const match = /^(\d{3,4})x(\d{3,4})$/.exec(value);
+  if (match === null) throw new Error(`--viewport ${value}: expected WxH in CSS px, e.g. 412x891`);
+  return { width: Number(match[1]), height: Number(match[2]) };
+}
+
+/**
+ * `--fit`: force the capture layout's video fit (a bench-only probe setting,
+ * `probeSetting("fit")`) — to evaluate fit policies on one build. Absent,
+ * the layout's own choice.
+ */
+const FITS = ["cover", "contain", "maxcrop"];
+function parseFit(value) {
+  if (value === undefined) return null;
+  if (!FITS.includes(value)) throw new Error(`--fit ${value}: expected one of ${FITS.join(", ")}`);
+  return value;
 }
 
 /**
@@ -338,7 +367,14 @@ async function main() {
             size: options.size,
             frame: frameSize(options.size),
             ...(suiteName === "session"
-              ? { sessions: options.sessions, stream: options.stream, lane: options.lane, layout: options.layout ?? "rail" }
+              ? {
+                  sessions: options.sessions,
+                  stream: options.stream,
+                  lane: options.lane,
+                  layout: options.layout ?? "rail",
+                  viewport: options.viewport === null ? null : `${options.viewport.width}x${options.viewport.height}`,
+                  fit: options.fit,
+                }
               : {}),
           }
         : {

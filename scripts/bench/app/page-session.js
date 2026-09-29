@@ -250,6 +250,17 @@ function visibleCrop(video) {
  * frame the user is aiming through (`boxes`, scored as layout shifts).
  */
 const boxes = [];
+/**
+ * The part of the camera frame the person can actually see, sampled with the
+ * box (`regions`) and measured here, independently of the app's own answer:
+ * the `<video>`'s content box under its computed `object-fit` /
+ * `object-position`, clipped by its own box, every clipping ancestor and the
+ * viewport, then trimmed by the opaque edge bands the layout declares
+ * (`[data-scan-occluder="top|bottom|left|right"]`) — as fractions of the
+ * frame, plus its size in CSS px. A build that declares no occluders is
+ * measured as the crop alone.
+ */
+const regions = [];
 let boxTimer = null;
 let stageVideo = null;
 function sampleBox(why) {
@@ -257,7 +268,65 @@ function sampleBox(why) {
   if (!stage || !stage.isConnected) return;
   const r = stage.getBoundingClientRect();
   if (r.width === 0 || r.height === 0) return;
-  boxes.push({ at: performance.now(), why, x: r.left, y: r.top, width: r.width, height: r.height });
+  const at = performance.now();
+  boxes.push({ at, why, x: r.left, y: r.top, width: r.width, height: r.height });
+  const region = visibleRegion(stageVideo);
+  if (region !== null) regions.push({ at, ...region });
+}
+
+function visibleRegion(video) {
+  if (video === null || !video.isConnected || video.videoWidth === 0 || video.videoHeight === 0) return null;
+  const box = video.getBoundingClientRect();
+  if (box.width === 0 || box.height === 0) return null;
+  const style = getComputedStyle(video);
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  let w = box.width;
+  let h = box.height;
+  if (style.objectFit !== "fill") {
+    const pick = style.objectFit === "contain" || style.objectFit === "scale-down" ? Math.min : Math.max;
+    const scale = style.objectFit === "none" ? 1 : pick(box.width / vw, box.height / vh);
+    w = vw * scale;
+    h = vh * scale;
+  }
+  const [px, py] = style.objectPosition.split(" ").map((v) => (v.endsWith("%") ? parseFloat(v) / 100 : 0.5));
+  const left = box.left + (box.width - w) * (px ?? 0.5);
+  const top = box.top + (box.height - h) * (py ?? 0.5);
+  const clip = { l: box.left, t: box.top, r: box.right, b: box.bottom };
+  const cut = (rect) => {
+    clip.l = Math.max(clip.l, rect.left);
+    clip.t = Math.max(clip.t, rect.top);
+    clip.r = Math.min(clip.r, rect.right);
+    clip.b = Math.min(clip.b, rect.bottom);
+  };
+  for (let el = video.parentElement; el !== null && el !== document.documentElement; el = el.parentElement) {
+    const cs = getComputedStyle(el);
+    if (cs.overflowX !== "visible" || cs.overflowY !== "visible") cut(el.getBoundingClientRect());
+  }
+  const vv = window.visualViewport;
+  cut({ left: vv?.offsetLeft ?? 0, top: vv?.offsetTop ?? 0, right: (vv?.offsetLeft ?? 0) + (vv?.width ?? innerWidth), bottom: (vv?.offsetTop ?? 0) + (vv?.height ?? innerHeight) });
+  for (const el of document.querySelectorAll("[data-scan-occluder]")) {
+    const o = el.getBoundingClientRect();
+    if (o.width === 0 || o.height === 0) continue;
+    const edge = el.getAttribute("data-scan-occluder");
+    if (edge === "top") clip.t = Math.max(clip.t, o.bottom);
+    else if (edge === "bottom") clip.b = Math.min(clip.b, o.top);
+    else if (edge === "left") clip.l = Math.max(clip.l, o.right);
+    else if (edge === "right") clip.r = Math.min(clip.r, o.left);
+  }
+  const cssW = Math.max(0, clip.r - clip.l);
+  const cssH = Math.max(0, clip.b - clip.t);
+  return {
+    x: (clip.l - left) / w,
+    y: (clip.t - top) / h,
+    width: cssW / w,
+    height: cssH / h,
+    cssW,
+    cssH,
+    viewW: vv?.width ?? innerWidth,
+    viewH: vv?.height ?? innerHeight,
+    fit: style.objectFit,
+  };
 }
 function watchStage(video) {
   stageVideo = video;
@@ -512,6 +581,7 @@ async function run({ scripted = true } = {}) {
     remounts,
     visible: actions.find((a) => a.what === "camera-live")?.visible ?? null,
     boxes,
+    regions,
     torch: globalThis.__benchTorch ?? [],
   };
 }

@@ -127,7 +127,7 @@ function render(results) {
   out.push(`- run: ${results.createdAt} · commit ${results.git.commit}${results.git.dirty ? " (dirty)" : ""}`);
   out.push(`- browser: ${env.executable} · WebGL: ${env.renderer}`);
   out.push(
-    `- phone: ${PHONE.viewport.width}×${PHONE.viewport.height} CSS px @ DPR ${PHONE.deviceScaleFactor}, touch, Android UA · CPU throttle ${cfg.cpu}× (whole session)`,
+    `- phone: ${cfg.viewport ?? `${PHONE.viewport.width}x${PHONE.viewport.height}`} CSS px @ DPR ${PHONE.deviceScaleFactor}, touch, Android UA · CPU throttle ${cfg.cpu}× (whole session)`,
   );
   out.push(
     `- camera: ${cfg.stream} portrait preview at 30 fps — frames **pre-rendered** (SwiftShader draws one in ~0.1 s) and pushed into ` +
@@ -234,6 +234,58 @@ function render(results) {
             `${pct(g.readyPrecision, 0)} / ${pct(g.readyRecall, 0)} / ${ms(g.readyNoPageMs)} | ` +
             `${g.fires} / ${g.falseFires} / ${g.firesDuringTremor} / ${g.pagesFired} of ${g.pages} / ${g.repeatFires} / ${(g.firesInNoFire ?? 0) + (g.firesInHintWindow ?? 0)} / ${ms(g.fireLatencyP50)} | ` +
             `${g.autoCaptures.failed}/${g.autoCaptures.severe} of ${g.autoCaptures.captures} · ${g.manualCaptures.failed}/${g.manualCaptures.severe} of ${g.manualCaptures.captures} | ${g.layoutShifts} of ${g.layoutSamples} |`,
+        );
+      }
+      out.push("");
+    }
+    const seen = results.rows.filter((row) => row.score.visibility);
+    if (seen.length > 0) {
+      out.push("## Visible region");
+      out.push("");
+      out.push(
+        "The page against the part of the frame the person can see (`page-session.js` measures it on its own: the video's content box under " +
+          "its object-fit, clipped by the stage and the viewport, minus the layout's declared opaque bands; a build that declares none is the crop alone). " +
+          "**Holds**: framed holds (the ready windows where a script has them, else the default holds) where the ready cue came on / all; " +
+          "**page visible**: share of hold time with all four corners inside the region; **Afaste false**: \"Afaste um pouco\" shown while the whole " +
+          "page was visible, over the time it was; **Afaste right**: shown while it was not, over that time. **Ready**: cue-on samples (onsets) with a " +
+          "corner outside the region / all. **Auto**: automatic captures whose page has a corner outside the image / flagged of those / all fires. " +
+          "**Area**: the visible region as a share of the viewport (median).",
+      );
+      out.push("");
+      out.push("| session | holds ready / all | page visible | Afaste false | Afaste right | ready violations (onsets) | auto: corner outside / flagged / fires | area |");
+      out.push("|---|---:|---:|---:|---:|---:|---:|---:|");
+      const bySession = new Map();
+      for (const row of seen) {
+        const acc = bySession.get(row.session) ?? {
+          holds: 0, reached: 0, visibleMs: 0, hiddenMs: 0, falseMs: 0, rightMs: 0,
+          samples: 0, violations: 0, onsets: 0, onsetViolations: 0, fires: 0, outside: 0, flagged: 0, areas: [],
+        };
+        const v = row.score.visibility;
+        for (const h of v.holds) {
+          acc.holds += 1;
+          if (h.reached) acc.reached += 1;
+          acc.visibleMs += h.visibleMs;
+          acc.hiddenMs += h.hiddenMs;
+          acc.falseMs += h.moveBackFalseMs;
+          acc.rightMs += h.moveBackRightMs;
+        }
+        acc.samples += v.ready.samples;
+        acc.violations += v.ready.violations;
+        acc.onsets += v.ready.onsets;
+        acc.onsetViolations += v.ready.onsetViolations;
+        acc.fires += v.auto.fires;
+        acc.outside += v.auto.cornerOutside;
+        acc.flagged += v.auto.cornerOutsideFlagged;
+        if (v.area !== null) acc.areas.push(v.area);
+        bySession.set(row.session, acc);
+      }
+      const share = (a, b) => (b > 0 ? a / b : null);
+      for (const [session, a] of bySession) {
+        const areas = a.areas.sort((x, y) => x - y);
+        out.push(
+          `| ${session} | ${a.holds === 0 ? "–" : `${a.reached} / ${a.holds}`} | ${pct(share(a.visibleMs, a.visibleMs + a.hiddenMs), 0)} | ` +
+            `${pct(share(a.falseMs, a.visibleMs), 0)} | ${pct(share(a.rightMs, a.hiddenMs), 0)} | ${a.violations} / ${a.samples} (${a.onsetViolations} / ${a.onsets}) | ` +
+            `${a.outside} / ${a.flagged} / ${a.fires} | ${areas.length === 0 ? "–" : pct(areas[Math.floor(areas.length / 2)], 0)} |`,
         );
       }
       out.push("");
@@ -420,6 +472,7 @@ function filmStrip(script, record, score) {
 export function sessionKnobs(options) {
   const knobs = {};
   if (options.lane !== null && options.lane !== undefined) knobs.lane = options.lane;
+  if (options.fit !== null && options.fit !== undefined) knobs.fit = options.fit;
   if (options.cpu > 1) knobs.workerSlowdown = options.cpu;
   return knobs;
 }
@@ -431,18 +484,21 @@ export async function runSessionSuite({ page, throttle: _unused, options, outDir
   const sheets = [];
   const sheetDir = join(outDir, "sheets");
   mkdirSync(sheetDir, { recursive: true });
-  const listing = await openSessionPage(browser, origin, options.layout);
+  const listing = await openSessionPage(browser, origin, options.layout, options.viewport);
   const known = await listing.page.evaluate(() => window.__session.sessions());
   await listing.context.close();
-  // A group name (`regression`, `all`) stands for its sessions.
+  // A group name (`regression`, `all`, `default` — a plain run's sessions) stands for its sessions.
+  const plain = known.filter((s) => s.inDefault !== false).map((s) => s.id);
   const ids = [
     ...new Set(
-      (options.sessions ?? known.filter((s) => s.inDefault !== false).map((s) => s.id)).flatMap((id) =>
+      (options.sessions ?? plain).flatMap((id) =>
         id === "all"
           ? known.map((s) => s.id)
-          : known.some((s) => s.group === id)
-            ? known.filter((s) => s.group === id).map((s) => s.id)
-            : [id],
+          : id === "default"
+            ? plain
+            : known.some((s) => s.group === id)
+              ? known.filter((s) => s.group === id).map((s) => s.id)
+              : [id],
       ),
     ),
   ];
@@ -454,7 +510,7 @@ export async function runSessionSuite({ page, throttle: _unused, options, outDir
   for (const id of ids) {
     for (let seed = 1; seed <= options.sessionSeeds; seed += 1) {
       const started = Date.now();
-      const { context, page: phone, errors } = await openSessionPage(browser, origin, options.layout);
+      const { context, page: phone, errors } = await openSessionPage(browser, origin, options.layout, options.viewport);
       try {
         const cache = options.frameCache === false ? null : frameCacheKey(id, seed, options.stream, browserVersion);
         const prepared = await phone.evaluate(
@@ -533,8 +589,8 @@ export async function runSessionSuite({ page, throttle: _unused, options, outDir
  * A fresh phone-shaped context on the session page, ready to prepare — on the
  * given capture layout (`--layout`), or the library's default (`rail`).
  */
-export async function openSessionPage(browser, origin, layout = null) {
-  const context = await browser.newContext(PHONE);
+export async function openSessionPage(browser, origin, layout = null, viewport = null) {
+  const context = await browser.newContext(viewport === null || viewport === undefined ? PHONE : { ...PHONE, viewport });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(String(error)));

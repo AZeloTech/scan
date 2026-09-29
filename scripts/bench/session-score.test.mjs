@@ -5,6 +5,7 @@ import {
   frameOnScreen,
   hintSeries,
   hintWindow,
+  insideRegion,
   overlayAccuracy,
   overlaySeries,
   PAGELESS_CAPTURE,
@@ -15,6 +16,7 @@ import {
   scorePasses,
   scorePerf,
   scoreSession,
+  scoreVisibility,
   toPoints,
   truthOnScreen,
   UNSCORED_CAPTURE,
@@ -622,4 +624,56 @@ test("guidance: the ready cue's precision, auto-capture fires, latency, tremor a
   assert.equal(g.layout.shifts, 0);
   const pageless = scoreGuidance({ ...script, marks: { pageless: true } }, record, truthOnScreen(record), captures);
   assert.equal(pageless.auto.falseFires, 2);
+});
+
+test("visible region: holds, a false \"Afaste\", ready outside the region, auto corners outside", () => {
+  const t0 = 1000;
+  const frames = Array.from({ length: 400 }, () => ({ quad: PAGE }));
+  const overlay = (t, ready) => ({ type: "overlay", t: t0 + t, quad: null, opacity: 1, ready });
+  const hint = (t, key, shown) => ({ type: "hint", t: t0 + t, key, shown });
+  // The page spans 0.2–0.8; the region shows 0.1–0.9 until 2 s, then only 0.25–0.75 across.
+  const regions = [
+    { at: t0, x: 0.1, y: 0.1, width: 0.8, height: 0.8 },
+    { at: t0 + 2000, x: 0.25, y: 0.1, width: 0.5, height: 0.8 },
+  ];
+  const record = {
+    startedAt: t0,
+    frames,
+    presented: frames.map((_, k) => ({ k, at: t0 + (k * 1000) / 30 })),
+    actions: [{ what: "camera-live", at: t0 }],
+    regions,
+    events: [
+      overlay(0, false),
+      hint(500, "move-back", true),
+      hint(1000, "move-back", false),
+      overlay(1500, true),
+      overlay(2500, true),
+      overlay(3000, false),
+      hint(3000, "move-back", true),
+    ],
+  };
+  const script = { frame: FRAME, duration: 4000, marks: { holdFrom: 0, holdTo: 4000 } };
+  const captures = [
+    { trigger: "auto", cornerOutside: true, attention: "corner-outside" },
+    { trigger: "auto", cornerOutside: true, attention: null },
+    { trigger: "auto", cornerOutside: false, attention: null },
+    { trigger: "shutter", cornerOutside: true, attention: null },
+  ];
+  const v = scoreVisibility(script, record, truthOnScreen(record), captures);
+  assert.equal(v.holds.length, 1);
+  const h = v.holds[0];
+  assert.equal(h.reached, true);
+  assert.equal(h.visibleMs, 2000);
+  assert.equal(h.hiddenMs, 2000);
+  assert.equal(h.moveBackFalseMs, 500);
+  assert.equal(h.moveBackRightMs, 1000);
+  // Cue samples at 1.5 s (visible) and 2.5 s (a corner hidden): one violation, no onset violation.
+  assert.equal(v.ready.samples, 2);
+  assert.equal(v.ready.violations, 1);
+  assert.equal(v.ready.onsets, 1);
+  assert.equal(v.ready.onsetViolations, 0);
+  assert.ok(Math.abs(v.ready.worstOutside - 0.05) < 1e-9);
+  assert.deepEqual(v.auto, { fires: 3, cornerOutside: 2, cornerOutsideFlagged: 1, flagged: 1 });
+  assert.equal(insideRegion(PAGE, { x: 0.2, y: 0.2, width: 0.6, height: 0.6 }), true);
+  assert.equal(insideRegion(PAGE, { x: 0.2, y: 0.2, width: 0.6, height: 0.6 }, 0.01), false);
 });

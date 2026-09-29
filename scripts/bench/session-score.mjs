@@ -415,6 +415,11 @@ export function scoreCaptures(script, record) {
       captureMs: capture.doneAt - capture.t,
       confirmEdited: done?.edited ?? null,
       confirmOpened: open !== null,
+      // The app's own check of the image before the confirm screen (Phase 5a):
+      // the reason it flagged the page for attention, or null.
+      attention: capture.attention ?? null,
+      // Some corner of the page lies outside the image that became it.
+      cornerOutside: truthQuad === undefined || truthQuad === null ? null : !truthQuad.every(([x, y]) => x >= 0 && x <= 1 && y >= 0 && y <= 1),
     };
   });
 }
@@ -528,6 +533,7 @@ export function scoreSession(script, record) {
   };
   out.hints = hintTimeline(record);
   out.guidance = scoreGuidance(script, record, gtAt, out.captures);
+  out.visibility = scoreVisibility(script, record, gtAt, out.captures);
   out.captureDetects = scoreCaptureDetects(record);
   out.perf = scorePerf(record);
   out.startup = scoreStartup(record, series, frame);
@@ -974,5 +980,152 @@ export function scoreGuidance(script, record, gtAt, captures) {
       repeatFires: Math.max(0, fires.filter((f) => !f.falseFire).length - firedPages.size),
     },
     layout: { samples: boxes.length, shifts, maxShiftPx: shiftPx },
+  };
+}
+
+/* ── the visible region: what the person can see (Phase 5a) ─────────────── */
+
+/** Step of the time grid the visible-region scores sample (ms). */
+const VIS_STEP_MS = 50;
+
+/**
+ * The visible region at page time `t`: the last `regions` sample the page
+ * measured at or before it (`page-session.js`: the video's content box, its
+ * clips and the layout's declared occluders), else the crop the page measured
+ * as the camera went live (`record.visible`), else the whole frame.
+ */
+export function regionAt(record) {
+  const regions = record.regions ?? [];
+  const fallback = record.visible ?? { x: 0, y: 0, width: 1, height: 1 };
+  return (t) => {
+    let lo = 0;
+    let hi = regions.length - 1;
+    if (hi < 0 || regions[0].at > t) return regions[0] ?? fallback;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (regions[mid].at <= t) lo = mid;
+      else hi = mid - 1;
+    }
+    return regions[lo];
+  };
+}
+
+/** Every corner of `quad` (`[[x, y] × 4]`, frame fractions) inside `region`, `margin` in from its edges (fractions of the frame). */
+export function insideRegion(quad, region, margin = 0) {
+  return quad.every(
+    ([x, y]) =>
+      x >= region.x + margin && x <= region.x + region.width - margin && y >= region.y + margin && y <= region.y + region.height - margin,
+  );
+}
+
+/**
+ * The page against the part of the frame the person can see:
+ *
+ * - `holds` — each framed hold (`marks.ready` windows where a script has
+ *   them, else the default sessions' `holdFrom…holdTo` and
+ *   `lockFrom2…holdTo2`): whether the ready cue came on in it (`reached`),
+ *   the share of it the whole page was visible, and "Afaste um pouco" shown
+ *   while the whole page was visible (`moveBackFalseMs` over `visibleMs`) or
+ *   while it was not (`moveBackRightMs` over `hiddenMs`);
+ * - `ready` — every overlay sample with the ready cue on, judged against
+ *   the truth on screen: `violations` where a corner of the page lay outside
+ *   the visible region (a page-less frame is the guidance score's problem,
+ *   not counted here), and the same at the cue's onsets;
+ * - `auto` — automatic captures whose page has a corner outside the image
+ *   that became it, and how many of those the app flagged;
+ * - `area` — the visible region's size as a share of the viewport (the
+ *   camera the person perceives), median over the live run.
+ */
+export function scoreVisibility(script, record, gtAt, captures) {
+  const marks = script.marks ?? {};
+  const t0 = record.startedAt;
+  const at = (cameraMs) => t0 + cameraMs;
+  const region = regionAt(record);
+  const series = hintSeries(record);
+  const windows =
+    (marks.ready ?? []).length > 0
+      ? marks.ready.map((w) => [w.from, w.to])
+      : [
+          ...(marks.holdFrom !== undefined && marks.holdTo !== undefined ? [[marks.holdFrom, marks.holdTo]] : []),
+          ...(marks.lockFrom2 !== undefined && marks.holdTo2 !== undefined ? [[marks.lockFrom2, marks.holdTo2]] : []),
+        ];
+  const cue = record.events.filter((e) => e.type === "overlay").map((e) => ({ t: e.t, ready: e.ready === true }));
+  const readyAt = (t) => {
+    let on = false;
+    for (const s of cue) {
+      if (s.t > t) break;
+      on = s.ready;
+    }
+    return on;
+  };
+  const holds = windows.map(([from, to]) => {
+    const w = { ms: 0, readyMs: 0, visibleMs: 0, hiddenMs: 0, moveBackFalseMs: 0, moveBackRightMs: 0, unknownMs: 0 };
+    for (let t = at(from); t < at(to); t += VIS_STEP_MS) {
+      w.ms += VIS_STEP_MS;
+      if (readyAt(t)) w.readyMs += VIS_STEP_MS;
+      const gt = gtAt(t);
+      if (gt === undefined || gt === null) {
+        w.unknownMs += VIS_STEP_MS;
+        continue;
+      }
+      const visible = insideRegion(toPoints(gt), region(t));
+      const moveBack = hintAt(series, t) === "move-back";
+      if (visible) {
+        w.visibleMs += VIS_STEP_MS;
+        if (moveBack) w.moveBackFalseMs += VIS_STEP_MS;
+      } else {
+        w.hiddenMs += VIS_STEP_MS;
+        if (moveBack) w.moveBackRightMs += VIS_STEP_MS;
+      }
+    }
+    return {
+      from,
+      to,
+      ...w,
+      reached: w.readyMs > 0,
+      visibleShare: rate(w.visibleMs, w.visibleMs + w.hiddenMs),
+      moveBackFalseShare: rate(w.moveBackFalseMs, w.visibleMs),
+    };
+  });
+  const ready = { samples: 0, violations: 0, onsets: 0, onsetViolations: 0, worstOutside: 0 };
+  let previous = false;
+  for (const s of cue) {
+    const onset = s.ready && !previous;
+    previous = s.ready;
+    if (!s.ready) continue;
+    const gt = gtAt(s.t);
+    if (gt === undefined || gt === null) continue;
+    const quad = toPoints(gt);
+    const r = region(s.t);
+    ready.samples += 1;
+    if (onset) ready.onsets += 1;
+    if (!insideRegion(quad, r)) {
+      ready.violations += 1;
+      if (onset) ready.onsetViolations += 1;
+      const outside = Math.max(
+        ...quad.map(([x, y]) => Math.max(r.x - x, x - (r.x + r.width), r.y - y, y - (r.y + r.height))),
+      );
+      ready.worstOutside = Math.max(ready.worstOutside, outside);
+    }
+  }
+  const autos = captures.filter((c) => c.trigger === "auto");
+  const outside = autos.filter((c) => c.cornerOutside === true);
+  const liveFrom = record.actions?.find((a) => a.what === "camera-live")?.at ?? t0;
+  const areas = (record.regions ?? [])
+    .filter((r) => r.at >= liveFrom && r.viewW > 0 && r.viewH > 0)
+    .map((r) => (r.cssW * r.cssH) / (r.viewW * r.viewH))
+    .sort((a, b) => a - b);
+  const last = (record.regions ?? []).at(-1) ?? null;
+  return {
+    holds,
+    ready,
+    auto: {
+      fires: autos.length,
+      cornerOutside: outside.length,
+      cornerOutsideFlagged: outside.filter((c) => c.attention !== null).length,
+      flagged: autos.filter((c) => c.attention !== null).length,
+    },
+    area: areas.length === 0 ? null : areas[Math.floor(areas.length / 2)],
+    region: last === null ? (record.visible ?? null) : { x: last.x, y: last.y, width: last.width, height: last.height, fit: last.fit },
   };
 }
