@@ -431,7 +431,7 @@ export async function runSessionSuite({ page, throttle: _unused, options, outDir
   const sheets = [];
   const sheetDir = join(outDir, "sheets");
   mkdirSync(sheetDir, { recursive: true });
-  const listing = await openSessionPage(browser, origin);
+  const listing = await openSessionPage(browser, origin, options.layout);
   const known = await listing.page.evaluate(() => window.__session.sessions());
   await listing.context.close();
   // A group name (`regression`, `all`) stands for its sessions.
@@ -454,7 +454,7 @@ export async function runSessionSuite({ page, throttle: _unused, options, outDir
   for (const id of ids) {
     for (let seed = 1; seed <= options.sessionSeeds; seed += 1) {
       const started = Date.now();
-      const { context, page: phone, errors } = await openSessionPage(browser, origin);
+      const { context, page: phone, errors } = await openSessionPage(browser, origin, options.layout);
       try {
         const cache = options.frameCache === false ? null : frameCacheKey(id, seed, options.stream, browserVersion);
         const prepared = await phone.evaluate(
@@ -529,13 +529,16 @@ export async function runSessionSuite({ page, throttle: _unused, options, outDir
   };
 }
 
-/** A fresh phone-shaped context on the session page, ready to prepare. */
-export async function openSessionPage(browser, origin) {
+/**
+ * A fresh phone-shaped context on the session page, ready to prepare — on the
+ * given capture layout (`--layout`), or the library's default (`rail`).
+ */
+export async function openSessionPage(browser, origin, layout = null) {
   const context = await browser.newContext(PHONE);
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(String(error)));
-  await page.goto(`${origin}/page-session.html`);
+  await page.goto(`${origin}/page-session.html${layout === null || layout === undefined ? "" : `?layout=${encodeURIComponent(layout)}`}`);
   await page.waitForFunction(() => window.__sessionReady === true, null, { timeout: 60_000 });
   return { context, page, errors };
 }

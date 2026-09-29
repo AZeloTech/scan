@@ -16,6 +16,7 @@ npm run bench -- --suite session                           # every session once,
 npm run bench -- --suite session --session page-swap --seeds 3 --cpu 4
 npm run bench -- --suite session --session sustained-hold --seeds 3 --cpu 4   # 75 s, remounts, leaks
 npm run bench -- --suite session --seeds 3 --lane main     # force the main-thread detection lane
+npm run bench -- --suite session --seeds 3 --layout standard   # on the pre-rail capture screen (default: rail)
 npm run bench -- --suite session --session regression --seeds 5   # the adversarial sessions (fast pans, steep tilts…)
 npm run bench -- --suite session --session guidance --seeds 5     # hints, the ready cue, auto-capture (Phase 4)
 npm run bench:webkit                                       # the flow end to end in WebKit, both lanes
@@ -596,7 +597,10 @@ it), `marks.tremor` (no automatic capture may fire inside) and, page-less,
 **The `breaker` group** — **not in a plain run**; `--session breaker` runs
 all thirteen (Phase 4's adversarial sessions, kept as a permanent group).
 Every one has auto-capture on (the scripted page mounts `<ScanFlow>` with
-`experimentalAutoCapture` whenever a script says `autoCapture`); besides the
+`experimentalAutoCapture` whenever a script says `autoCapture`, and leaves
+the prop out otherwise — as a host that says nothing does — and switches it
+on through whichever control the layout has: `rail`'s MANUAL · AUTOMÁTICO
+radios or the pressed-state toggle elsewhere); besides the
 guidance marks, each may carry `marks.noFire` — windows where an automatic
 capture would take a bad image (the page cut off, a hot spot on it, still
 moving) — scored as "not owed" fires:
@@ -748,6 +752,16 @@ outlived it: **workers** constructed and not terminated, and **image bitmaps**
 the app made (through the global `createImageBitmap`) that were neither
 closed nor transferred to a worker — open, or collected by the GC while still
 open (the one that holds a camera frame until a collection happens to run).
+
+**The capture layout.** The session and real-video suites (and
+`bench:webkit`) drive the library's default capture screen, `rail`, unless
+`--layout` names another (`standard`, `classic`, `filmstrip`, `onehand`,
+`collapse`); the run records it in `config.layout`. It is not part of the
+sample, so `--compare` across layouts is allowed — that is how a layout
+switch is checked for regressions. `rail` is full-bleed: on a viewport
+taller than the stream the video is cropped at its sides, so the probe's
+visible crop (and every overlay/guidance number measured against it) is not
+the `standard` card's.
 
 **Lanes and a slow phone's worker.** `--lane main|worker` forces the app's
 detection lane through the probe (a bench-only setting the page hangs on its

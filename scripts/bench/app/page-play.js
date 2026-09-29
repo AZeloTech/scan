@@ -310,7 +310,9 @@ function renderResult(score) {
 /* ── running ───────────────────────────────────────────────────────────── */
 
 async function freshPhone() {
-  ui.iframe.src = `/page-session.html?play=${Date.now()}`;
+  // `&layout=` on the playground reaches the phone: the capture layout (the library's default, `rail`, without it).
+  const layout = new URLSearchParams(location.search).get("layout");
+  ui.iframe.src = `/page-session.html?play=${Date.now()}${layout === null ? "" : `&layout=${encodeURIComponent(layout)}`}`;
   await new Promise((resolve) => ui.iframe.addEventListener("load", resolve, { once: true }));
   const win = ui.iframe.contentWindow;
   const deadline = performance.now() + 30000;

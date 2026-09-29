@@ -312,11 +312,37 @@ async function confirmWatcher() {
   }
 }
 
-/** The auto-capture toggle, by its accessible name — absent in a build without one. */
+/**
+ * The auto-capture control, as a switch — or null where there is none. Two
+ * shapes: a pressed-state toggle named "Captura automática" (`standard`,
+ * `onehand`, `collapse`), and `rail`'s MANUAL · AUTOMÁTICO radio pair (the
+ * default layout).
+ */
 function autoToggle() {
   const label = copy.capture.autoCapture;
-  if (typeof label !== "string") return null;
-  return buttons().find((b) => b.getAttribute("aria-label") === label && !b.disabled) ?? null;
+  const toggle =
+    typeof label === "string" ? buttons().find((b) => b.getAttribute("aria-label") === label && !b.disabled) : undefined;
+  if (toggle !== undefined) {
+    const on = () => toggle.getAttribute("aria-pressed") === "true";
+    return {
+      on,
+      set: (want) => {
+        if (on() !== want) toggle.click();
+      },
+    };
+  }
+  const modeLabel = copy.captureLayout?.modeLabel;
+  const group = [...document.querySelectorAll('[role="radiogroup"]')].find((g) => g.getAttribute("aria-label") === modeLabel);
+  const radios = group === undefined ? [] : [...group.querySelectorAll('[role="radio"]')];
+  if (radios.length !== 2) return null;
+  const [manual, auto] = radios;
+  const on = () => auto.getAttribute("aria-checked") === "true";
+  return {
+    on,
+    set: (want) => {
+      if (on() !== want) (want ? auto : manual).click();
+    },
+  };
 }
 
 /** The scripted user, from the primer to the last confirm (unscripted: only the primer). */
@@ -342,7 +368,7 @@ async function act({ scripted = true } = {}) {
     const toggle = await waitFor(autoToggle, 3000);
     if (toggle === null) log("auto-toggle-missing");
     else {
-      if (toggle.getAttribute("aria-pressed") !== "true") toggle.click();
+      toggle.set(true);
       log("auto-on");
     }
     confirming = true;
@@ -391,9 +417,15 @@ function flow() {
   return createElement(ScanFlow, {
     assetBaseUrl: "/assets/",
     lang: "pt-BR",
-    // The auto-capture toggle is experimental and off unless the host asks:
-    // only a script that switches it on asks.
-    experimentalAutoCapture: script?.autoCapture === true,
+    // The auto-capture toggle: a script that switches it on asks for it
+    // (`true` also puts it on `standard`); otherwise the prop is left out, as
+    // a host that says nothing would — the default `rail` shows the toggle
+    // (off), `standard` does not.
+    experimentalAutoCapture: script?.autoCapture === true ? true : undefined,
+    // The capture layout, when the page is asked for one (`?layout=standard|
+    // classic|filmstrip|onehand|collapse`, from `npm run bench -- --layout` or
+    // the playground); the library's default (`rail`) otherwise.
+    captureLayout: new URLSearchParams(location.search).get("layout") ?? undefined,
     onComplete: () => hostEvents.push({ name: "complete", at: performance.now() }),
     onCancel: (reason) => hostEvents.push({ name: "cancel", reason, at: performance.now() }),
     onEvent: (event) => hostEvents.push({ ...event, at: performance.now() }),
@@ -426,8 +458,8 @@ async function run({ scripted = true } = {}) {
   // screen and its confirmation.
   if (script.autoCapture === true) {
     const toggle = autoToggle();
-    if (toggle !== null && toggle.getAttribute("aria-pressed") === "true") {
-      toggle.click();
+    if (toggle !== null && toggle.on()) {
+      toggle.set(false);
       log("auto-off");
     }
     // Settled: no photo being taken (the shutter enabled), none waiting for

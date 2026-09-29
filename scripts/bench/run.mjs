@@ -8,7 +8,7 @@
  *                    [--out dir] [--headed]
  *   npm run bench -- --suite session [--session approach-hold,page-swap]
  *                    [--seeds 1] [--stream 720x1280] [--cpu 4] [--lane main|worker]
- *                    [--no-frame-cache]
+ *                    [--no-frame-cache] [--layout rail|standard|classic|…]
  *   SCAN_REAL_MEDIA=<dir> npm run bench -- --suite real-stills|real-video
  *                    [--variants …] [--cpu 4] [--skip-replay]
  *
@@ -50,6 +50,7 @@ import { DEFAULT_STREAM } from "./suites/session.mjs";
 const USAGE = `usage: npm run bench -- [--suite detector|session|real-stills|real-video|all|emulator]
        [--family F1,F2,…] [--setting name,…] [--seeds N] [--variants ml,classical,production,refined,ml+refine,ml+live]
        [--session approach-hold,…] [--stream WxH] [--skip-replay] [--lane main|worker] [--no-frame-cache]
+       [--layout rail|standard|classic|filmstrip|onehand|collapse]
        [--cpu 1|4|6] [--size portrait|landscape|WxH] [--compare results.json]
        [--out dir] [--headed]
 real-stills / real-video need SCAN_REAL_MEDIA=<dir>; their output goes to the cache, never the repo.`;
@@ -85,6 +86,7 @@ function parse() {
       "skip-replay": { type: "boolean", default: false },
       lane: { type: "string" },
       "no-frame-cache": { type: "boolean", default: false },
+      layout: { type: "string" },
       help: { type: "boolean", default: false },
     },
     strict: true,
@@ -124,7 +126,21 @@ function parse() {
     skipReplay: values["skip-replay"],
     lane: parseLane(values.lane),
     frameCache: !values["no-frame-cache"],
+    layout: parseLayout(values.layout),
   };
+}
+
+/**
+ * `--layout`: the capture layout the session and real-video suites drive
+ * (`captureLayout` on `<ScanFlow>`); absent, the library's default (`rail`).
+ * Checked here because the library itself falls back to the default on a
+ * typo — a bench run must not silently measure another screen.
+ */
+const LAYOUTS = ["rail", "standard", "classic", "filmstrip", "onehand", "collapse"];
+function parseLayout(value) {
+  if (value === undefined) return null;
+  if (!LAYOUTS.includes(value)) throw new Error(`--layout ${value}: expected one of ${LAYOUTS.join(", ")}`);
+  return value;
 }
 
 /** `--lane main|worker`: force the app's detection lane (a bench knob, through the probe). */
@@ -321,9 +337,17 @@ async function main() {
             cpu: options.cpu,
             size: options.size,
             frame: frameSize(options.size),
-            ...(suiteName === "session" ? { sessions: options.sessions, stream: options.stream, lane: options.lane } : {}),
+            ...(suiteName === "session"
+              ? { sessions: options.sessions, stream: options.stream, lane: options.lane, layout: options.layout ?? "rail" }
+              : {}),
           }
-        : { variants: options.variants, cpu: options.cpu, media: options.real.media, skipReplay: options.skipReplay };
+        : {
+            variants: options.variants,
+            cpu: options.cpu,
+            media: options.real.media,
+            skipReplay: options.skipReplay,
+            ...(suiteName === "real-video" ? { layout: options.layout ?? "rail" } : {}),
+          };
       const comparing = options.compare !== null && options.compare.results.suite === suiteName;
       // Refuse an incomparable baseline now, not after the run.
       if (comparing) checkComparable(options.compare.results, { schema: RESULTS_SCHEMA, suite: suiteName, synthetic: suite.synthetic, config });

@@ -25,7 +25,11 @@
  * Writes `.bench-out/webkit-smoke-<stamp>/results.json`. Linux WebKit is not
  * iOS Safari: this proves the paths run, not how a phone feels.
  *
- *   npm run bench:webkit [-- --session tremor-hold --seed 1 --out dir]
+ * The capture screen is the library's default layout (`rail`, whose
+ * MANUAL · AUTOMÁTICO rail is the auto-capture switch) unless `--layout`
+ * names another (`standard` for the screen that shipped before it).
+ *
+ *   npm run bench:webkit [-- --session tremor-hold --seed 1 --layout standard --out dir]
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -55,11 +59,12 @@ function parse() {
     options: {
       session: { type: "string", default: "too-far" },
       seed: { type: "string", default: "1" },
+      layout: { type: "string" },
       out: { type: "string" },
     },
     strict: true,
   });
-  return { session: values.session, seed: Number(values.seed), out: values.out ?? null };
+  return { session: values.session, seed: Number(values.seed), layout: values.layout ?? null, out: values.out ?? null };
 }
 
 /** What a run must show to pass, as `[name, ok, detail]`. */
@@ -99,7 +104,7 @@ async function main() {
   ensureRuntimeAssets({ styles: true });
   await buildBenchApp();
   const server = await startServer();
-  const results = { createdAt: new Date().toISOString(), session: options.session, seed: options.seed, runs: [] };
+  const results = { createdAt: new Date().toISOString(), session: options.session, seed: options.seed, layout: options.layout ?? "rail", runs: [] };
   let failed = false;
   try {
     // 1. Chromium renders the session's frames into the frame cache.
@@ -123,7 +128,7 @@ async function main() {
       const page = await context.newPage();
       const errors = [];
       page.on("pageerror", (error) => errors.push(String(error)));
-      await page.goto(`${server.url}/page-session.html`);
+      await page.goto(`${server.url}/page-session.html${options.layout === null ? "" : `?layout=${encodeURIComponent(options.layout)}`}`);
       await page.waitForFunction(() => window.__sessionReady === true, null, { timeout: 60_000 });
       const ready = await page.evaluate(
         ([name, seed, size, cache, settings]) =>

@@ -149,7 +149,7 @@ async function replayThroughApp(browser, origin, options, clip, { reference, ref
       tail: Math.round(TAP_TAIL_S * fps),
     }) ?? Math.round(clip.replay.frames * 0.6);
   const tapAtMs = Math.round((tapK * 1000) / fps);
-  const { context, page, errors } = await openSessionPage(browser, origin);
+  const { context, page, errors } = await openSessionPage(browser, origin, options.layout);
   try {
     const prepared = await page.evaluate(
       ([key, tap, labels, knobs]) => window.__session.prepareClip(key, { tapAtMs: tap, labels, knobs }),
