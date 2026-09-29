@@ -114,6 +114,16 @@ export function ArrowLeftIcon(props: IconProps) {
   );
 }
 
+/** Onward — the experimental capture layouts' round "next" button. */
+export function ArrowRightIcon(props: IconProps) {
+  return (
+    <Glyph {...props}>
+      <path d="M4.5 12h15" />
+      <path d="M13 5.5 19.5 12 13 18.5" />
+    </Glyph>
+  );
+}
+
 /**
  * The page editor's overflow menu — three dots, and the only icon in the set
  * drawn as filled discs rather than as strokes: a 1.75 px ring at r=1.2 closes

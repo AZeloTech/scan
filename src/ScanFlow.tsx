@@ -36,6 +36,7 @@ import { FlowScreens } from "./FlowScreens";
 import { LangProvider } from "./components/I18n";
 import { createExitGate, type ExitGate } from "./lib/exit-gate";
 import { SHELL_ROOT_STYLE } from "./lib/shell-theme";
+import { autoCaptureOffered, pickCaptureLayout } from "./lib/capture-layout";
 
 const DEFAULT_MAX_PAGES = 20;
 
@@ -52,8 +53,14 @@ export function ScanFlow(props: ScanFlowProps) {
     onPagesChange,
     onEvent,
     className,
-    experimentalAutoCapture = false,
+    // Left `undefined` when omitted: omitted and `false` mean different things
+    // (`autoCaptureOffered`).
+    experimentalAutoCapture,
+    captureLayout: captureLayoutProp,
+    experimentalCaptureLayout,
   } = props;
+
+  const captureLayout = pickCaptureLayout(captureLayoutProp, experimentalCaptureLayout);
 
   /** The auto-capture choice, for this flow only: off in every new one. */
   const autoCaptureChosen = useRef(false);
@@ -156,11 +163,15 @@ export function ScanFlow(props: ScanFlowProps) {
         images: intake?.images ?? true,
         pdf: intake?.pdf ?? false,
       },
-      autoCapture: { offered: experimentalAutoCapture, chosen: autoCaptureChosen },
+      autoCapture: {
+        offered: autoCaptureOffered(captureLayout, experimentalAutoCapture),
+        chosen: autoCaptureChosen,
+      },
+      captureLayout,
       emit,
       reportError,
     }),
-    [urls, lang, maxPages, maxBytes, fileNameProp, intake?.camera, intake?.images, intake?.pdf, experimentalAutoCapture, emit]
+    [urls, lang, maxPages, maxBytes, fileNameProp, intake?.camera, intake?.images, intake?.pdf, experimentalAutoCapture, captureLayout, emit]
   );
 
   const handleStep = useCallback((step: ScanStep) => emit({ name: "step", step }), [emit]);

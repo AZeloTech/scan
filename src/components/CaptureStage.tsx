@@ -73,9 +73,9 @@ export type { Capture } from "@/lib/capture-intake";
  * corners the capture travels with and *guides* (`lib/guidance.ts`): one hint
  * at a time in a reserved slot at the top, and a ready cue on the corner
  * brackets once the page is framed, sharp and still (with one haptic tick and
- * a spoken "ready" per page). **Auto-capture** is experimental: its toggle is
- * offered only when the host asks for it (`experimentalAutoCapture` on
- * `<ScanFlow>`), and only when the person switches it on (off in every new
+ * a spoken "ready" per page). **Auto-capture** is experimental: whether its
+ * toggle is offered is the layout's and the host's call (`autoCaptureOffered`
+ * in `lib/capture-layout.ts`), and only when the person switches it on (off in every new
  * flow; the flow remembers the choice while it is open, never in storage)
  * does the screen take a photo by itself: once the ready cue has held, with a
  * countdown drawn along the brackets — through exactly the path a tap takes,
@@ -171,6 +171,70 @@ type CaptureTrace = Omit<
   bufferedConfidence: number | null;
 };
 
+/**
+ * What a full-bleed capture layout (`captureLayout`: `rail`, the default, or
+ * an experimental one) is handed to draw its chrome with. The stage is the
+ * same viewfinder the `standard` screen shows — video, frame tap, corner brackets, ready cue, countdown,
+ * flash, fallback surface — and everything else is state and actions the
+ * layout places where its design puts them. The layout owns placement only:
+ * what a tap captures, when the torch lights and when auto-capture fires is
+ * decided here, once, for every layout.
+ */
+export interface CaptureChromeParts {
+  /** The viewfinder. Put it in a box whose size never depends on the chrome. */
+  stage: React.ReactNode;
+  mode: StageMode;
+  /** Live and taking pages: the shutter is on screen. */
+  live: boolean;
+  busy: boolean;
+  /** The one hint, in words and tone, or none. */
+  hint: { key: HintKey; text: string; tone: "night" | "alert" | "warning" } | null;
+  /** Light the torch from the low-light hint — null unless that offer stands. */
+  torchOffer: (() => void) | null;
+  torch: {
+    available: boolean;
+    on: boolean;
+    toggle: () => void;
+    ref: React.RefObject<HTMLButtonElement | null>;
+  };
+  autoCapture: { offered: boolean; on: boolean; toggle: () => void };
+  /** The ready cue (the brackets carry it; a layout may echo it). */
+  ready: boolean;
+  /** A page is tracked right now. */
+  hasQuad: boolean;
+  /** The one prose box: a failed capture, or the page limit. */
+  notice: string | null;
+  /**
+   * The in-camera "Já tenho a foto" pick — the `standard` screen's gallery
+   * pill, same handler: the file goes through the same preparation, detect
+   * and confirm-corners screen as a photo. Null whenever that pill would not
+   * be there (not live, at the page limit, or no image intake).
+   */
+  gallery: {
+    busy: boolean;
+    onChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
+  } | null;
+  shutter: {
+    ref: React.RefObject<HTMLButtonElement | null>;
+    label: string;
+    busy: boolean;
+    onClick: () => void;
+  };
+  /** Pinned to the tracked page's top-left corner (see `LiveOverlayRefs.anchor`). */
+  anchorRef: React.RefObject<HTMLDivElement | null>;
+  /** Draws the auto-capture countdown as a ring (see `LiveOverlayRefs.ring`). */
+  ringRef: React.RefObject<SVGCircleElement | null>;
+}
+
+/** A full-bleed layout's chrome, handed to {@link CaptureStage}. */
+export interface CaptureChrome {
+  /** The stage element's own classes — it must fill a box of fixed size. */
+  stageClassName: string;
+  /** Where the framing brackets sit while no page is tracked (default: 16px in from the stage). */
+  framingClassName?: string;
+  render: (parts: CaptureChromeParts) => React.ReactNode;
+}
+
 interface CaptureStageProps {
   onCapture: (capture: Capture) => void;
   /** "Fotografar página 3" — the fallback's title and the shutter's label. */
@@ -208,15 +272,20 @@ interface CaptureStageProps {
   children?: React.ReactNode;
   className?: string;
   /**
-   * Offer the auto-capture toggle (experimental; `experimentalAutoCapture`
-   * on `<ScanFlow>`). Absent or false: no toggle, and nothing ever captures
-   * by itself.
+   * Offer the auto-capture toggle (experimental; decided by `<ScanFlow>` from
+   * the layout and `experimentalAutoCapture`). Absent or false: no toggle,
+   * and nothing ever captures by itself.
    */
   autoCaptureOffered?: boolean;
   /** Auto-capture as the person left it in this flow (off in a new one). */
   autoCaptureOn?: boolean;
   /** They switched it: the flow keeps the choice while it is open — never in storage. */
   onAutoCaptureChange?: (on: boolean) => void;
+  /**
+   * A full-bleed layout's chrome. Absent: the `standard` screen, exactly —
+   * `rightAction`, `children` and the control row are only read without it.
+   */
+  chrome?: CaptureChrome;
 }
 
 export function CaptureStage({
@@ -234,6 +303,7 @@ export function CaptureStage({
   autoCaptureOffered = false,
   autoCaptureOn = false,
   onAutoCaptureChange,
+  chrome,
 }: CaptureStageProps) {
   const copy = useCopy();
   // The asset base the host gave the flow. Every loader below is handed it
@@ -918,11 +988,14 @@ export function CaptureStage({
     }
   }, [shownHints]);
 
-  return (
-    <div className={clsx("flex min-h-0 flex-1 flex-col gap-3", className)}>
+  const stage = (
       <div
         ref={stageRef}
-        className="relative min-h-0 flex-1 overflow-hidden rounded-lg bg-shell-sunken"
+        className={
+          chrome === undefined
+            ? "relative min-h-0 flex-1 overflow-hidden rounded-lg bg-shell-sunken"
+            : chrome.stageClassName
+        }
       >
         {/* Always mounted: the stream is attached to this node before the mode
             flips to "live", so it must exist from the first render. Kept out
@@ -957,7 +1030,7 @@ export function CaptureStage({
           />
         )}
 
-        {mode === "live" && !detect.hasQuad && <FramingBrackets />}
+        {mode === "live" && !detect.hasQuad && <FramingBrackets boxClassName={chrome?.framingClassName} />}
 
         {mode === "live" && detect.available && detect.frameBox !== null && (
           // Positioned over the *rendered* frame, not the stage: object-cover
@@ -1033,7 +1106,7 @@ export function CaptureStage({
           </svg>
         )}
 
-        {mode === "live" && (
+        {chrome === undefined && mode === "live" && (
           // The hint slot: one hint at a time, in a box of fixed height that
           // is there whether it holds anything or not — a hint coming or
           // going never moves anything else (and the frame never resizes).
@@ -1153,6 +1226,7 @@ export function CaptureStage({
             It sits after the fallback label in the DOM (it has to draw over
             it) and lets every tap through to the frame underneath — tapping
             the frame is one of the two ways to take the photo. */}
+        {chrome === undefined && (
         <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col items-center gap-2 px-3 pb-3">
           {stageNotice !== null && (
             <Notice tone="night" className="w-full shadow-lg">
@@ -1209,6 +1283,7 @@ export function CaptureStage({
             </div>
           )}
         </div>
+        )}
 
         {/* The capture flash, driven by GSAP opacity — never a class toggle. */}
         <div
@@ -1217,6 +1292,58 @@ export function CaptureStage({
           className="pointer-events-none absolute inset-0 bg-shell-ink opacity-0"
         />
       </div>
+  );
+
+  if (chrome !== undefined) {
+    return (
+      <>
+        {chrome.render({
+          stage,
+          mode,
+          live: mode === "live" && !disabled,
+          busy,
+          hint:
+            shownHint === null
+              ? null
+              : { key: shownHint, text: hintCopy(copy.capture.hints, shownHint), tone: HINT_TONE[shownHint] },
+          torchOffer: offerTorch
+            ? () => {
+                setTorchOn(true);
+                torchToggleRef.current?.focus();
+              }
+            : null,
+          torch: {
+            available: torchAvailable,
+            on: torchOn,
+            toggle: () => setTorchOn((on) => !on),
+            ref: torchToggleRef,
+          },
+          autoCapture: { offered: autoCaptureOffered, on: autoCapture, toggle: toggleAutoCapture },
+          ready: detect.ready,
+          hasQuad: detect.hasQuad,
+          notice: stageNotice,
+          gallery:
+            mode === "live" && !disabled && intakeImages
+              ? {
+                  busy,
+                  onChange: (event) => {
+                    void handleFile(event);
+                  },
+                }
+              : null,
+          shutter: { ref: shutterRef, label: captureLabel, busy, onClick: handleShutter },
+          anchorRef: detect.overlay.anchor,
+          ringRef: detect.overlay.ring,
+        })}
+        <canvas ref={gateCanvasRef} className="hidden" />
+        <LiveRegion message={announcement} />
+      </>
+    );
+  }
+
+  return (
+    <div className={clsx("flex min-h-0 flex-1 flex-col gap-3", className)}>
+      {stage}
 
       <canvas ref={gateCanvasRef} className="hidden" />
 
@@ -1376,18 +1503,20 @@ function drawStill(still: ImageBitmap): HTMLCanvasElement {
  * aside the moment the detector has an actual quad to show — two frames on one
  * page is one frame too many.
  */
-function FramingBrackets() {
+function FramingBrackets({ boxClassName }: { boxClassName?: string }) {
   // Always light with a dark shadow, whatever the shell: these are drawn over
   // the camera image, and a dark bracket in a dark room is no bracket at all.
   const common =
     "pointer-events-none absolute h-7 w-7 text-warm drop-shadow-[0_1px_3px_rgba(0,0,0,0.85)]";
+  // The box the four marks sit in: the whole stage on the `standard` screen; a
+  // full-bleed layout insets it clear of the chrome drawn over its stage.
   return (
-    <>
+    <div aria-hidden="true" className={clsx("pointer-events-none absolute", boxClassName ?? "inset-0")}>
       <Bracket className={clsx(common, "left-4 top-4")} d="M2 10V4.5A2.5 2.5 0 0 1 4.5 2H10" />
       <Bracket className={clsx(common, "right-4 top-4")} d="M26 10V4.5A2.5 2.5 0 0 0 23.5 2H18" />
       <Bracket className={clsx(common, "bottom-4 left-4")} d="M2 18v5.5A2.5 2.5 0 0 0 4.5 26H10" />
       <Bracket className={clsx(common, "bottom-4 right-4")} d="M26 18v5.5A2.5 2.5 0 0 1 23.5 26H18" />
-    </>
+    </div>
   );
 }
 

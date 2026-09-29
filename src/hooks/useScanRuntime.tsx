@@ -13,6 +13,7 @@
 
 import { createContext, useContext, type ReactNode } from "react";
 import type { AssetUrls } from "@/lib/runtime-config";
+import type { CaptureLayout } from "@/lib/capture-layout";
 import type { ScanErrorCode, ScanEvent, ScanLang } from "@/types";
 
 export interface ScanRuntime {
@@ -41,6 +42,8 @@ export interface ScanRuntime {
     readonly offered: boolean;
     readonly chosen: { current: boolean };
   };
+  /** The capture screen's layout (`captureLayout`), already validated. */
+  readonly captureLayout: CaptureLayout;
   /** Report something that happened. Numbers and enums only. */
   emit(event: ScanEvent): void;
   /**

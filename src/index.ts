@@ -20,4 +20,5 @@ export type {
   ScanCancelReason,
   ScanIntake,
   ScanLang,
+  ScanCaptureLayout,
 } from "./types";

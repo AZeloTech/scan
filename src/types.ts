@@ -179,20 +179,76 @@ export interface ScanFlowProps {
   className?: string;
 
   /**
-   * **Experimental.** Offer an auto-capture toggle on the capture screen.
-   * Default `false`: no toggle, and the photo is only ever taken by a tap.
+   * **Experimental.** Whether the capture screen offers the auto-capture
+   * toggle (on `rail`, the default layout, the MANUAL · AUTOMÁTICO (BETA)
+   * rail over the shutter).
    *
-   * When offered it is still off in every new flow; switched on, the screen
-   * takes the page by itself once it has been framed, sharp and still for
-   * about half a second (with a countdown on the corner brackets), once per
-   * page, through the same capture and confirm screen as a tap. The choice
-   * lasts while the flow is open and is never stored. Retakes stay manual.
+   *  - omitted — the layout decides: `"rail"` (the default), `"onehand"` and
+   *    `"collapse"` show the toggle; `"standard"` does not;
+   *  - `false` — no toggle on any layout: the photo is only ever taken by a
+   *    tap. The escape hatch for a host whose people cannot be expected to
+   *    look at the confirm screen;
+   *  - `true`  — shows it on `"standard"` too.
+   *
+   * `"classic"` and `"filmstrip"` never show it. Wherever it is shown it is
+   * OFF at the start of every flow and the choice is never stored; switched
+   * on, the screen takes the page by itself once it has been framed, sharp and
+   * still for about half a second (with a countdown on the corner brackets),
+   * once per page, through the same capture and confirm-corners screen as a
+   * tap. The shutter works in both modes. Retakes stay manual.
    *
    * Experimental because it has not yet met its own bar: on the bench it
    * still fires on some page-less scenes (a woven white place mat, a screen
    * showing a page, two overlapping sheets taken as one) — see the
-   * README's "Auto-capture" notes. Do not turn it on for people who cannot
-   * be expected to look at the confirm screen.
+   * README's "Auto-capture" notes.
    */
   experimentalAutoCapture?: boolean;
+
+  /**
+   * The capture screen's layout (step 1). Default `"rail"`.
+   *
+   * Every layout is the same capture stage — the same detection, hints,
+   * ready cue on the corner brackets, torch, confirm-corners screen after
+   * every photo, and a shutter that works in every state — under different
+   * controls:
+   *
+   *  - `"rail"`      — the default: full-bleed camera, a MANUAL · AUTOMÁTICO
+   *                    mode rail over the shutter, "Já tenho a foto" under it;
+   *  - `"standard"`  — the screen that shipped before `"rail"`: header,
+   *                    viewfinder card, thumbnail rail, control row
+   *                    (`"default"` is its deprecated old name);
+   *
+   * and, **experimental** (may change or go away in any release):
+   *
+   *  - `"classic"`   — full-bleed camera, a translucent bottom bar;
+   *  - `"filmstrip"` — the camera on top, the pages taken as a strip under it;
+   *  - `"onehand"`   — no bars, the controls down the right edge;
+   *  - `"collapse"`  — like `"classic"`, folding into one capsule while the
+   *                    page is ready.
+   *
+   * Whether the auto-capture toggle shows is `experimentalAutoCapture`'s
+   * rule. `"rail"` and `"standard"` have the in-camera "Já tenho a foto"
+   * picker (when `intake.images` is on); the experimental layouts do not. An
+   * unknown value falls back to `"rail"`.
+   */
+  captureLayout?: ScanCaptureLayout;
+
+  /**
+   * @deprecated Use {@link ScanFlowProps.captureLayout} — the same values.
+   * Read only when `captureLayout` is absent.
+   */
+  experimentalCaptureLayout?: ScanCaptureLayout;
 }
+
+/**
+ * See {@link ScanFlowProps.captureLayout}. `"default"` is a deprecated alias
+ * of `"standard"`.
+ */
+export type ScanCaptureLayout =
+  | "rail"
+  | "standard"
+  | "classic"
+  | "filmstrip"
+  | "onehand"
+  | "collapse"
+  | "default";

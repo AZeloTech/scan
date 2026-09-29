@@ -151,6 +151,7 @@ import {
 import { useAssetUrls } from "@/hooks/useScanRuntime";
 import { CAPTURE_GRACE_MS } from "@/lib/still-capture";
 import { probe, probing } from "@/lib/probe";
+import { ringOffset } from "@/lib/capture-layout";
 
 /**
  * The window inside which the last *accepted* corners may still travel with a
@@ -691,6 +692,17 @@ function clearTracking(runtime: Runtime, overlay: LiveOverlayRefs): void {
   overlay.countdown.current?.setAttribute("d", "");
   const group = overlay.group.current;
   if (group !== null) group.style.opacity = "0";
+  const anchor = overlay.anchor.current;
+  if (anchor !== null) anchor.style.opacity = "0";
+  paintRing(overlay.ring.current, null);
+}
+
+/** The countdown ring (see {@link LiveOverlayRefs.ring}) at a progress, or empty. */
+function paintRing(ring: SVGCircleElement | null, progress: number | null): void {
+  if (ring === null) return;
+  const length = Number(ring.dataset.length);
+  if (!Number.isFinite(length) || length <= 0) return;
+  ring.style.strokeDashoffset = ringOffset(progress, length).toFixed(2);
 }
 
 /**
@@ -758,6 +770,19 @@ export interface LiveOverlayRefs {
    * along its marks as the countdown runs (empty `d` when it is not).
    */
   countdown: React.MutableRefObject<SVGPathElement | null>;
+  /**
+   * Optional, for the experimental capture layouts: an element pinned to the
+   * page's top-left corner, in stage pixels. The paint sets `--scan-anchor-x`
+   * and `--scan-anchor-y` on it and fades it with the brackets; the element
+   * places itself from those (`onehand` hangs its hint there).
+   */
+  anchor: React.MutableRefObject<HTMLDivElement | null>;
+  /**
+   * Optional: a circle that draws the auto-capture countdown as a ring
+   * (a shutter's). Give it `data-length` (its circumference) and a matching
+   * `stroke-dasharray`; the paint sets its `stroke-dashoffset`.
+   */
+  ring: React.MutableRefObject<SVGCircleElement | null>;
 }
 
 /** An accepted quad, with the detection that produced it. */
@@ -875,6 +900,8 @@ export function useLiveDetect({
   const bracketsHaloRef = React.useRef<SVGPathElement | null>(null);
   const bracketsRef = React.useRef<SVGPathElement | null>(null);
   const countdownRef = React.useRef<SVGPathElement | null>(null);
+  const anchorRef = React.useRef<HTMLDivElement | null>(null);
+  const ringRef = React.useRef<SVGCircleElement | null>(null);
   // One stable object so the consumer can spread it into JSX without giving the
   // stage a new set of ref identities on every render.
   const overlay = React.useMemo<LiveOverlayRefs>(
@@ -883,6 +910,8 @@ export function useLiveDetect({
       bracketsHalo: bracketsHaloRef,
       brackets: bracketsRef,
       countdown: countdownRef,
+      anchor: anchorRef,
+      ring: ringRef,
     }),
     [],
   );
@@ -2122,10 +2151,25 @@ export function useLiveDetect({
             ? ""
             : cornerBracketPath(quad, BRACKET_EDGE_FRACTION * progress, { ...cap, length: cap.length * progress }),
         );
+        paintRing(overlay.ring.current, progress);
       } else {
         overlay.countdown.current?.setAttribute("d", "");
+        paintRing(overlay.ring.current, null);
       }
       group.style.opacity = runtime.opacity.toFixed(3);
+      // The experimental layouts' corner anchor: in stage pixels, through the
+      // frame box the quad is drawn in, faded with the brackets.
+      const anchor = overlay.anchor.current;
+      if (anchor !== null) {
+        const box = frameBoxRef.current;
+        if (quad !== null && box !== null) {
+          anchor.style.setProperty("--scan-anchor-x", `${(box.left + quad.topLeft.x * box.width).toFixed(1)}px`);
+          anchor.style.setProperty("--scan-anchor-y", `${(box.top + quad.topLeft.y * box.height).toFixed(1)}px`);
+          anchor.style.opacity = runtime.opacity.toFixed(3);
+        } else {
+          anchor.style.opacity = "0";
+        }
+      }
     }
 
     /** The visible crop's height over its width, in pixels of the frame. */

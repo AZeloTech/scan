@@ -212,6 +212,44 @@ export interface AppCopy {
     preparingCamera: string;
   };
 
+  /**
+   * The capture screen's full-bleed layouts (`captureLayout`: `rail`, the
+   * default, and the experimental ones).
+   * Their hints, ready words, torch and auto-capture names are `capture`'s;
+   * this is only what their chrome adds.
+   */
+  captureLayout: {
+    /** The centre pill: "Passo 1 de 3 · Capturar". */
+    stepPill: string;
+    /** The short form where the pill shares a row with more controls: "1/3 · Capturar". */
+    stepShort: string;
+    /** The step pill's accessible name, where the visible form is dots or a fraction. */
+    stepAria: string;
+    /** The bare verb, beside the step dots. */
+    captureWord: string;
+    /** The close control: back to the pages when there are some, out of the flow when not. */
+    closeAria: (pages: number) => string;
+    /** The pages button: its accessible name, with how many there are. */
+    pagesAria: (pages: number) => string;
+    /** The onward control's word and its full name. */
+    review: string;
+    reviewAria: (pages: number) => string;
+    /** Filmstrip: the title over the camera, the strip's name, a tile, the next slot and the count. */
+    filmstripTitle: (next: number) => string;
+    filmstripLabel: string;
+    filmstripTile: (n: number, verdict: string) => string;
+    filmstripNext: (n: number) => string;
+    filmstripCount: (n: number, max: number) => string;
+    /** The mode rail: its group name, the two modes, and the tag on the second. */
+    modeLabel: string;
+    modeManual: string;
+    modeAuto: string;
+    beta: string;
+    /** The one-hand column's auto toggle: its glyph (a letter) and the collapse layout's switch word. */
+    autoLetter: string;
+    autoSwitch: string;
+  };
+
   confirm: {
     title: string;
     help: string;
@@ -933,6 +971,32 @@ const PT: AppCopy = {
     preparingCamera: "preparando a câmera…",
   },
 
+  captureLayout: {
+    stepPill: "Passo 1 de 3 · Capturar",
+    stepShort: "1/3 · Capturar",
+    stepAria: "Passo 1 de 3: capturar",
+    captureWord: "Capturar",
+    closeAria: (pages) => (pages > 0 ? "Voltar para as páginas" : "Fechar"),
+    pagesAria: (pages) =>
+      pages === 0
+        ? "Nenhuma página capturada ainda"
+        : `Ver ${pages} ${pages === 1 ? "página capturada" : "páginas capturadas"}`,
+    review: "Conferir",
+    reviewAria: (pages) =>
+      `Conferir ${pages} ${pages === 1 ? "página" : "páginas"} — passo 2`,
+    filmstripTitle: (next) => `Capturar · página ${next}`,
+    filmstripLabel: "Páginas capturadas",
+    filmstripTile: (n, verdict) => `Página ${n} — ${verdict}. Toque para ver.`,
+    filmstripNext: (n) => `Próxima: página ${n}`,
+    filmstripCount: (n, max) => `${n} de ${max}`,
+    modeLabel: "Modo de captura",
+    modeManual: "Manual",
+    modeAuto: "Automático",
+    beta: "Beta",
+    autoLetter: "A",
+    autoSwitch: "Auto",
+  },
+
   confirm: {
     title: "Confirme os cantos",
     help: "Arraste se algum canto estiver fora da folha.",
@@ -1558,6 +1622,32 @@ const EN: AppCopy = {
     nextAria: (sheets) =>
       `Continue to step 2 — ${sheets} ${sheets === 1 ? "sheet" : "sheets"}`,
     preparingCamera: "getting the camera ready…",
+  },
+
+  captureLayout: {
+    stepPill: "Step 1 of 3 · Capture",
+    stepShort: "1/3 · Capture",
+    stepAria: "Step 1 of 3: capture",
+    captureWord: "Capture",
+    closeAria: (pages) => (pages > 0 ? "Back to the pages" : "Close"),
+    pagesAria: (pages) =>
+      pages === 0
+        ? "No pages captured yet"
+        : `See ${pages} captured ${pages === 1 ? "page" : "pages"}`,
+    review: "Review",
+    reviewAria: (pages) =>
+      `Review ${pages} ${pages === 1 ? "page" : "pages"} — step 2`,
+    filmstripTitle: (next) => `Capture · page ${next}`,
+    filmstripLabel: "Captured pages",
+    filmstripTile: (n, verdict) => `Page ${n} — ${verdict}. Tap to see it.`,
+    filmstripNext: (n) => `Next: page ${n}`,
+    filmstripCount: (n, max) => `${n} of ${max}`,
+    modeLabel: "Capture mode",
+    modeManual: "Manual",
+    modeAuto: "Automatic",
+    beta: "Beta",
+    autoLetter: "A",
+    autoSwitch: "Auto",
   },
 
   confirm: {

@@ -7,6 +7,30 @@ freezes at 1.0.
 ## [Unreleased]
 
 ### Added
+- **Capture layouts, and a new default capture screen** (`captureLayout`,
+  default `"rail"`). Step 1 is now the full-bleed `rail` screen: the camera
+  edge to edge, the hint under the top row, a MANUAL · AUTOMÁTICO (BETA)
+  mode rail over the shutter, the newest page and the onward button either
+  side of it, and "Já tenho a foto" (the gallery pick, same handler as
+  before) as a small text button under the shutter. The screen that shipped
+  before is kept as `"standard"`. Four experimental alternatives —
+  `classic`, `filmstrip`, `onehand`, `collapse` — may change or go away and
+  have no in-camera gallery pick. Every layout is the same capture stage:
+  detection, hints, ready cue, torch, notices, page limit, confirm-corners
+  screen after every photo, retake, camera-refused file surface. `collapse`
+  folds its chrome into one capsule while the ready cue is on, with the
+  shutter held in place and every transition cut under reduced motion.
+  `useLiveDetect` can pin an element to the tracked page's corner and draw
+  the countdown as a shutter ring for them. Unknown values fall back to
+  `"rail"`.
+- **The auto-capture toggle is visible by default** (on `rail`, `onehand`,
+  `collapse`), since `rail` is the default: `experimentalAutoCapture` is now
+  three-state — omitted lets the layout decide, `false` hides the toggle on
+  every layout (the host's escape hatch), `true` also shows it on
+  `"standard"`. `"classic"` and `"filmstrip"` never show it. It is still OFF
+  at the start of every flow, never stored, the shutter stays live in both
+  modes, and the confirm-corners screen follows every capture; what it does
+  once switched on is unchanged.
 - `<ScanFlow>`: camera capture, corner confirmation, review and PDF assembly,
   entirely on the device. It ends the moment the PDF exists and hands the host a
   `File` through `onComplete`. What happens next — upload, download, share,
@@ -103,8 +127,9 @@ freezes at 1.0.
     page limit is reached. A refusal costs only the light, and the toggle
     then shows it off.
   - **Experimental auto-capture**, behind a new `<ScanFlow>` prop,
-    `experimentalAutoCapture` (default `false`: no toggle at all). When the
-    host sets it, a toggle ("auto", "auto ✓" when on, announced) is offered,
+    `experimentalAutoCapture` (on the `"standard"` screen: no toggle unless
+    the host sets it; on the default `"rail"` screen see "capture layouts"
+    above). When offered, a toggle ("auto", "auto ✓" when on, announced) is offered,
     off in every new flow; the flow keeps the choice while it is open and
     nothing is written to storage. Retakes are always manual. Switched on,
     once the ready conditions have held half a second — a countdown grows
@@ -137,6 +162,12 @@ freezes at 1.0.
 - With no live detection on the device (it could not start, or the phone is
   too slow for it), the hint slot says "Não achei a folha — toque para
   capturar" rather than nothing.
+
+### Deprecated
+- `experimentalCaptureLayout` → `captureLayout` (same values; read only when
+  `captureLayout` is absent).
+- The layout value `"default"` → `"standard"`: the pre-`rail` screen is no
+  longer the default, so the old name would lie. `"default"` still selects it.
 
 ### Changed before first publish — host integration
 Found by embedding 0.1.0 in a host page. None of these is on npm yet, so they
