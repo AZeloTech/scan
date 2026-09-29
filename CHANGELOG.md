@@ -20,10 +20,20 @@ freezes at 1.0.
   whole frame; the photo keeps the camera's full frame.
 - **Every photo is checked before the confirm screen.** The corners the
   viewfinder vouched for are mapped onto the photo (its shape, field of view
-  and a quarter turn) and compared with the page found on it; a corner on the
-  photo's edge, a page not where the viewfinder had it, or no page opens the
-  confirm screen with one short line asking for a closer look. Automatic and
-  manual captures alike; nothing is blocked or accepted silently.
+  and a quarter turn) and compared with the page found on it; a photo from
+  the camera's still pipeline is also registered against a small grey
+  thumbnail of the viewfinder taken at the tap, so the photo's field of view
+  is measured from the pictures rather than trusted to its page detection
+  (which can lock onto an inner printed border). A corner on the photo's
+  edge, a page not where the viewfinder had it, no page, or an automatic
+  photo that could not be checked opens the confirm screen with one short,
+  advisory line asking for a closer look. Manual captures are flagged only
+  on evidence (a corner on the edge itself, or the registration); nothing is
+  blocked or accepted silently.
+- Controls drawn over the picture (the top row's glass buttons, the hint
+  pill) and the rail's controls as actually laid out (larger text included)
+  count as hiding what is under them; a viewfinder scrolled or pinched off
+  screen stops the ready cue and auto-capture until it is back.
 - **`experimentalDiagnostics`** (default `false`): a small numbers-only HUD
   over the viewfinder for real-phone tests (lane, detection time, cadence,
   frame age, stream/photo size, visible region, fit, torch/vibrate support,
