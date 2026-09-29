@@ -128,3 +128,56 @@ test("checkStill: a photo that sees less than the preview — the page's own det
   const wider = mapPreviewQuadToStill(live, { ...mapping, fovScale: 1.1 });
   assert.equal(checkStill({ live, corners: wider, cornersFromPhoto: true, mapping }).attention, null);
 });
+
+// Review findings 2, 3 and 7 (Phase 5a): the photo's registration against the
+// viewfinder is the independent evidence; an automatic still photo without it
+// is flagged; a person's tight framing is not.
+
+const trustedAt = (fovScale: number, shiftX = 0, shiftY = 0) => ({ fovScale, shiftX, shiftY, score: 0.95, overlap: 1 });
+
+test("checkStill: an inner printed border that fits the viewfinder's page perfectly — the registration still says cut", () => {
+  // The review's counter-example: the page spans 5–95 % of the preview, the
+  // photo sees 0.8× of it (the sheet runs −6.25…106.25 %), and the photo's
+  // detect locks onto an inner form border at 2–98 %. The quad fit alone
+  // passes (scale 1.067, no residual); the pictures' registration does not.
+  const mapping = { preview: PREVIEW, still: PREVIEW };
+  const live = quad(0.05, 0.05, 0.95, 0.95);
+  const inner = quad(0.02, 0.02, 0.98, 0.98);
+  const quadOnly = checkStill({ live, corners: inner, cornersFromPhoto: true, mapping, trigger: "auto", stillUsed: false });
+  assert.equal(quadOnly.attention, null, "the counter-example does pass the quad fit on its own");
+  const r = checkStill({ live, corners: inner, cornersFromPhoto: true, mapping, trigger: "auto", stillUsed: true, registration: trustedAt(0.8) });
+  assert.equal(r.attention, "corner-outside");
+  assert.ok(r.viewed !== null && r.viewed.topLeft.x < 0);
+  // Manual gets the same evidence-based flag.
+  assert.equal(
+    checkStill({ live, corners: inner, cornersFromPhoto: true, mapping, trigger: "manual", stillUsed: true, registration: trustedAt(0.8) }).attention,
+    "corner-outside",
+  );
+});
+
+test("checkStill: an automatic still photo with no trusted registration is 'unverified', never silently accepted", () => {
+  const mapping = { preview: PREVIEW, still: PREVIEW };
+  const base = { live: PAGE, corners: PAGE, mapping, trigger: "auto" as const, stillUsed: true };
+  // The photo's detect found nothing and the viewfinder's quad was carried (finding 2).
+  assert.equal(checkStill({ ...base, cornersFromPhoto: false, registration: null }).attention, "unverified");
+  // Registered, but not well enough to be evidence.
+  assert.equal(checkStill({ ...base, cornersFromPhoto: true, registration: { ...trustedAt(1), score: 0.5 } }).attention, "unverified");
+  // No viewfinder page travelled with an automatic still.
+  assert.equal(checkStill({ ...base, live: null, cornersFromPhoto: true, registration: trustedAt(1) }).attention, "unverified");
+  // Registered and whole: no flag, whether the photo's own detect found the page or not.
+  assert.equal(checkStill({ ...base, cornersFromPhoto: false, registration: trustedAt(1.1) }).attention, null);
+  assert.equal(checkStill({ ...base, cornersFromPhoto: true, registration: trustedAt(1.1) }).attention, null);
+  // A person's still photo without registration is not flagged for that.
+  assert.equal(checkStill({ ...base, trigger: "manual", cornersFromPhoto: false, registration: null }).attention, null);
+  // The preview frame itself (no still pipeline): the viewfinder judged this very picture.
+  assert.equal(checkStill({ ...base, stillUsed: false, cornersFromPhoto: false, registration: null }).attention, null);
+});
+
+test("checkStill: a whole page framed tight is not flagged on a manual capture; on the edge it is", () => {
+  const mapping = { preview: PREVIEW, still: PREVIEW };
+  const tight = quad(0.003, 0.2, 0.85, 0.8);
+  assert.equal(checkStill({ live: null, corners: tight, cornersFromPhoto: true, mapping }).attention, null);
+  assert.equal(checkStill({ live: null, corners: tight, cornersFromPhoto: true, mapping, trigger: "auto" }).attention, "corner-outside");
+  const onEdge = quad(0.0005, 0.2, 0.85, 0.8);
+  assert.equal(checkStill({ live: null, corners: onEdge, cornersFromPhoto: true, mapping }).attention, "corner-outside");
+});

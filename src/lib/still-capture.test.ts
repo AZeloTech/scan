@@ -102,6 +102,23 @@ test("normalized corners only cross onto a frame of the same shape", () => {
   assert.equal(quadTransfers(-4 / 3, -4 / 3), false);
 });
 
+test("a photo that came back turned a quarter never transfers from any phone preview shape", () => {
+  // Review finding 6: the still is decoded with its EXIF orientation applied
+  // (`createImageBitmap(…, { imageOrientation: "from-image" })`), and a photo
+  // whose pixels still came back turned has the other orientation's shape —
+  // discarded for the preview frame before any corner is carried or checked.
+  for (const [w, h] of [
+    [9, 16],
+    [3, 4],
+    [16, 9],
+    [4, 3],
+    [9, 19.5],
+  ]) {
+    assert.equal(quadTransfers(w / h, h / w), false, `${w}:${h}`);
+    assert.equal(quadTransfers(w / h, w / h), true, `${w}:${h}`);
+  }
+});
+
 test("measuring this frame outranks remembering another one", () => {
   const live = "live";
   const detected = "detected";

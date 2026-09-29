@@ -1,4 +1,5 @@
 import { CORNER_KEYS, type NormalizedQuad } from "@/lib/quad";
+import type { StillRegistration } from "@/lib/still-register";
 
 /**
  * The photo is checked before it is offered (Phase 5a, revision R2).
@@ -39,7 +40,7 @@ export interface StillMapping {
 }
 
 /** Why a photo is flagged on the confirm screen. */
-export type StillAttention = "no-page" | "corner-outside" | "moved";
+export type StillAttention = "no-page" | "corner-outside" | "moved" | "unverified";
 
 /**
  * Turn a point of a `w`×`h` picture a quarter turn clockwise `turns` times,
@@ -140,8 +141,26 @@ export function fitScaleShift(
   return { scale, shiftX: tx, shiftY: ty / aspect, residual: Math.sqrt(sq / n) / diagonal };
 }
 
-/** How far in from the photo's edge every corner must be (fraction of each axis). */
+/**
+ * How far in from the photo's edge every corner must be (fraction of each
+ * axis) on an AUTOMATIC capture — conservative: nobody chose that instant.
+ */
 export const STILL_EDGE_MARGIN = 0.004;
+/**
+ * The same on a capture a person took: only a corner ON the edge — where the
+ * refined corners are clamped when the paper runs off the image, within a
+ * pixel of a 720-pixel preview frame — counts. A whole page someone framed
+ * tight is theirs to frame; a detector a few pixels in from the border is
+ * not evidence the paper was cut (review finding 7: 1 false flag in 20
+ * manual taps at the automatic margin).
+ */
+export const STILL_EDGE_MARGIN_MANUAL = 0.002;
+/**
+ * The least cross-correlation at which the photo's registration against the
+ * viewfinder (`lib/still-register.ts`) is trusted as evidence of where the
+ * viewfinder's picture — and so its page — sits on the photo.
+ */
+export const STILL_REGISTER_MIN = 0.8;
 /**
  * The largest disagreement between the page the viewfinder showed (mapped
  * onto the photo) and the page found on the photo that still counts as the
@@ -164,6 +183,16 @@ export interface StillCheckInput {
   /** Whether `corners` were found on the photo itself (else they are the live quad carried over). */
   cornersFromPhoto: boolean;
   mapping: StillMapping;
+  /** Who took it: an automatic capture is held to the stricter bar (default: a person). */
+  trigger?: "auto" | "manual";
+  /**
+   * The page is a photo from the camera's still pipeline — a picture whose
+   * field of view is not known — rather than the preview frame the
+   * viewfinder judged (default false).
+   */
+  stillUsed?: boolean;
+  /** The photo registered against the viewfinder's picture (`lib/still-register.ts`), when measured. */
+  registration?: StillRegistration | null;
 }
 
 export interface StillCheck {
@@ -172,6 +201,8 @@ export interface StillCheck {
   mapped: NormalizedQuad | null;
   /** How the photo's own page sits against the mapped one (both present and found on the photo). */
   fit: ReturnType<typeof fitScaleShift> | null;
+  /** The viewfinder's page on the photo through the measured registration, when it was trusted. */
+  viewed: NormalizedQuad | null;
 }
 
 /**
@@ -182,27 +213,57 @@ export interface StillCheck {
  *  - `no-page`        — no corners at all (the confirm screen will guess);
  *  - `corner-outside` — a corner on or past the photo's edge (the corners
  *                       are clamped to the image, so a cut page sits on the
- *                       border), or the viewfinder's page, mapped onto the
- *                       photo, running off it;
+ *                       border); or the viewfinder's page, laid onto the
+ *                       photo by the pictures' own registration, running
+ *                       off it — whatever the photo's detector made of it;
+ *                       or, with no registration, by the mapping alone;
+ *  - `unverified`     — an AUTOMATIC capture whose photo came from the still
+ *                       pipeline and could not be registered against the
+ *                       viewfinder (or no viewfinder page travelled): no
+ *                       independent evidence the outer sheet survived the
+ *                       photo's unknown field of view, so it is not
+ *                       accepted silently;
  *  - `moved`          — the page found on the photo is not the viewfinder's
  *                       page seen through the photo's field of view (the
  *                       residual, scale or shift of the best fit is out of
  *                       bounds): another sheet, or the phone moved.
  */
-export function checkStill({ live, corners, cornersFromPhoto, mapping }: StillCheckInput): StillCheck {
+export function checkStill({
+  live,
+  corners,
+  cornersFromPhoto,
+  mapping,
+  trigger = "manual",
+  stillUsed = false,
+  registration = null,
+}: StillCheckInput): StillCheck {
+  const auto = trigger === "auto";
+  const margin = auto ? STILL_EDGE_MARGIN : STILL_EDGE_MARGIN_MANUAL;
   const mapped = live === null ? null : mapPreviewQuadToStill(live, mapping);
   const aspect = mapping.still.height / mapping.still.width;
   const inside = (quad: NormalizedQuad) =>
     CORNER_KEYS.every((key) => {
       const p = quad[key];
-      return p.x >= STILL_EDGE_MARGIN && p.x <= 1 - STILL_EDGE_MARGIN && p.y >= STILL_EDGE_MARGIN && p.y <= 1 - STILL_EDGE_MARGIN;
+      return p.x >= margin && p.x <= 1 - margin && p.y >= margin && p.y <= 1 - margin;
     });
-  if (corners === null) return { attention: "no-page", mapped, fit: null };
-  if (!inside(corners)) return { attention: "corner-outside", mapped, fit: null };
+  const trusted = registration !== null && registration.score >= STILL_REGISTER_MIN;
+  const viewed =
+    live === null || !stillUsed || !trusted
+      ? null
+      : shiftQuad(mapPreviewQuadToStill(live, { ...mapping, fovScale: registration.fovScale }), registration.shiftX, registration.shiftY);
+  const verdict = (attention: StillAttention | null, fit: StillCheck["fit"] = null): StillCheck => ({ attention, mapped, fit, viewed });
+  if (corners === null) return verdict("no-page");
+  if (!inside(corners)) return verdict("corner-outside");
+  // Independent of the page detector: everything the viewfinder showed of
+  // the page, measured onto the photo by the pictures themselves.
+  if (viewed !== null && !inside(viewed)) return verdict("corner-outside");
+  // An automatic photo from the still pipeline with no such evidence is
+  // not accepted silently — its field of view is the camera's secret.
+  if (auto && stillUsed && (live === null || !trusted)) return verdict("unverified");
   if (mapped === null || !cornersFromPhoto) {
     // Nothing independent to compare with: the mapped quad (when it is what
     // travelled) still has to fit the photo.
-    return { attention: mapped !== null && !inside(mapped) ? "corner-outside" : null, mapped, fit: null };
+    return verdict(mapped !== null && viewed === null && !inside(mapped) ? "corner-outside" : null);
   }
   const fit = fitScaleShift(mapped, corners, aspect);
   // The viewfinder's page, seen through the photo's field of view as the fit
@@ -222,7 +283,12 @@ export function checkStill({ live, corners, cornersFromPhoto, mapping }: StillCh
     fit.scale > hi ||
     Math.abs(fit.shiftX) > STILL_MAX_SHIFT ||
     Math.abs(fit.shiftY) > STILL_MAX_SHIFT;
-  return { attention: moved ? "moved" : !inside(predicted) ? "corner-outside" : null, mapped, fit };
+  return verdict(moved ? "moved" : !inside(predicted) ? "corner-outside" : null, fit);
+}
+
+function shiftQuad(quad: NormalizedQuad, dx: number, dy: number): NormalizedQuad {
+  const at = (p: Point): Point => ({ x: p.x + dx, y: p.y + dy });
+  return { topLeft: at(quad.topLeft), topRight: at(quad.topRight), bottomRight: at(quad.bottomRight), bottomLeft: at(quad.bottomLeft) };
 }
 
 function project(p: Point, fit: { scale: number; shiftX: number; shiftY: number }): Point {

@@ -273,9 +273,11 @@ export interface AppCopy {
     /**
      * The photo's own check (`lib/still-check.ts`), one short line over the
      * editor when it asks for a closer look: a corner on the photo's edge, the
-     * page not where the viewfinder had it, no page found in the photo.
+     * page not where the viewfinder had it, no page found in the photo, an
+     * automatic photo that could not be checked against the viewfinder.
+     * Advisory: the screen and every control work the same either way.
      */
-    attention: Record<"no-page" | "corner-outside" | "moved", string>;
+    attention: Record<"no-page" | "corner-outside" | "moved" | "unverified", string>;
   };
 
   review: {
@@ -1021,6 +1023,7 @@ const PT: AppCopy = {
       "corner-outside": "Um canto pode ter ficado de fora da foto — confira.",
       moved: "A foto saiu diferente do que a câmera mostrava — confira.",
       "no-page": "Não achei a folha nesta foto — ajuste os cantos.",
+      unverified: "Não deu para conferir se a folha inteira saiu na foto — confira os cantos.",
     },
   },
 
@@ -1679,6 +1682,7 @@ const EN: AppCopy = {
       "corner-outside": "A corner may be outside the photo — check it.",
       moved: "The photo came out different from what the camera showed — check it.",
       "no-page": "No sheet found in this photo — adjust the corners.",
+      unverified: "Could not check that the whole sheet made it into the photo — check the corners.",
     },
   },
 

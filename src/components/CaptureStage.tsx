@@ -39,6 +39,7 @@ import { flash, shutterPulse } from "@/lib/motion";
 import { probe, probeSetting, probing, type CaptureProbe, type CornersFrom } from "@/lib/probe";
 import { useLiveDetect } from "@/hooks/useLiveDetect";
 import { checkStill } from "@/lib/still-check";
+import { lumaThumb, registerStill, type LumaThumb, type StillRegistration } from "@/lib/still-register";
 import { resolveFit, type FitPolicy } from "@/lib/visible-region";
 import { DiagnosticsHud } from "@/components/DiagnosticsHud";
 import { useAssetUrls, useScanRuntime } from "@/hooks/useScanRuntime";
@@ -655,7 +656,15 @@ export function CaptureStage({
       fallback: NormalizedQuad | null = null,
       trace: CaptureTrace | null = null,
       carriedSource: DetectionSource | null = null,
-      check: { live: NormalizedQuad | null; preview: { width: number; height: number } } | null = null,
+      check: {
+        live: NormalizedQuad | null;
+        preview: { width: number; height: number };
+        trigger: CaptureTrigger;
+        /** The frame is the still pipeline's photo, not the preview frame the viewfinder judged. */
+        stillUsed: boolean;
+        /** The viewfinder's picture at the tap, for registering the photo against it. */
+        previewThumb: LumaThumb | null;
+      } | null = null,
     ) => {
       // Run only when it can change the answer: this is a ~3 s WASM detect and
       // step 1 already outranks it. Only the corners are wanted from it — how
@@ -681,6 +690,18 @@ export function CaptureStage({
       // page the viewfinder vouched for, mapped onto this image, against the
       // corners found on it. A flag never stops the capture — the confirm
       // screen opens either way, asking for a closer look.
+      // A photo from the still pipeline has a field of view nobody reports:
+      // it is registered against the viewfinder's own picture at the tap
+      // (`lib/still-register.ts`), so what it kept of the page is measured
+      // from the pictures, not taken on the photo detector's word.
+      let registration: StillRegistration | null = null;
+      let registerMs: number | null = null;
+      if (check !== null && check.stillUsed && check.previewThumb !== null) {
+        const registerStarted = performance.now();
+        const stillThumb = lumaThumb(frame, frame.width, frame.height);
+        registration = stillThumb === null ? null : registerStill(check.previewThumb, stillThumb);
+        registerMs = performance.now() - registerStarted;
+      }
       const attention =
         check === null
           ? null
@@ -689,6 +710,9 @@ export function CaptureStage({
               corners,
               cornersFromPhoto: corners !== null && detected !== null && live === null,
               mapping: { preview: check.preview, still: { width: frame.width, height: frame.height } },
+              trigger: check.trigger === "auto" ? "auto" : "manual",
+              stillUsed: check.stillUsed,
+              registration,
             }).attention;
       lastStillRef.current = { width: frame.width, height: frame.height, attention };
       if (trace !== null) {
@@ -737,6 +761,17 @@ export function CaptureStage({
           coverage: corners === null ? null : normalizedCoverage(corners),
           mlWaitMs,
           attention,
+          register:
+            registration === null
+              ? null
+              : {
+                  fovScale: registration.fovScale,
+                  shiftX: registration.shiftX,
+                  shiftY: registration.shiftY,
+                  score: registration.score,
+                  overlap: registration.overlap,
+                  ms: registerMs ?? 0,
+                },
         });
       }
       onCapture({
@@ -794,6 +829,10 @@ export function CaptureStage({
     // Both read synchronously, at the tap: everything below this line moves the
     // clock, and the whole point is to keep what the user was looking at.
     const grabbed = detect.takeQuadForCapture();
+    // The viewfinder's picture at the tap, as a grey thumbnail: what a photo
+    // from the still pipeline is registered against (`emit`). A few
+    // milliseconds; nothing is kept past this capture.
+    const previewThumb = lumaThumb(video, video.videoWidth, video.videoHeight);
     const previewAspect =
       video.videoWidth > 0 && video.videoHeight > 0
         ? video.videoWidth / video.videoHeight
@@ -927,6 +966,9 @@ export function CaptureStage({
         {
           live: bufferedQuad,
           preview: { width: video.videoWidth, height: video.videoHeight },
+          trigger,
+          stillUsed,
+          previewThumb,
         },
       );
       setAnnouncement(copy.capture.captured(pageNumber));

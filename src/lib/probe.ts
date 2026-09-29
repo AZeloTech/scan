@@ -170,7 +170,13 @@ export interface CaptureProbe {
    */
   visible: { x: number; y: number; width: number; height: number } | null;
   /** The photo's check before the confirm screen (`lib/still-check.ts`): why it is flagged, or null. */
-  attention?: "no-page" | "corner-outside" | "moved" | null;
+  attention?: "no-page" | "corner-outside" | "moved" | "unverified" | null;
+  /**
+   * The photo registered against the viewfinder's picture at the tap
+   * (`lib/still-register.ts`) — only when the still pipeline's photo became
+   * the page and both pictures had structure to register.
+   */
+  register?: { fovScale: number; shiftX: number; shiftY: number; score: number; overlap: number; ms: number } | null;
   /** The canvas that became the page. */
   frameW: number;
   frameH: number;
@@ -327,7 +333,7 @@ export interface ConfirmOpenProbe {
   width: number;
   height: number;
   /** The flag the screen opened with (`Capture.attention`), or null. */
-  attention?: "no-page" | "corner-outside" | "moved" | null;
+  attention?: "no-page" | "corner-outside" | "moved" | "unverified" | null;
 }
 
 /** The user left the confirm screen with these corners. */
