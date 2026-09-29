@@ -43,12 +43,15 @@ export const RAIL_FRAMING =
 
 /**
  * How the rail fits the camera frame (`lib/visible-region.ts`, Phase 5a):
- * `maxcrop` — the frame covers the part of the screen above the controls,
- * cropping at most 12 % off a side, so on a tall phone every part of the
- * frame the scanner judges is on screen. See the README's "What the camera
- * shows" for the evaluation behind it.
+ * `contain` — the WHOLE frame, as large as fits the screen above the
+ * controls, dark ground where it does not reach. Every part of the frame the
+ * scanner judges (and the photo keeps) is on screen, so a page the person
+ * sees framed is framed. Chosen on the bench over `cover` (the look before:
+ * on a tall phone a well-framed page never became ready) and `maxcrop`
+ * (≤ 12 % cropped a side: a larger picture, but on 3:4 streams the page's
+ * sides fall in the crop) — see the README's "What the camera shows".
  */
-export const RAIL_FIT = "maxcrop" as const;
+export const RAIL_FIT = "contain" as const;
 
 /**
  * The controls' band, for the live loop: from the safe area up to the top of
