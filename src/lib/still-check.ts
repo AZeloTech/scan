@@ -205,6 +205,16 @@ export function checkStill({ live, corners, cornersFromPhoto, mapping }: StillCh
     return { attention: mapped !== null && !inside(mapped) ? "corner-outside" : null, mapped, fit: null };
   }
   const fit = fitScaleShift(mapped, corners, aspect);
+  // The viewfinder's page, seen through the photo's field of view as the fit
+  // estimates it: a corner the viewfinder showed that lands off the photo is
+  // cut, even where the photo's own detect drew its corner a little inside
+  // the edge (a clipped page's quad shrinks onto what is left of it).
+  const predicted: NormalizedQuad = {
+    topLeft: project(mapped.topLeft, fit),
+    topRight: project(mapped.topRight, fit),
+    bottomRight: project(mapped.bottomRight, fit),
+    bottomLeft: project(mapped.bottomLeft, fit),
+  };
   const [lo, hi] = STILL_SCALE_RANGE;
   const moved =
     fit.residual > STILL_MATCH_RESIDUAL ||
@@ -212,5 +222,9 @@ export function checkStill({ live, corners, cornersFromPhoto, mapping }: StillCh
     fit.scale > hi ||
     Math.abs(fit.shiftX) > STILL_MAX_SHIFT ||
     Math.abs(fit.shiftY) > STILL_MAX_SHIFT;
-  return { attention: moved ? "moved" : null, mapped, fit };
+  return { attention: moved ? "moved" : !inside(predicted) ? "corner-outside" : null, mapped, fit };
+}
+
+function project(p: Point, fit: { scale: number; shiftX: number; shiftY: number }): Point {
+  return { x: 0.5 + fit.scale * (p.x - 0.5) + fit.shiftX, y: 0.5 + fit.scale * (p.y - 0.5) + fit.shiftY };
 }

@@ -113,3 +113,18 @@ test("checkStill: a corner on the photo's edge, no page, another page → flagge
   // A manual capture with no live quad: only the photo's own corners are judged.
   assert.equal(checkStill({ live: null, corners: PAGE, cornersFromPhoto: true, mapping }).attention, null);
 });
+
+test("checkStill: a photo that sees less than the preview — the page's own detect shrinks onto what is left, the fit still says cut", () => {
+  const mapping = { preview: PREVIEW, still: PREVIEW };
+  const live = quad(0.08, 0.2, 0.92, 0.8);
+  // Seen 20 % narrower, the page would run from −0.05 to 1.05 across: the
+  // detect on the photo clamps to what is left, a hair inside the edge.
+  const seen = mapPreviewQuadToStill(live, { ...mapping, fovScale: 0.8 });
+  assert.ok(seen.topLeft.x < 0);
+  const clipped = quad(0.006, seen.topLeft.y, 0.994, seen.bottomRight.y);
+  const r = checkStill({ live, corners: clipped, cornersFromPhoto: true, mapping });
+  assert.equal(r.attention, "corner-outside");
+  // The same page through a photo that sees 10 % MORE: whole, no flag.
+  const wider = mapPreviewQuadToStill(live, { ...mapping, fovScale: 1.1 });
+  assert.equal(checkStill({ live, corners: wider, cornersFromPhoto: true, mapping }).attention, null);
+});
