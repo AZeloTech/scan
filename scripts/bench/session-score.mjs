@@ -987,6 +987,8 @@ export function scoreGuidance(script, record, gtAt, captures) {
 
 /** Step of the time grid the visible-region scores sample (ms). */
 const VIS_STEP_MS = 50;
+/** The overlay reports at least every 100 ms while the live loop runs; silence past this is no viewfinder. */
+const CUE_SILENT_MS = 300;
 
 /**
  * "Clearly inside": every corner at least this far in from the region's
@@ -1030,6 +1032,21 @@ export function regionAt(record) {
 }
 
 /** Every corner of `quad` (`[[x, y] × 4]`, frame fractions) inside `region`, `margin` in from its edges (fractions of the frame). */
+/**
+ * The opaque controls over the picture at a region sample (`blocks`, frame
+ * fractions, measured by the page independently of what the app declares:
+ * `page-session.js`) — does one of them sit on a corner of `quad`?
+ */
+export function cornerBlocked(quad, region) {
+  const blocks = region.blocks ?? [];
+  return quad.some(([x, y]) => blocks.some((b) => x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height));
+}
+
+/** Every corner inside the region and under no opaque control. */
+export function visibleOnScreen(quad, region) {
+  return insideRegion(quad, region) && !cornerBlocked(quad, region);
+}
+
 export function insideRegion(quad, region, margin = 0) {
   return quad.every(
     ([x, y]) =>
@@ -1047,10 +1064,13 @@ export function insideRegion(quad, region, margin = 0) {
  *   while the whole page was clearly visible ({@link clearlyInside};
  *   `moveBackFalseMs` over `clearMs`) or
  *   while it was not (`moveBackRightMs` over `hiddenMs`);
- * - `ready` — every overlay sample with the ready cue on, judged against
- *   the truth on screen: `violations` where a corner of the page lay outside
- *   the visible region (a page-less frame is the guidance score's problem,
- *   not counted here), and the same at the cue's onsets;
+ * - `ready` — every displayed instant (every VIS_STEP_MS) with the ready
+ *   cue on, judged against the truth on screen: `violations` where a corner
+ *   of the page lay outside the visible region or under an opaque control
+ *   (`blocked`), or where there was no page at all (`pageless`); and the
+ *   same at the cue's onsets. A hold is `reached` only from an onset of its
+ *   own page with the whole page on screen (a cue carried over from the
+ *   sheet before does not count);
  * - `auto` — automatic captures whose page has a corner outside the image
  *   that became it, and how many of those the app flagged;
  * - `area` — the visible region's size as a share of the viewport (the
@@ -1070,26 +1090,51 @@ export function scoreVisibility(script, record, gtAt, captures) {
           ...(marks.lockFrom2 !== undefined && marks.holdTo2 !== undefined ? [[marks.lockFrom2, marks.holdTo2]] : []),
         ];
   const cue = record.events.filter((e) => e.type === "overlay").map((e) => ({ t: e.t, ready: e.ready === true }));
+  // The cue as displayed at `t`: the overlay's last report, while it is
+  // still reporting (every ≤ 100 ms while the loop runs). A longer silence
+  // is a viewfinder that is not on screen — a confirm screen over it, the
+  // loop stopped — and shows no cue.
   const readyAt = (t) => {
-    let on = false;
+    let last = null;
     for (const s of cue) {
       if (s.t > t) break;
-      on = s.ready;
+      last = s;
     }
-    return on;
+    return last !== null && last.ready && t - last.t <= CUE_SILENT_MS;
   };
-  const holds = windows.map(([from, to]) => {
+  // Where the cue came ON (its onsets), from the overlay's reports.
+  const onsets = [];
+  {
+    let previous = false;
+    for (const s of cue) {
+      if (s.ready && !previous) onsets.push(s.t);
+      previous = s.ready;
+    }
+  }
+  /** Every corner of the truth on screen at `t` inside the region and clear of every opaque control. */
+  const seenWhole = (t) => {
+    const gt = gtAt(t);
+    if (gt === undefined || gt === null) return false;
+    return visibleOnScreen(toPoints(gt), region(t));
+  };
+  const holds = windows.map(([from, to], index) => {
     const w = { ms: 0, readyMs: 0, visibleMs: 0, hiddenMs: 0, clearMs: 0, moveBackFalseMs: 0, moveBackRightMs: 0, unknownMs: 0 };
+    // A hold is "ready" only from a cue onset of ITS page: after the previous
+    // hold ended (a cue carried over from the sheet before is not this
+    // one's), before this one ends, with all four corners of the page on
+    // screen at that onset (review finding 8).
+    const pageSince = index === 0 ? Number.NEGATIVE_INFINITY : at(windows[index - 1][1]);
+    const onset = onsets.find((t) => t > pageSince && t < at(to) && seenWhole(t)) ?? null;
     for (let t = at(from); t < at(to); t += VIS_STEP_MS) {
       w.ms += VIS_STEP_MS;
-      if (readyAt(t)) w.readyMs += VIS_STEP_MS;
+      if (onset !== null && t >= onset && readyAt(t)) w.readyMs += VIS_STEP_MS;
       const gt = gtAt(t);
       if (gt === undefined || gt === null) {
         w.unknownMs += VIS_STEP_MS;
         continue;
       }
       const r = region(t);
-      const visible = insideRegion(toPoints(gt), r);
+      const visible = visibleOnScreen(toPoints(gt), r);
       const moveBack = hintAt(series, t) === "move-back";
       if (visible) {
         w.visibleMs += VIS_STEP_MS;
@@ -1106,31 +1151,46 @@ export function scoreVisibility(script, record, gtAt, captures) {
       from,
       to,
       ...w,
+      onsetAt: onset === null ? null : onset - t0,
       reached: w.readyMs > 0,
       visibleShare: rate(w.visibleMs, w.visibleMs + w.hiddenMs),
       moveBackFalseShare: rate(w.moveBackFalseMs, w.clearMs),
     };
   });
-  const ready = { samples: 0, violations: 0, onsets: 0, onsetViolations: 0, worstOutside: 0 };
-  let previous = false;
-  for (const s of cue) {
-    const onset = s.ready && !previous;
-    previous = s.ready;
-    if (!s.ready) continue;
-    const gt = gtAt(s.t);
-    if (gt === undefined || gt === null) continue;
+  // The cue as displayed, every VIS_STEP_MS from the first report to the
+  // last (not only at the overlay's reports): each instant it is on is
+  // judged against the truth on screen. A page-less instant with the cue on
+  // is a violation too (`pageless`); an instant with no truth is not judged.
+  const ready = { samples: 0, violations: 0, pageless: 0, blocked: 0, onsets: 0, onsetViolations: 0, worstOutside: 0 };
+  const judge = (t) => {
+    const gt = gtAt(t);
+    if (gt === undefined) return null;
+    if (gt === null) return { ok: false, pageless: true, blocked: false, outside: 0 };
     const quad = toPoints(gt);
-    const r = region(s.t);
-    ready.samples += 1;
-    if (onset) ready.onsets += 1;
-    if (!insideRegion(quad, r)) {
+    const r = region(t);
+    const inside = insideRegion(quad, r);
+    const clear = inside && !cornerBlocked(quad, r);
+    const outside = inside ? 0 : Math.max(...quad.map(([x, y]) => Math.max(r.x - x, x - (r.x + r.width), r.y - y, y - (r.y + r.height))));
+    return { ok: clear, pageless: false, blocked: inside && !clear, outside };
+  };
+  if (cue.length > 0) {
+    for (let t = cue[0].t; t <= cue[cue.length - 1].t; t += VIS_STEP_MS) {
+      if (!readyAt(t)) continue;
+      const j = judge(t);
+      if (j === null) continue;
+      ready.samples += 1;
+      if (j.ok) continue;
       ready.violations += 1;
-      if (onset) ready.onsetViolations += 1;
-      const outside = Math.max(
-        ...quad.map(([x, y]) => Math.max(r.x - x, x - (r.x + r.width), r.y - y, y - (r.y + r.height))),
-      );
-      ready.worstOutside = Math.max(ready.worstOutside, outside);
+      if (j.pageless) ready.pageless += 1;
+      if (j.blocked) ready.blocked += 1;
+      ready.worstOutside = Math.max(ready.worstOutside, j.outside);
     }
+  }
+  for (const t of onsets) {
+    const j = judge(t);
+    if (j === null) continue;
+    ready.onsets += 1;
+    if (!j.ok) ready.onsetViolations += 1;
   }
   const autos = captures.filter((c) => c.trigger === "auto");
   const outside = autos.filter((c) => c.cornerOutside === true);

@@ -782,12 +782,23 @@ measures the part the person can see on its own — the `<video>`'s content
 box under its computed `object-fit` / `object-position`, clipped by every
 clipping ancestor and the visual viewport, minus the opaque bands the layout
 declares (`[data-scan-occluder]`) — at every viewfinder box sample, and the
-report's **Visible region** table judges the page against it: framed holds
-that reached the ready cue; the share of hold time the whole page was
-visible; "Afaste um pouco" shown while it was **clearly** visible (every
-corner ≥ 3 % of the region inside it — the app's own exit threshold; a
-tighter page counts neither way) or while it was not; ready-cue samples
-(and onsets) with a corner outside the region; automatic captures whose page
+report's **Visible region** table judges the page against it. Each sample
+also carries `blocks`: every element drawn over the picture whose painted
+background is at least half opaque (a glass button, the hint pill, a HUD),
+found from the page's own computed styles — not from anything the app
+declares — so a control the app forgot to declare still hides the corner
+under it. The table: framed holds that reached the ready cue — counted only
+from a cue **onset of that hold's own page** (after the previous hold
+ended) with all four corners visible and uncovered at the onset, so a cue
+lingering from the sheet before does not make the next hold "ready"; the
+share of hold time the whole page was visible; "Afaste um pouco" shown while
+it was **clearly** visible (every corner ≥ 3 % of the region inside it — the
+app's own exit threshold; a tighter page counts neither way) or while it was
+not; the ready cue judged at every displayed instant (every 50 ms while the
+overlay keeps reporting; a silence over 300 ms is no viewfinder), a
+violation being a corner outside the region, a corner under a control
+(`blocked`), or no page at all (`pageless`), and the same at the cue's
+onsets; automatic captures whose page
 has a corner outside the photo, and how many of those the app flagged for
 the confirm screen (`attention`); and the region's share of the viewport
 (the camera the person perceives).

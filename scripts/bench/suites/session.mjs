@@ -245,10 +245,10 @@ function render(results) {
       out.push(
         "The page against the part of the frame the person can see (`page-session.js` measures it on its own: the video's content box under " +
           "its object-fit, clipped by the stage and the viewport, minus the layout's declared opaque bands; a build that declares none is the crop alone). " +
-          "**Holds**: framed holds (the ready windows where a script has them, else the default holds) where the ready cue came on / all; " +
+          "**Holds**: framed holds (the ready windows where a script has them, else the default holds) where the ready cue came on — from an onset of that hold's own page, all four corners visible and uncovered at it — / all; " +
           "**page visible**: share of hold time with all four corners inside the region; **Afaste false**: \"Afaste um pouco\" shown while the whole " +
-          "page was clearly visible (every corner ≥ 3 % of the region in — the app's own exit threshold), over the time it was; **Afaste right**: shown while it was not, over that time. **Ready**: cue-on samples (onsets) with a " +
-          "corner outside the region / all. **Auto**: automatic captures whose page has a corner outside the image / flagged of those / all fires. " +
+          "page was clearly visible (every corner ≥ 3 % of the region in — the app's own exit threshold), over the time it was; **Afaste right**: shown while it was not, over that time. **Ready**: cue-on instants every 50 ms (onsets) with a " +
+          "corner outside the region, under an opaque control found on the page (not declared by the app), or no page at all / all; then page-less · covered. **Auto**: automatic captures whose page has a corner outside the image / flagged of those / all fires. " +
           "**Area**: the visible region as a share of the viewport (median).",
       );
       out.push("");
@@ -258,7 +258,7 @@ function render(results) {
       for (const row of seen) {
         const acc = bySession.get(row.session) ?? {
           holds: 0, reached: 0, visibleMs: 0, hiddenMs: 0, clearMs: 0, falseMs: 0, rightMs: 0,
-          samples: 0, violations: 0, onsets: 0, onsetViolations: 0, fires: 0, outside: 0, flagged: 0, areas: [],
+          samples: 0, violations: 0, pageless: 0, blocked: 0, onsets: 0, onsetViolations: 0, fires: 0, outside: 0, flagged: 0, areas: [],
         };
         const v = row.score.visibility;
         for (const h of v.holds) {
@@ -272,6 +272,8 @@ function render(results) {
         }
         acc.samples += v.ready.samples;
         acc.violations += v.ready.violations;
+        acc.pageless += v.ready.pageless ?? 0;
+        acc.blocked += v.ready.blocked ?? 0;
         acc.onsets += v.ready.onsets;
         acc.onsetViolations += v.ready.onsetViolations;
         acc.fires += v.auto.fires;
@@ -285,7 +287,7 @@ function render(results) {
         const areas = a.areas.sort((x, y) => x - y);
         out.push(
           `| ${session} | ${a.holds === 0 ? "–" : `${a.reached} / ${a.holds}`} | ${pct(share(a.visibleMs, a.visibleMs + a.hiddenMs), 0)} | ` +
-            `${pct(share(a.falseMs, a.clearMs), 0)} | ${pct(share(a.rightMs, a.hiddenMs), 0)} | ${a.violations} / ${a.samples} (${a.onsetViolations} / ${a.onsets}) | ` +
+            `${pct(share(a.falseMs, a.clearMs), 0)} | ${pct(share(a.rightMs, a.hiddenMs), 0)} | ${a.violations} / ${a.samples} (${a.onsetViolations} / ${a.onsets}); ${a.pageless} · ${a.blocked} | ` +
             `${a.outside} / ${a.flagged} / ${a.fires} | ${areas.length === 0 ? "–" : pct(areas[Math.floor(areas.length / 2)], 0)} |`,
         );
       }

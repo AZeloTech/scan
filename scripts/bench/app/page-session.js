@@ -258,7 +258,9 @@ const boxes = [];
  * viewport, then trimmed by the opaque edge bands the layout declares
  * (`[data-scan-occluder="top|bottom|left|right"]`) — as fractions of the
  * frame, plus its size in CSS px. A build that declares no occluders is
- * measured as the crop alone.
+ * measured as the crop alone. `blocks`: the opaque controls over the
+ * picture, found independently of anything the app declares
+ * ({@link opaqueControls}) — the scorer counts a corner under one as hidden.
  */
 const regions = [];
 let boxTimer = null;
@@ -316,7 +318,9 @@ function visibleRegion(video) {
   }
   const cssW = Math.max(0, clip.r - clip.l);
   const cssH = Math.max(0, clip.b - clip.t);
+  const blocks = opaqueControls(video, { l: left, t: top, w, h }, clip);
   return {
+    blocks,
     x: (clip.l - left) / w,
     y: (clip.t - top) / h,
     width: cssW / w,
@@ -328,6 +332,48 @@ function visibleRegion(video) {
     fit: style.objectFit,
   };
 }
+/**
+ * What sits OVER the picture and hides it, found on the page itself rather
+ * than from what the app declares (`data-scan-occluder`): every rendered
+ * element outside the video's own ancestry whose painted background is at
+ * least half opaque (its colour's alpha times the opacity of it and every
+ * ancestor) — the glass buttons, the hint pill, a diagnostics HUD — as
+ * rectangles in frame fractions, only where they overlap the visible part.
+ * A layer covering most of the stage (the white capture flash, the file
+ * surface) is not a control and is left out.
+ */
+function opaqueControls(video, frame, clip) {
+  const ancestry = new Set();
+  for (let el = video; el !== null; el = el.parentElement) ancestry.add(el);
+  const stage = video.parentElement?.getBoundingClientRect() ?? null;
+  const out = [];
+  for (const el of document.body.querySelectorAll("*")) {
+    if (ancestry.has(el) || el instanceof SVGElement) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    if (r.right <= clip.l || r.left >= clip.r || r.bottom <= clip.t || r.top >= clip.b) continue;
+    if (stage !== null && r.width * r.height >= 0.9 * stage.width * stage.height) continue;
+    const cs = getComputedStyle(el);
+    if (cs.visibility !== "visible" || cs.display === "none") continue;
+    const alpha = colourAlpha(cs.backgroundColor);
+    if (alpha <= 0) continue;
+    let opacity = alpha;
+    for (let a = el; a !== null && opacity >= 0.5; a = a.parentElement) opacity *= Number(getComputedStyle(a).opacity);
+    if (opacity < 0.5) continue;
+    out.push({ x: (r.left - frame.l) / frame.w, y: (r.top - frame.t) / frame.h, width: r.width / frame.w, height: r.height / frame.h });
+  }
+  return out;
+}
+
+function colourAlpha(colour) {
+  const m = /rgba?\(([^)]+)\)/.exec(colour);
+  if (m === null) return colour === "transparent" ? 0 : 1;
+  const parts = m[1].split(/[\s,/]+/).filter(Boolean);
+  if (parts.length < 4) return 1;
+  const a = parts[3];
+  return a.endsWith("%") ? parseFloat(a) / 100 : parseFloat(a);
+}
+
 function watchStage(video) {
   stageVideo = video;
   if (boxTimer !== null) clearInterval(boxTimer);

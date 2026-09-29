@@ -642,15 +642,13 @@ test("visible region: holds, a false \"Afaste\", ready outside the region, auto 
     presented: frames.map((_, k) => ({ k, at: t0 + (k * 1000) / 30 })),
     actions: [{ what: "camera-live", at: t0 }],
     regions,
+    // The overlay reports every 100 ms while the loop runs: the cue is on 1.5–3 s.
     events: [
-      overlay(0, false),
+      ...Array.from({ length: 40 }, (_, k) => overlay(k * 100, k * 100 >= 1500 && k * 100 < 3000)),
       hint(500, "move-back", true),
       hint(1000, "move-back", false),
-      overlay(1500, true),
-      overlay(2500, true),
-      overlay(3000, false),
       hint(3000, "move-back", true),
-    ],
+    ].sort((a, b) => a.t - b.t),
   };
   const script = { frame: FRAME, duration: 4000, marks: { holdFrom: 0, holdTo: 4000 } };
   const captures = [
@@ -668,13 +666,50 @@ test("visible region: holds, a false \"Afaste\", ready outside the region, auto 
   assert.equal(h.clearMs, 2000);
   assert.equal(h.moveBackFalseMs, 500);
   assert.equal(h.moveBackRightMs, 1000);
-  // Cue samples at 1.5 s (visible) and 2.5 s (a corner hidden): one violation, no onset violation.
-  assert.equal(v.ready.samples, 2);
-  assert.equal(v.ready.violations, 1);
+  // The cue is on 1.5–3 s, judged every 50 ms: visible until 2 s, a corner hidden after — no onset violation.
+  assert.equal(v.ready.samples, 30);
+  assert.equal(v.ready.violations, 20);
+  assert.equal(v.ready.pageless, 0);
   assert.equal(v.ready.onsets, 1);
   assert.equal(v.ready.onsetViolations, 0);
   assert.ok(Math.abs(v.ready.worstOutside - 0.05) < 1e-9);
   assert.deepEqual(v.auto, { fires: 3, cornerOutside: 2, cornerOutsideFlagged: 1, flagged: 1 });
   assert.equal(insideRegion(PAGE, { x: 0.2, y: 0.2, width: 0.6, height: 0.6 }), true);
   assert.equal(insideRegion(PAGE, { x: 0.2, y: 0.2, width: 0.6, height: 0.6 }, 0.01), false);
+});
+
+test("visible region: a cue carried over from the sheet before is not the next hold's; page-less and covered cue time are violations", () => {
+  const t0 = 1000;
+  // Page A until 3 s, nothing 3–3.5 s, page B from 3.5 s.
+  const frames = Array.from({ length: 300 }, (_, k) => ({ quad: k < 90 ? PAGE : k < 105 ? null : PAGE }));
+  const overlay = (t, ready) => ({ type: "overlay", t: t0 + t, quad: null, opacity: 1, ready });
+  const record = {
+    startedAt: t0,
+    frames,
+    presented: frames.map((_, k) => ({ k, at: t0 + (k * 1000) / 30 })),
+    actions: [{ what: "camera-live", at: t0 }],
+    regions: [{ at: t0, x: 0, y: 0, width: 1, height: 1 }],
+    // On at 1 s for page A, and it lingers through the swap to 3.7 s (reports every 100 ms).
+    events: Array.from({ length: 61 }, (_, k) => overlay(k * 100, k * 100 >= 1000 && k * 100 < 3700)),
+  };
+  const script = { frame: FRAME, duration: 6000, marks: { holdFrom: 500, holdTo: 3000, lockFrom2: 3500, holdTo2: 6000 } };
+  const v = scoreVisibility(script, record, truthOnScreen(record), []);
+  assert.equal(v.holds[0].reached, true);
+  assert.equal(v.holds[1].reached, false, "the lingering cue is page A's");
+  assert.equal(v.holds[1].readyMs, 0);
+  // 3.0–3.5 s with the cue on and no page: 10 page-less samples.
+  assert.equal(v.ready.pageless, 10);
+  assert.equal(v.ready.violations, 10);
+  // A fresh onset for page B counts.
+  const fresh = { ...record, events: Array.from({ length: 61 }, (_, k) => overlay(k * 100, (k * 100 >= 1000 && k * 100 < 3700) || (k * 100 >= 4000 && k * 100 < 6000))) };
+  // Silence is no viewfinder: the same lingering cue whose reports stop at 3 s (a confirm screen over it) shows nothing after.
+  const silent = { ...record, events: record.events.filter((e) => e.t < t0 + 3000) };
+  assert.equal(scoreVisibility(script, silent, truthOnScreen(silent), []).ready.pageless, 0);
+  assert.equal(scoreVisibility(script, fresh, truthOnScreen(fresh), []).holds[1].reached, true);
+  // An opaque control over a corner (the page spans 0.2–0.8): the cue there is a violation, and an onset under it does not count.
+  const covered = { ...fresh, regions: [{ at: t0, x: 0, y: 0, width: 1, height: 1, blocks: [{ x: 0.15, y: 0.15, width: 0.1, height: 0.1 }] }] };
+  const c = scoreVisibility(script, covered, truthOnScreen(covered), []);
+  assert.equal(c.holds[0].reached, false);
+  assert.ok(c.ready.blocked > 0);
+  assert.equal(c.ready.onsetViolations, c.ready.onsets);
 });
