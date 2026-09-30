@@ -39,7 +39,7 @@ import { buildBenchApp, ensureRuntimeAssets } from "./build-app.mjs";
 import { launchChromium } from "./browser.mjs";
 import { OUT_DIR } from "./paths.mjs";
 import { startServer } from "./server.mjs";
-import { frameCacheKey, openSessionPage, PHONE } from "./suites/session.mjs";
+import { frameCacheKey, measureFramingView, openSessionPage, PHONE } from "./suites/session.mjs";
 import { scoreSession } from "./session-score.mjs";
 
 const STREAM = "720x1280";
@@ -108,12 +108,15 @@ async function main() {
   let failed = false;
   try {
     // 1. Chromium renders the session's frames into the frame cache.
+    // The page is framed by what the layout shows (`--frame-by screen`,
+    // as the session suite does), measured on the same viewport and stream.
     const { browser: chromium } = await launchChromium();
-    const key = frameCacheKey(options.session, options.seed, STREAM, chromium.version());
+    const view = await measureFramingView(chromium, server.url, { layout: options.layout, viewport: IPHONE.viewport, stream: STREAM });
+    const key = frameCacheKey(options.session, options.seed, STREAM, chromium.version(), view);
     const renderer = await openSessionPage(chromium, server.url);
     const prepared = await renderer.page.evaluate(
-      ([name, seed, size, cache]) => window.__session.prepare(name, seed, { size, cache }),
-      [options.session, options.seed, STREAM, key],
+      ([name, seed, size, cache, v]) => window.__session.prepare(name, seed, { size, cache, view: v }),
+      [options.session, options.seed, STREAM, key, view],
     );
     console.log(`frames: ${prepared.prepare.frames} (${prepared.prepare.cached ? "cached" : "rendered"})`);
     await renderer.context.close();
@@ -131,9 +134,9 @@ async function main() {
       await page.goto(`${server.url}/page-session.html${options.layout === null ? "" : `?layout=${encodeURIComponent(options.layout)}`}`);
       await page.waitForFunction(() => window.__sessionReady === true, null, { timeout: 60_000 });
       const ready = await page.evaluate(
-        ([name, seed, size, cache, settings]) =>
-          window.__session.prepare(name, seed, { size, cache, stills: false, knobs: settings }).then((p) => ({ script: p.script, cached: p.prepare.cached })),
-        [options.session, options.seed, STREAM, key, knobs],
+        ([name, seed, size, cache, settings, v]) =>
+          window.__session.prepare(name, seed, { size, cache, stills: false, knobs: settings, view: v }).then((p) => ({ script: p.script, cached: p.prepare.cached })),
+        [options.session, options.seed, STREAM, key, knobs, view],
       );
       const features = await page.evaluate(() => ({
         worker: typeof Worker === "function",
