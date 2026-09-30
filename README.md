@@ -161,7 +161,38 @@ Full types ship with the package (`ScanFlowProps`). In short:
 | `className` | applied to the library's root element, for layout only. |
 | `captureLayout` | default `"rail"`. The capture screen (step 1). `"rail"`: the camera full-bleed, the hint under the top row, a MANUAL · AUTOMÁTICO (BETA) mode rail over the shutter (see `experimentalAutoCapture`), the newest page and the onward button either side of the shutter, and "Já tenho a foto" (when `intake.images` is on) as a small text button under it. `"standard"`: the screen that shipped before — header, viewfinder card, thumbnail rail, control row with the gallery pill — kept for hosts that want it (`"default"` is its deprecated old name and still works). **Experimental** alternatives, which may change or go away in any release and have no in-camera gallery pick: `"classic"` (translucent bottom bar), `"filmstrip"` (camera on top, the pages as a numbered strip under it), `"onehand"` (no bars, controls down the right edge, the hint hung on the page's corner), `"collapse"` (classic while searching, folding into one capsule while the page is ready). Every layout is the same capture stage — same detection, hints, ready cue on the brackets, torch, notices, page limit, confirm-corners screen after every photo, retake and corner editor, camera-refused file surface, and a shutter that works in every state. Unknown values fall back to `"rail"`. `experimentalCaptureLayout` is the deprecated old name of this prop (read only when `captureLayout` is absent). |
 | `experimentalDiagnostics` | **experimental**, default `false`. A small HUD over the viewfinder for testing on a real phone: detection lane (and why, if not the worker), detection time and its median, the loop's cadence, frame age, stream and photo size, the part of the frame the person can see and the layout's fit, torch and vibration support, the ready cue and auto-capture's state and fires, and — while the cue is off or auto-capture has not fired — `why:` the first thing holding it back (no page, a hint, a pass that missed, the camera moved, no fresh pass, too few readings, stillness or drift, the countdown). Numbers only: it stores nothing, sends nothing and reads no pixels. Its glass is 40 % dark, so the picture — and a page corner — stays visible through it. Leave it off in production. |
+| `onDiagnostics` | **experimental**. A field-test event stream: `(event: ScanDiagnosticsEvent) => void`. See [Diagnostics events](#diagnostics-events-experimental). Absent by default; nothing is built for it then. |
 | `experimentalAutoCapture` | **experimental.** Whether the auto-capture toggle is offered. **Omitted**: the layout decides — `"rail"` (the default), `"onehand"` and `"collapse"` show it, `"standard"` does not. **`false`**: no toggle on any layout, the photo is only ever taken by a tap — pass it for people who will not look at the confirm screen. **`true`**: shows it on `"standard"` too. `"classic"` and `"filmstrip"` never show it. Wherever it shows it starts OFF in every new flow, is never stored, and the shutter stays live in both modes; switched on, the page is taken by itself once framed, sharp and still for about half a second, once per page, through the confirm-corners screen. It still fires on some page-less scenes on the bench — a document shown on a phone or tablet screen, and two overlapping sheets taken as one — so a person must look at the confirm screen; refusing those scenes is planned work, not done yet. |
+
+### Diagnostics events (experimental)
+
+`onDiagnostics` hands the host what the capture loop is doing on the device,
+for testing on real phones: the session's facts (layout, viewport, device
+pixel ratio, safe-area insets, vibration support), the camera coming up
+(stream size, time to a live preview, torch support), the detection lane and
+why, the live loop sampled at most twice a second (detection time and median,
+cadence, frame age, found / locked / ready, and the HUD's `why:` reason),
+the visible region, hints shown and for how long, the ready cue on and off,
+auto-capture's countdown, cancellations (with the reason), fires (time from a
+steady page) and re-arming, each capture (manual or automatic, photo and
+frame sizes, whether the still or the preview became the page, where the
+corners came from, the still's registration numbers and the photo check's
+flag), each confirm-corners answer (kept, moved — the largest corner move as
+a percentage of the photo's diagonal —, retake or whole photo), pages removed
+or retaken, the page hidden and shown and the time until the camera answers
+again, stalls, the torch and the auto-capture toggle, and every `onEvent`
+event. Each event has `v` (schema version, now 1), `seq` and `t` (ms since the
+flow mounted).
+
+**The privacy contract.** An event carries numbers, booleans, enums,
+library-made reason strings and corner-geometry fractions — never pixels,
+thumbnails, crops, image hashes or signatures, text read from a page, file
+names, or a user agent. That is enforced at run time as well as by the type:
+anything that is not a plain value is dropped before the callback is called.
+**The library never sends, stores or buffers an event**; it only calls your
+function. Whether events leave the device, where they go and on what legal
+basis (LGPD, when a person is photographing a medical document) is the host's
+decision and responsibility. The shape may change in any release.
 
 ### Theming
 

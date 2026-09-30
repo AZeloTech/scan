@@ -37,6 +37,14 @@ freezes at 1.0.
   (`why: …`).
 
 ### Added
+- **`onDiagnostics` (experimental): a field-test event stream.** Versioned,
+  typed events (`ScanDiagnosticsEvent`) for the session, camera, lane, live
+  loop (sampled at most twice a second), visible region, hints, ready cue,
+  auto-capture's countdown / cancel / fire, captures, confirm-corners
+  answers, pages removed or retaken, visibility and camera resume, stalls,
+  torch and the auto-capture toggle. Numbers, enums and geometry only —
+  no pixels, hashes, page text or file names, checked at run time. The
+  library only calls the host's function; with no callback nothing is built.
 - **The page is judged against what the person sees** (Phase 5a). The hints
   ("Afaste um pouco", "Aproxime"), the ready cue and auto-capture now use the
   visible part of the frame — the video under the layout's fit, clipped by
