@@ -136,3 +136,67 @@ test("a request carrying a stored replay seeds the memo — the switch-off, swit
   assert.equal(memo.accepted, ACCEPTED, "the caller's map is used, not re-derived");
   assert.equal(memo.declined, null);
 });
+
+// ── the text deskew in the memo ──────────────────────────────────────────────
+
+/** A stand-in rotation: only its identity matters to the memo. */
+const ROTATION = { plan: { deg: 3 }, corners: REQUEST.corners } as never;
+
+test("a stored rotation and a final decline seed the memo: the engine is not asked, the rotation is the same", async () => {
+  const memo = dewarpMemoFor({
+    ...REQUEST,
+    dewarp: { sourceId: "page-1", generation: 4, deskew: ROTATION, declined: "curl-absent" },
+  });
+  assert.equal(memo.deskew, ROTATION);
+  assert.equal(memo.declined, "curl-absent");
+  const outcome = await curvedSurface<string>(memo, {
+    infer: async () => assert.fail("a final answer is not asked again"),
+    resample: async () => assert.fail("there is no map"),
+  });
+  assert.deepEqual(outcome, { canvas: null, reason: "curl-absent" });
+});
+
+test("a stored rotation without a final answer asks the engine again, and keeps the rotation", async () => {
+  const memo = dewarpMemoFor({
+    ...REQUEST,
+    dewarp: { sourceId: "page-1", generation: 5, deskew: ROTATION },
+  });
+  assert.equal(memo.declined, null, "a transient failure is worth asking again");
+  let asked = 0;
+  const outcome = await curvedSurface<string>(memo, {
+    // The stage hands a known rotation straight back (`knownDeskew`).
+    infer: async () => {
+      asked += 1;
+      return { canvas: null, reason: "timeout", replay: null, deskew: memo.deskew ?? null };
+    },
+    resample: async () => null,
+  });
+  assert.equal(asked, 1);
+  assert.equal(outcome.reason, "timeout");
+  assert.equal(memo.deskew, ROTATION, "the rotation did not change under a transient failure");
+});
+
+test("the deskew an inference planned is remembered for the render's retries", async () => {
+  const memo = newDewarpMemo();
+  let asked = 0;
+  const lane = {
+    infer: async () => {
+      asked += 1;
+      return { canvas: null, reason: "semantic-regression" as const, replay: null, deskew: ROTATION };
+    },
+    resample: async () => null,
+  };
+  await curvedSurface<string>(memo, lane);
+  await curvedSurface<string>(memo, lane);
+  assert.equal(asked, 1);
+  assert.equal(memo.deskew, ROTATION);
+});
+
+test("a stored map wins over any stored rotation: an engine surface carries none", () => {
+  const memo = dewarpMemoFor({
+    ...REQUEST,
+    dewarp: { sourceId: "page-1", generation: 6, replay: ACCEPTED, deskew: ROTATION },
+  });
+  assert.equal(memo.accepted, ACCEPTED);
+  assert.equal(memo.deskew, undefined);
+});

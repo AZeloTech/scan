@@ -1089,10 +1089,21 @@ The baseline's corners go onto the 896 px copy per axis, by the engine's own
 and linearly, as older app code did, when it does not; the copy is handed to
 the engine as `baselineSource`, which older engines ignore. The app's worker is replaced by an in-thread stand-in that makes exactly the
 worker's calls. When the engine root has a text-deskew module
-(`src/lib/deskew.ts`), the step runs first and the page the user sees is the
-engine's surface or the flat page of the rotated outline with its wedges
-painted (`straighten/deskew-step.mjs`, `--deskew auto|off|paper|crop`;
-`auto` = `paper` when the module exists).
+(`src/lib/deskew.ts`), the step runs first (`straighten/deskew-step.mjs`,
+`--deskew auto|off|paper|crop`; `auto` = `paper` when the module exists). A
+module that exports `planStraighten` (the app's own step) is driven the way
+`dewarp-stage.ts` drives it: one 896 px copy, B₀ of the confirmed outline, the
+rotation estimated and judged against B₀, and the engine run — on the
+confirmed outline, with B₀ as its A/B baseline — only when the step asks for
+it (no rotation, or a level page that still shows a curl). The page the user
+sees is the engine's surface (never rotated) when it accepts, else the flat
+page of the rotated outline with its wedges painted. A page the step levelled
+with no curl is recorded as engine outcome `#050 curl-absent`, with no engine
+time. `SCAN_STRAIGHTEN_CURL_GATE=always|never` forces the engine on or off on
+every rotated page — a diagnostic for choosing the curl gate from two runs,
+never the app's behaviour. An older module (`planDeskew`, the F5 prototype's)
+is driven the way that prototype drove it: the rotated outline replaces the
+confirmed one and the engine always runs.
 
 **Why Node, not the bench page.** The engine has no DOM in its path, a page
 takes seconds of single-threaded wasm, and a run is 279 of them: the suite
@@ -1141,7 +1152,12 @@ down, not cut: it is reported as shrunk, not as print lost (a page shrunk into
 a frame of table is still harm, as background brought in). **Painted** pages carry fill
 without the photo's grain; a **seam** is a fill that steps more than 6 grey
 levels against the paper beside it; both are net of what the flat page
-itself shows, and **dark wedges** count table newly in the border band.
+itself shows, and **dark wedges** count table newly in the border band. The
+seam looks for paper up to two blocks (about 2 % of the long edge) from each
+painted block, so on a sheet lit steeply toward its edge it also counts the
+light's own gradient; each deskewed record therefore carries `fillStep`, the
+fill against the real paper right across the fill's edge (p10/p50/p90, grey
+levels, + = fill brighter).
 Counts sit beside every rate in the report.
 
 **Provenance and runtime.** `config.engine` records the engine root, its HEAD
@@ -1176,6 +1192,19 @@ rotation); tilt-only pages 36/204 complete (tilted print in a correct outline
 9/64); curl 13/51; residual tilt p50/p90 3.0°/10.0°; 6 pages over the 12 s
 budget, no timeouts. Real stills (3 labelled): 4/30 complete, 26 no-op, no
 harm.
+
+**The deskew step** (engine d24bdb2 plus `src/lib/deskew.ts`, full profile,
+`--jobs 8`, against the same engine without it): complete 81 → 225 of 255
+(tilt-only 56 → 200 of 204, tilted print in a correct outline 64/64), harms
+3 → 1 (the bowed full-frame form, untouched by the step), curl 25/51
+unchanged, residual tilt p90 10° → 0°, seams 0, 1 page over the 12 s budget
+(6 before: the engine now runs on 78 of 279 pages). The one lost fix,
+`tilt/form/jitter/t2`, is a jittered outline whose leftover perspective the
+engine used to straighten; the step levels it to 0.41° and, finding no curl,
+does not ask the engine. The step itself costs 297/464 ms (p50/p90) in
+Node at `--jobs 8`. Real stills: 7 → 21 of 30 complete, no harm, no lost fix; 12–14
+pages flag a seam while the fill's own step across its edge stays within
+±3 grey levels at p90 on all but two.
 
 ## Status
 

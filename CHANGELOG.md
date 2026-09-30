@@ -121,6 +121,29 @@ freezes at 1.0.
   description. "Endireitar" keeps its icon and word when on.
 
 ### Added
+- **Endireitar straightens tilted print.** A tap on Endireitar now first
+  measures the tilt of the print on the flat page and turns the page level
+  when the print sits crooked inside a right outline — a photocopy fed
+  askew, an outline confirmed a few degrees off. The page's corners stay as
+  the user confirmed them; the rotation is applied with them in the same
+  single warp. It is refused, and the page left as it was, unless the text
+  is plainly in lines at one angle: a page lying on its side, a level heading
+  over a skewed body, handwriting across level rules, a graphic or too little
+  text all keep their tilt. The turned page is then checked against the flat
+  page it came from — more level, lines no less straight, no print pushed
+  out of the frame — or the turn is dropped. The corners the turn uncovers
+  are filled with the paper right beside them, shading included, and nothing
+  of the photo's own edge is smeared in where the turn reaches past it. The
+  curved-page engine runs only when the level page still shows a curl, on
+  the confirmed outline as before, and the turn is what the page keeps when
+  the engine declines. On the synthetic bench, pages fixed go from 81 to 225
+  of 255 (tilt-only pages 56 → 200 of 204) with no new harm; the engine runs
+  on 78 of 279 pages instead of all of them. On the labelled real stills,
+  fixes go from 7 to 21 of 30. The switch stays on over a page whose tilt
+  was fixed, whatever the engine said about the curl, and a timeout on the
+  curl no longer takes the turn away on the next edit. A corner edit
+  discards a stored turn or curvature map, which used to be reused on the new
+  corners.
 - **`onDiagnostics` (experimental): a field-test event stream.** Versioned,
   typed events (`ScanDiagnosticsEvent`) for the session, camera, lane, live
   loop (sampled at most twice in any second), visible region, hints, ready cue,

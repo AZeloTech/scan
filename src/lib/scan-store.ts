@@ -78,7 +78,8 @@ import { resolveGeometryMode, type DewarpEngineMode } from "@/lib/dewarp/engine-
 // A dependency-free lookup table, not the engine: `dewarp/index` is the ~25 kB
 // of maths this module is careful never to pull in eagerly.
 import { dewarpReasonCode } from "@/lib/dewarp/types";
-import type { DewarpReplay } from "@/lib/dewarp-stage";
+import type { AppliedDeskew, DewarpReplay, DewarpStageReason } from "@/lib/dewarp-stage";
+import { DESKEW_POLICY_VERSION } from "@/lib/deskew-policy";
 import {
   cancelRemoteRenders,
   claimRenderLane,
@@ -170,6 +171,12 @@ export interface RenderedTransforms {
    * being read as if it were current.
    */
   dewarpEngineMode: DewarpEngineMode;
+  /**
+   * The print's tilt the tap on Endireitar straightened in these pixels,
+   * degrees — on either geometry, whatever the engine then said about the
+   * curl. Absent when no rotation was applied.
+   */
+  deskewDeg?: number;
 }
 
 /** How far along a running curved-page correction is, for the page view. */
@@ -544,6 +551,9 @@ const DEWARP_OUTCOMES: Record<string, DewarpOutcome> = {
   "render-failed": "transient",
   "source-unavailable": "transient",
   "baseline-unavailable": "transient",
+  // The deskew levelled the print and found no curl, so the engine was not
+  // asked: deterministic for these pixels, and nothing went wrong.
+  "curl-absent": "better-flat",
   // A cancel is the user's own act, not an outcome to report.
 };
 
@@ -589,7 +599,27 @@ function dewarpFallbackReason(page: ScanPage, mode: DewarpEngineMode): string | 
   if (rendered.dewarped || rendered.dewarpFallbackReason === undefined) return null;
   // A cancel is the user's own act — nothing happened worth a sentence.
   if (rendered.dewarpFallbackReason === "cancelled") return null;
+  // The tap did correct this page — its tilt. "Mantivemos a original" would
+  // deny a correction that happened; what the curl got is
+  // {@link curlFallbackReason}'s to say.
+  if (rendered.deskewDeg !== undefined) return null;
   return rendered.dewarpFallbackReason;
+}
+
+/**
+ * Why the curl was not corrected on a page whose tilt was — the engine's own
+ * reason (`curl-absent` when it was not asked), or null when there is no
+ * such page or the curl was corrected.
+ */
+export function curlFallbackReason(
+  page: ScanPage,
+  mode: DewarpEngineMode = resolveGeometryMode(),
+): string | null {
+  const rendered = page.rendered;
+  if (rendered === null || rendered.revision !== page.revision) return null;
+  if (rendered.dewarpEngineMode !== mode || rendered.deskewDeg === undefined) return null;
+  if (rendered.dewarped) return null;
+  return rendered.dewarpFallbackReason ?? null;
 }
 
 /**
@@ -1062,15 +1092,44 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
    */
   const DEWARP_PROGRESS_STEP_BYTES = 262_144;
 
-  /** The last accepted map a page's curved geometry produced, and its identity. */
+  /**
+   * What a page's last Endireitar tap settled, and exactly what it was
+   * settled *for*.
+   *
+   * The key is everything the answer depends on: the pixels, the outline,
+   * the engine, and the deskew's policy. The output size is not a separate
+   * field because it is a function of the pixels and the outline (scanic's
+   * and the engine's own rule) — keying on both keys on it.
+   */
   interface DewarpReplayEntry {
     /** Reference identity, not content — `canonical` is byte-immutable and only
-     * a retake or a corner adjustment ever produces a *new* `Blob` for a page
-     * (`replaceCapture` below), so `===` is the exact "these are still the same
-     * pixels" test. */
+     * a retake produces a *new* `Blob` for a page (`replaceCapture` below), so
+     * `===` is the exact "these are still the same pixels" test. A corner
+     * adjustment keeps the Blob, which is why the corners are keyed too. */
     canonicalRef: Blob;
+    /** The outline the answer was computed on, by value. */
+    corners: NormalizedQuad | null;
     engineMode: DewarpEngineMode;
-    replay: DewarpReplay;
+    /** {@link DESKEW_POLICY_VERSION} at the time. */
+    policy: string;
+    /** The accepted map, or null when the engine declined (or was not asked). */
+    replay: DewarpReplay | null;
+    /**
+     * The deskew planned for this key: a rotation, or null for none. Absent
+     * when it was never planned. Independent of the engine — a transient
+     * engine failure keeps it, so the page never loses (or changes) its
+     * rotation on the next edit.
+     */
+    deskew?: AppliedDeskew | null;
+    /** A decline that is final for this key: the engine is not asked again. */
+    declined?: DewarpStageReason;
+  }
+
+  function sameCorners(a: NormalizedQuad | null, b: NormalizedQuad | null): boolean {
+    if (a === null || b === null) return a === b;
+    return (["topLeft", "topRight", "bottomRight", "bottomLeft"] as const).every(
+      (key) => a[key].x === b[key].x && a[key].y === b[key].y,
+    );
   }
 
   /**
@@ -1084,22 +1143,32 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
    * moment the switch goes back on, and {@link renderRequestFor} hands it to
    * the pipeline as `dewarp.replay`. It goes stale — silently, safely — the
    * instant the canonical actually changes, because nothing here is ever read
-   * without the reference check in {@link replayFor} passing first.
+   * without the key check in {@link entryFor} passing first.
    */
   const dewarpReplays = new Map<string, DewarpReplayEntry>();
 
-  /** The stored replay for this page's *current* pixels and engine, if any. */
-  function replayFor(page: ScanPage): DewarpReplay | null {
+  /** The stored answer for this page's *current* pixels, outline, engine and policy, if any. */
+  function entryFor(page: ScanPage): DewarpReplayEntry | null {
     const entry = dewarpReplays.get(page.id);
     if (entry === undefined) return null;
     if (entry.canonicalRef !== page.canonical) return null;
+    if (!sameCorners(entry.corners, page.corners)) return null;
     if (entry.engineMode !== page.dewarpEngineMode) return null;
-    return entry.replay;
+    if (entry.policy !== DESKEW_POLICY_VERSION) return null;
+    return entry;
   }
 
   function renderRequestFor(page: ScanPage, signal?: AbortSignal): RenderRequest {
     let announced = -1;
-    const replay = page.dewarpRequested ? replayFor(page) : null;
+    const entry = page.dewarpRequested ? entryFor(page) : null;
+    const replay = entry?.replay ?? null;
+    const known =
+      entry === null || replay !== null
+        ? {}
+        : {
+            ...(entry.deskew === undefined ? {} : { deskew: entry.deskew }),
+            ...(entry.declined === undefined ? {} : { declined: entry.declined }),
+          };
     return {
       canonical: page.canonical,
       corners: page.corners,
@@ -1112,6 +1181,7 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
             generation: page.revision,
             engineMode: page.dewarpEngineMode,
             ...(replay === null ? {} : { replay }),
+            ...known,
             onPhase: (progress) => {
               const received = progress.received ?? 0;
               const total = progress.total ?? 0;
@@ -1161,6 +1231,12 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
         // The page moved on while we worked. Its successor owns the state now.
         if (findPage(pageId)?.revision !== revision) return;
         const reason = rendered.dewarpFallbackReason;
+        // A rotation the tap applied is a correction the page got, whatever
+        // the engine then said about the curl: the switch stays on over it.
+        // A cancel is the user taking the whole tap back (the page renders
+        // without the rotation too).
+        const deskew = rendered.deskew ?? null;
+        const keptByDeskew = deskew !== null && reason !== "cancelled";
         patchPage(pageId, {
           status: "ready",
           final: rendered.final,
@@ -1175,6 +1251,7 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
             dewarped: rendered.dewarped,
             dewarpEngineMode: mode,
             ...(reason === undefined ? {} : { dewarpFallbackReason: reason }),
+            ...(deskew === null ? {} : { deskewDeg: deskew.plan.deg }),
           },
           // Any fallback hands the switch back: the toggle reflects the
           // page the user is looking at, not the wish they once expressed — a
@@ -1182,7 +1259,7 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
           // reported as a bug. The outcome itself stays on `rendered`, where
           // the page view reads it. Clearing the request *here* rather than at
           // the tap is also what keeps a cancel from costing a second render.
-          ...(reason === undefined ? {} : { dewarpRequested: false }),
+          ...(reason === undefined || keptByDeskew ? {} : { dewarpRequested: false }),
           error: null,
         });
         if (onQuality !== null) {
@@ -1202,14 +1279,30 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
           });
         }
         // The store's own replay cache, independent of `page-processing.ts`'s
-        // per-render memo: this is what a *later* toggle-off/toggle-on reads
-        // (`replayFor`, above), not just a retry inside this one render.
+        // per-render memo: this is what a *later* toggle-off/toggle-on — or
+        // any edit that leaves pixels and outline alone — reads (`entryFor`,
+        // above), not just a retry inside this one render.
+        const key = {
+          canonicalRef: page.canonical,
+          corners: page.corners,
+          engineMode: mode,
+          policy: DESKEW_POLICY_VERSION,
+        };
         if (rendered.dewarped && rendered.dewarpReplay) {
-          dewarpReplays.set(pageId, {
-            canonicalRef: page.canonical,
-            engineMode: mode,
-            replay: rendered.dewarpReplay,
-          });
+          dewarpReplays.set(pageId, { ...key, replay: rendered.dewarpReplay });
+        } else if (page.dewarpRequested && reason !== undefined && reason !== "cancelled") {
+          const final = dewarpOutcomeIsFinal(DEWARP_OUTCOMES[reason] ?? "transient");
+          // The deskew's answer stands on its own: kept through a transient
+          // engine failure (the engine is asked again next time, the rotation
+          // is not re-planned); a final decline is kept with it.
+          if (rendered.deskew !== undefined || final) {
+            dewarpReplays.set(pageId, {
+              ...key,
+              replay: null,
+              ...(rendered.deskew === undefined ? {} : { deskew: rendered.deskew }),
+              ...(final ? { declined: reason as DewarpStageReason } : {}),
+            });
+          }
         }
       } catch (error) {
         // A pass that was replaced mid-flight is not a failure to report: the
@@ -1240,7 +1333,7 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
     dewarpAborts.clear();
     // The replay cache is keyed by page id, and a fresh scan reuses ids from
     // nothing — but a stale entry here is only ever dead weight, never wrong
-    // (`replayFor`'s reference check would refuse it anyway), so this is
+    // (`entryFor`'s key check would refuse it anyway), so this is
     // hygiene, not correctness.
     dewarpReplays.clear();
   }

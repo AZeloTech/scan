@@ -131,11 +131,11 @@ export async function loadEngineHost(root) {
     return warpQuad(canonical, quad, d.width, d.height);
   };
 
-  async function runStage(canonical, quad, sourceId) {
-    const t0 = performance.now();
-    engineMs = 0;
-    // baseline: scaleSurface(source, 896) + scanic warpToCanvas(small, corners)
-    const small = bilinearDownscale(canonical, BASELINE_SOURCE_LONG_EDGE);
+  /** scaleSurface(source, 896): the small copy every A/B baseline is warped from. */
+  const smallCopy = (canonical) => bilinearDownscale(canonical, BASELINE_SOURCE_LONG_EDGE);
+
+  /** scanic warpToCanvas(small, corners): the small flat page of `quad`, from the copy. */
+  function baselineOn(small, canonical, quad) {
     // Per axis, as the app's normalized corners are. An engine that exports
     // its pixel-centre rule (`quadOnScaledCopy`, F4) has the app put the
     // baseline's corners on the copy by it; older checkouts' app scales them
@@ -145,7 +145,19 @@ export async function loadEngineHost(root) {
       ? idx.quadOnScaledCopy(quad, idx.copyScale(canonical, small))
       : mapQuad(quad, (p) => ({ x: p.x * kx, y: p.y * ky }));
     const bd = outputDims(smallQuad);
-    const baseline = warpQuad(small, smallQuad, bd.width, bd.height);
+    return warpQuad(small, smallQuad, bd.width, bd.height);
+  }
+
+  /**
+   * One engine run on `quad`. `given` hands over the copy and the A/B
+   * baseline the caller already rendered (the deskew step renders them once
+   * and reuses them, as the app does); absent, they are rendered here.
+   */
+  async function runStage(canonical, quad, sourceId, given = null) {
+    const t0 = performance.now();
+    engineMs = 0;
+    const small = given?.small ?? smallCopy(canonical);
+    const baseline = given?.baseline ?? baselineOn(small, canonical, quad);
 
     const output = idx.outputDimsFromQuad(quad);
     const crop = idx.paddedCropBox(quad, canonical.width, canonical.height, idx.cropPadForMode(mode));
@@ -232,5 +244,9 @@ export async function loadEngineHost(root) {
     meta: { wasmVersion: manifest.version, appHardTimeoutMs: idx.HARD_TIMEOUT_MS, appDeviceBudgetMs: idx.DEVICE_GATE_BUDGET_MS, hardTimeoutMs },
     runStage,
     flatPage,
+    smallCopy,
+    baselineOn,
+    codeOf: (reason) => types.dewarpReasonCode(reason),
+    bucketOf: (reason) => buckets[reason] ?? "transient",
   };
 }

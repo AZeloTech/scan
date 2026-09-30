@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { DewarpStageReason } from "./dewarp-stage.ts";
+import type { AppliedDeskew, DewarpStageReason } from "./dewarp-stage.ts";
 import { honestySubject, type PageTransform } from "./honesty.ts";
 import { ImagePrepError } from "./image.ts";
 import {
@@ -19,6 +19,7 @@ import type { GateReading } from "./capture-gate.ts";
 import type { NormalizedQuad } from "./quad.ts";
 import {
   createScanStore,
+  curlFallbackReason,
   dewarpConsentRequired,
   dewarpOutcome,
   effectiveFinish,
@@ -81,6 +82,17 @@ class FakeCodec {
    * Null means a page that asked for it gets it.
    */
   dewarpFallback: DewarpStageReason | null = null;
+  /**
+   * What the text deskew plans on a page that asks (undefined: this fake
+   * pipeline has no deskew step at all). Stands in for `planStraighten`: a
+   * request that already carries a known deskew gets that one back, never a
+   * fresh plan — the pipeline's own rule (`dewarpMemoFor`).
+   */
+  deskew: AppliedDeskew | null | undefined = undefined;
+  /** How many times the fake planned a deskew afresh. */
+  deskewPlans = 0;
+  /** How many times the engine was actually asked. */
+  engineRuns = 0;
   assembleFails = false;
   /** Set to gate `assemble` on an external promise. */
   assembleGate: Promise<void> | null = null;
@@ -96,8 +108,24 @@ class FakeCodec {
   private produce(request: RenderRequest): RenderedPage {
     const finish = this.degradeFinish ? "original" : request.finish;
     const source = nameOf(request.canonical);
-    const asked = (request.dewarp ?? null) !== null;
-    const dewarped = asked && this.dewarpFallback === null;
+    const ask = request.dewarp ?? null;
+    const asked = ask !== null;
+    // The engine is not asked when the request carries a map or a final
+    // decline. (A carried map is still answered with `dewarpFallback`, as
+    // this fake always has: it stands for the resample failing.)
+    const known = ask?.replay ?? null;
+    const declined = ask?.declined ?? null;
+    if (asked && known === null && declined === null) this.engineRuns += 1;
+    const fallback = declined ?? this.dewarpFallback;
+    let deskew: AppliedDeskew | null | undefined;
+    if (asked && fallback !== null && fallback !== "cancelled") {
+      if (ask.deskew !== undefined) deskew = ask.deskew;
+      else if (this.deskew !== undefined) {
+        this.deskewPlans += 1;
+        deskew = this.deskew;
+      }
+    }
+    const dewarped = asked && fallback === null;
     const geometry = request.corners === null ? "flat" : dewarped ? "curved" : "warped";
     const stamp = `${source}/${finish}/${request.rotation}/${geometry}`;
     this.counts.final += 1;
@@ -112,9 +140,8 @@ class FakeCodec {
       finish,
       warped: request.corners !== null,
       dewarped,
-      ...(asked && this.dewarpFallback !== null
-        ? { dewarpFallbackReason: this.dewarpFallback }
-        : {}),
+      ...(asked && fallback !== null ? { dewarpFallbackReason: fallback } : {}),
+      ...(deskew === undefined ? {} : { deskew }),
       // A stand-in accepted map — only its identity matters to the store,
       // which treats it as opaque (`page-processing.test.ts`'s own `ACCEPTED`
       // fixture does the same). Present whenever the request asked and the
@@ -1548,4 +1575,167 @@ test("step 2's Gerar PDF on a page still being prepared fails the build, with a 
   assert.equal(build.phase, "failed");
   assert.equal(build.error, "pages_processing");
   assert.equal(codec.assembled.length, 0);
+});
+
+// ── the text deskew under the tap ────────────────────────────────────────────
+//
+// The rotation is the page's own answer, independent of the engine: kept on
+// the switch whatever the engine says about the curl, the same rotation on
+// every edit that leaves pixels and outline alone, and thrown away the moment
+// the outline changes.
+
+/** A stand-in rotation: only its identity and its angle matter to the store. */
+function deskewOf(deg: number, curl = false): AppliedDeskew {
+  return {
+    plan: { deg, curl: { evidence: curl } } as never,
+    corners: QUAD,
+  };
+}
+
+test("a page whose tilt was straightened keeps the switch on, whatever the engine said about the curl", async () => {
+  for (const reason of ["curl-absent", "semantic-regression", "guard-boundary", "timeout"] as const) {
+    const codec = new FakeCodec();
+    codec.dewarpFallback = reason;
+    codec.deskew = deskewOf(3.5);
+    const pageId = await onePage(codec);
+    store().setPageDewarp(pageId, true);
+    await settle();
+    const page = onlyPage();
+    assert.equal(page.dewarpRequested, true, `${reason}: the page did get a correction`);
+    assert.equal(page.rendered?.deskewDeg, 3.5, reason);
+    assert.equal(page.rendered?.dewarped, false, reason);
+    // "Mantivemos a original" would deny the rotation; the curl's own outcome
+    // is kept for the page view to say.
+    assert.equal(dewarpOutcome(page), null, reason);
+    assert.equal(curlFallbackReason(page), reason, reason);
+  }
+});
+
+test("a transient engine failure keeps the rotation, and the next edit gets the same one without re-planning", async () => {
+  const codec = new FakeCodec();
+  codec.dewarpFallback = "timeout";
+  const straightened = deskewOf(4, true);
+  codec.deskew = straightened;
+  const pageId = await onePage(codec);
+  store().setPageDewarp(pageId, true);
+  await settle();
+  assert.equal(codec.deskewPlans, 1);
+  assert.equal(onlyPage().dewarpRequested, true, "the switch did not go off under a rotated page");
+
+  // An unrelated edit: the rotation must not silently disappear.
+  store().setPageFinish(pageId, "original");
+  await settle();
+  const request = codec.requests.at(-1);
+  assert.equal(request?.dewarp?.deskew, straightened, "the planned rotation is handed back");
+  assert.equal(request?.dewarp?.declined, undefined, "a transient failure is asked again");
+  assert.equal(codec.deskewPlans, 1, "and never re-planned");
+  assert.equal(onlyPage().rendered?.deskewDeg, 4);
+  assert.equal(codec.engineRuns, 2, "the engine got its retry");
+});
+
+test("a final answer with a rotation is kept whole: the next edit neither re-plans nor re-asks the engine", async () => {
+  const codec = new FakeCodec();
+  codec.dewarpFallback = "curl-absent";
+  codec.deskew = deskewOf(-2);
+  const pageId = await onePage(codec);
+  store().setPageDewarp(pageId, true);
+  await settle();
+  store().rotatePage(pageId, "cw");
+  await settle();
+  const request = codec.requests.at(-1);
+  assert.equal(request?.dewarp?.declined, "curl-absent");
+  assert.equal(codec.engineRuns, 1);
+  assert.equal(codec.deskewPlans, 1);
+  assert.equal(onlyPage().rendered?.deskewDeg, -2);
+});
+
+test("a corner edit throws the rotation away: new corners, new plan", async () => {
+  const codec = new FakeCodec();
+  codec.dewarpFallback = "curl-absent";
+  codec.deskew = deskewOf(3);
+  const pageId = await onePage(codec);
+  store().setPageDewarp(pageId, true);
+  await settle();
+
+  // Same canonical Blob, new corners — exactly what the corner editor does.
+  const page = onlyPage();
+  store().replaceCapture(pageId, {
+    canonical: page.canonical,
+    corners: { ...QUAD, topLeft: { x: 0.08, y: 0.04 } },
+    gate: reading("ok"),
+    path: "adjust",
+  });
+  await settle();
+  const request = codec.requests.at(-1);
+  assert.equal(request?.dewarp?.deskew, undefined, "the old outline's rotation is not reused");
+  assert.equal(request?.dewarp?.declined, undefined, "nor its verdict");
+  assert.equal(codec.deskewPlans, 2);
+});
+
+test("a corner edit also retires an accepted map computed on the old corners", async () => {
+  const codec = new FakeCodec();
+  const pageId = await onePage(codec);
+  store().setPageDewarp(pageId, true);
+  await settle();
+  assert.equal(onlyPage().rendered?.dewarped, true);
+  const page = onlyPage();
+  store().replaceCapture(pageId, {
+    canonical: page.canonical,
+    corners: { ...QUAD, bottomRight: { x: 0.9, y: 0.93 } },
+    gate: reading("ok"),
+    path: "adjust",
+  });
+  await settle();
+  assert.equal(codec.requests.at(-1)?.dewarp?.replay, undefined, "the map was for other corners");
+});
+
+test("switching off restores the confirmed outline with no rotation; on again reuses the rotation", async () => {
+  const codec = new FakeCodec();
+  codec.dewarpFallback = "curl-absent";
+  const straightened = deskewOf(5);
+  codec.deskew = straightened;
+  const pageId = await onePage(codec);
+  store().setPageDewarp(pageId, true);
+  await settle();
+
+  store().setPageDewarp(pageId, false);
+  await settle();
+  const off = onlyPage();
+  assert.equal(codec.requests.at(-1)?.dewarp, null, "no tap, no deskew");
+  assert.equal(off.rendered?.deskewDeg, undefined);
+
+  store().setPageDewarp(pageId, true);
+  await settle();
+  assert.equal(codec.requests.at(-1)?.dewarp?.deskew, straightened);
+  assert.equal(codec.deskewPlans, 1);
+  assert.equal(onlyPage().rendered?.deskewDeg, 5);
+});
+
+test("a cancel takes the whole tap back: no rotation, switch off", async () => {
+  const codec = new FakeCodec();
+  codec.dewarpFallback = "cancelled";
+  codec.deskew = deskewOf(3);
+  const pageId = await onePage(codec);
+  store().setPageDewarp(pageId, true);
+  await settle();
+  const page = onlyPage();
+  assert.equal(page.dewarpRequested, false);
+  assert.equal(page.rendered?.deskewDeg, undefined);
+});
+
+test("a planned 'no rotation' is remembered too, so a retry asks only the engine", async () => {
+  const codec = new FakeCodec();
+  codec.dewarpFallback = "worker-failed";
+  codec.deskew = null;
+  const pageId = await onePage(codec);
+  store().setPageDewarp(pageId, true);
+  await settle();
+  // No rotation and a transient failure: the switch is handed back, as before.
+  assert.equal(onlyPage().dewarpRequested, false);
+  codec.dewarpFallback = null;
+  store().setPageDewarp(pageId, true);
+  await settle();
+  assert.equal(codec.requests.at(-1)?.dewarp?.deskew, null, "no rotation, known — not re-planned");
+  assert.equal(codec.deskewPlans, 1);
+  assert.equal(onlyPage().rendered?.dewarped, true);
 });
