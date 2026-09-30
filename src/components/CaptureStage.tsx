@@ -528,7 +528,11 @@ export function CaptureStage({
     videoRef,
     containerRef: stageRef,
     active: mode === "live" && !disabled && !cameraLost,
-    paused: paused || busy,
+    // Not paused by a capture in flight: from the tap to the confirm screen
+    // the loop holds the overlay frozen on the tapped quad (`capturing`,
+    // `noteCapture` → `endCapture`) — tearing it down faded the brackets out
+    // and put the framing marks back under the shutter's flash.
+    paused,
     autoCapture: autoCapture && mode === "live" && !disabled,
     onAutoCapture: handleAutoCapture,
   });
@@ -985,6 +989,7 @@ export function CaptureStage({
       releaseCanvas(frame);
       busyRef.current = false;
       setBusy(false);
+      detect.endCapture();
     }
   }, [copy, detect, disabled, emit, mode, pageNumber, paused]);
   autoFireRef.current = () => {
@@ -1138,7 +1143,10 @@ export function CaptureStage({
           />
         )}
 
-        {mode === "live" && !detect.hasQuad && <FramingBrackets boxClassName={chrome?.framingClassName} />}
+        {/* Not while paused: a capture handing over to its confirm screen
+            (or any sheet) covers the stage, and marks popping back under it
+            are the "brackets jumping" of a capture. */}
+        {mode === "live" && !detect.hasQuad && !paused && <FramingBrackets boxClassName={chrome?.framingClassName} />}
 
         {mode === "live" && detect.available && detect.frameBox !== null && (
           // Positioned over the *rendered* frame, not the stage: object-cover

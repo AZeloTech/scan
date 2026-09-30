@@ -18,6 +18,7 @@ test("the diagnostics HUD says what the loop is doing, in numbers only", () => {
       locked: true,
       ready: true,
       autoArmed: true,
+      blocked: "auto: countdown 40 %",
     },
     { torch: false, autoOffered: true, autoOn: true, autoFires: 2, still: { width: 2250, height: 4000, attention: "corner-outside" } },
     false,
@@ -31,6 +32,7 @@ test("the diagnostics HUD says what the loop is doing, in numbers only", () => {
     "visible x0 y3 w100 h94 % · fit maxcrop",
     "torch no · vibrate no",
     "locked · ready on · auto armed · fired 2",
+    "why: auto: countdown 40 %",
     "last photo: corner-outside",
   ]);
 });

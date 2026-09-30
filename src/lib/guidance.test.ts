@@ -23,6 +23,7 @@ import {
   TICK_REARM_MS,
   toVisible,
   type GuidanceInput,
+  readingSpacing,
 } from "./guidance.ts";
 import type { NormalizedQuad } from "./quad.ts";
 
@@ -245,4 +246,13 @@ test("after the confirm screen, re-arming counts from the viewfinder's return", 
   toggled.update({ now: 500, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: 500 });
   toggled.enable(600);
   assert.equal(toggled.armed, false);
+});
+
+test("the ready window follows how often the page is actually read", () => {
+  assert.equal(readingSpacing([]), 0);
+  assert.equal(readingSpacing([{ at: 0 }, { at: 200 }]), 0);
+  // A pass every ~200 ms (a 4K stream on a 120 ms interval): the spacing, not the interval.
+  assert.equal(readingSpacing([{ at: 0 }, { at: 190 }, { at: 400 }, { at: 600 }, { at: 810 }, { at: 1000 }, { at: 1200 }]), 200);
+  // One late pass does not stretch it.
+  assert.equal(readingSpacing([{ at: 0 }, { at: 120 }, { at: 240 }, { at: 900 }, { at: 1020 }]), 120);
 });

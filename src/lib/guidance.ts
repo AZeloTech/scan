@@ -292,6 +292,17 @@ export function motionOf(readings: readonly { at: number; quad: NormalizedQuad }
   return span >= MOTION_MIN_SPAN_MS ? largest / diagonal : null;
 }
 
+/**
+ * The median spacing (ms) of the newest readings' frame times — how often
+ * the loop actually reads the page — or 0 with fewer than three of them.
+ */
+export function readingSpacing(readings: readonly { at: number }[]): number {
+  const recent = readings.slice(-(READY_MIN_READINGS + 1));
+  if (recent.length < 3) return 0;
+  const gaps = recent.slice(1).map((r, i) => r.at - recent[i].at).sort((a, b) => a - b);
+  return gaps[Math.floor(gaps.length / 2)];
+}
+
 /** What the live loop knows at one moment. */
 export interface GuidanceInput {
   now: number;

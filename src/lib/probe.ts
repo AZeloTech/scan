@@ -134,6 +134,8 @@ export interface OverlayProbe {
   countdown?: number | null;
   /** The last watch of the camera while the cue was on: its motion score against the confirmed frame (`hooks/useLiveDetect.ts`). */
   watch?: number | null;
+  /** A photo is being taken: the overlay is frozen on the quad of the tap. */
+  capturing?: boolean;
 }
 
 /** A chip or notice over the viewfinder appearing (`shown`) or going away. */

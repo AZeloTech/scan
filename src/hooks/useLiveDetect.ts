@@ -141,6 +141,7 @@ import {
   READY_DRIFT_MAX,
   READY_DRIFT_MAX_SPARSE,
   READY_MIN_READINGS,
+  readingSpacing,
   STILL_MAX,
   STILL_WINDOW_MS,
   toVisible,
@@ -601,6 +602,18 @@ interface Runtime {
   suspectAt: number | null;
   /** The newest confirming pass's readings say still, on enough of them ({@link READY_MIN_READINGS}). */
   readyVerdict: boolean;
+  /**
+   * A photo is being taken (from the tap or the auto fire to the end of the
+   * capture): the overlay stays frozen on the quad it showed, no pass runs or
+   * lands, and a stream that reconfigures for the photo (Android's
+   * `takePhoto()` can freeze, re-expose or resize the preview) is not
+   * measured — it describes a camera busy with the shutter, not the page.
+   */
+  capturing: boolean;
+  /** Why the newest confirming pass's readings did not say still (the HUD's reason), or null. */
+  stillWhy: string | null;
+  /** The first thing keeping the ready cue off / auto-capture from firing right now (the HUD's reason). */
+  blockWhy: string | null;
   /** The preview's luma probe at the newest confirming pass's frame, and the one being taken for the pass in flight. */
   watchBase: Uint8ClampedArray | null;
   /** When the preview was last watched while the cue was on, and whether it has moved off the confirmed frame since. */
@@ -653,6 +666,9 @@ function freshRuntime(): Runtime {
     confirmedAt: null,
     suspectAt: null,
     readyVerdict: false,
+    capturing: false,
+    stillWhy: null,
+    blockWhy: null,
     watchBase: null,
     watchAt: Number.NEGATIVE_INFINITY,
     watchMoved: false,
@@ -713,6 +729,7 @@ function clearTracking(runtime: Runtime, overlay: LiveOverlayRefs): void {
   runtime.confirmedAt = null;
   runtime.suspectAt = null;
   runtime.readyVerdict = false;
+  runtime.stillWhy = null;
   runtime.watchBase = null;
   runtime.watchMoved = false;
   runtime.openHits = 0;
@@ -806,6 +823,8 @@ export interface LiveDiagnostics {
   locked: boolean;
   ready: boolean;
   autoArmed: boolean;
+  /** The first thing keeping the ready cue off or auto-capture from firing, or null. */
+  blocked: string | null;
 }
 
 /**
@@ -892,6 +911,8 @@ export interface LiveDetect {
    * before using it. Which detector found them rides along for the probe.
    */
   takeQuadForCapture: () => BufferedQuad | null;
+  /** The capture is over (its confirm screen is up, or it failed): the loop takes the camera back. */
+  endCapture: () => void;
   /** A capture just happened: the next page is a new question for the ML policy. */
   noteCapture: () => void;
   /** The one hint over the viewfinder (`lib/guidance.ts`), or none. */
@@ -1104,6 +1125,8 @@ export function useLiveDetect({
     const video = videoRef.current;
     const host = containerRef.current;
     if (video === null || host === null) return;
+    // Mid-capture the geometry is the photo's business: nothing moves under the frozen overlay.
+    if (runtimeRef.current.capturing) return;
     if (video.videoWidth === 0 || video.videoHeight === 0) return;
     const rect = host.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) {
@@ -1259,11 +1282,26 @@ export function useLiveDetect({
     // download itself is untouched — it is a fact about the page.
     const runtime = runtimeRef.current;
     runtime.mlEpoch += 1;
+    // From here to the confirm screen the overlay holds still (`capturing`).
+    runtime.capturing = true;
     // This page is taken, whoever took it: auto-capture waits for another.
     const sheet = runtime.locked && runtime.shown !== null ? toVisible(runtime.shown, visibleRef.current) : null;
     guidanceRef.current.auto.took(performance.now(), sheet);
     if (sheet !== null) runtime.firedLuma = runtime.motionHistory[runtime.motionHistory.length - 1]?.luma ?? null;
   }, []);
+
+  const endCapture = React.useCallback(() => {
+    const runtime = runtimeRef.current;
+    if (!runtime.capturing) return;
+    runtime.capturing = false;
+    // What the camera did during the shutter is not motion of the page.
+    runtime.lastFrameAt = 0;
+    runtime.motionHistory = [];
+    runtime.sheetReadings = [];
+    runtime.watchBase = null;
+    runtime.watchMoved = false;
+    measure();
+  }, [measure]);
 
   /**
    * The corners a capture may fall back on, and how old they already are.
@@ -1664,8 +1702,9 @@ export function useLiveDetect({
     async function runPass(): Promise<number | null> {
       const video = videoRef.current;
       // Single-flight: the chain only ever schedules itself once a pass ends,
-      // and this guard is the belt to that pair of braces.
-      if (runtime.detecting || video === null || video.videoWidth === 0) {
+      // and this guard is the belt to that pair of braces. No pass while a
+      // photo is being taken: the frames are the shutter's transition.
+      if (runtime.detecting || runtime.capturing || video === null || video.videoWidth === 0) {
         return runtime.intervalMs;
       }
       const lane: DetectLaneKind = detectLane() ?? "main";
@@ -1718,7 +1757,7 @@ export function useLiveDetect({
       if (cancelled) return null;
       const elapsed = performance.now() - started;
       if (outcome === null) return runtime.intervalMs;
-      if (runtime.mlEpoch !== epoch) return runtime.intervalMs;
+      if (runtime.mlEpoch !== epoch || runtime.capturing) return runtime.intervalMs;
       if (lane === "worker") {
         // The worker runs one job at a time, so a pass it did not answer in
         // time is a pass behind another job (a capture's), not two
@@ -1832,21 +1871,31 @@ export function useLiveDetect({
     function stillEnough(at: number): boolean {
       const aspect = visibleAspect();
       const readings = runtime.sheetReadings;
-      const stillWindow = Math.max(STILL_WINDOW_MS, 1.2 * runtime.intervalMs);
+      // How often the page is actually read: the loop's interval, or — when a
+      // pass takes longer than that (a big stream to grab, a busy worker) —
+      // the spacing of the readings themselves. Judged on the interval alone,
+      // a loop reading every 200 ms on a 120 ms interval never gathered
+      // READY_MIN_READINGS readings in its window, and the cue never came on.
+      const period = Math.max(runtime.intervalMs, readingSpacing(readings));
+      const stillWindow = Math.max(STILL_WINDOW_MS, 1.2 * period);
       const stillness = motionOf(readings, aspect, stillWindow);
       const since = guidanceRef.current.ready.since;
       // At least READY_MIN_READINGS readings' worth of time, however slowly the loop reads.
-      const driftWindow = Math.max((since === null ? 0 : at - since) + stillWindow, (READY_MIN_READINGS - 0.5) * runtime.intervalMs);
+      const driftWindow = Math.max((since === null ? 0 : at - since) + stillWindow, (READY_MIN_READINGS - 0.5) * period);
       const drift = motionOf(readings, aspect, driftWindow);
       const newest = readings[readings.length - 1]?.at ?? at;
       const seen = readings.filter((r) => newest - r.at <= driftWindow).length;
-      return (
-        stillness !== null &&
-        stillness <= STILL_MAX &&
-        drift !== null &&
-        drift <= (seen >= READY_DENSE_READINGS ? READY_DRIFT_MAX : READY_DRIFT_MAX_SPARSE) &&
-        seen >= READY_MIN_READINGS
-      );
+      const driftMax = seen >= READY_DENSE_READINGS ? READY_DRIFT_MAX : READY_DRIFT_MAX_SPARSE;
+      const pc = (v: number) => (v * 100).toFixed(1);
+      runtime.stillWhy =
+        seen < READY_MIN_READINGS
+          ? `readings ${seen}/${READY_MIN_READINGS}`
+          : stillness === null || stillness > STILL_MAX
+            ? `stillness ${stillness === null ? "–" : pc(stillness)}>${pc(STILL_MAX)} %`
+            : drift === null || drift > driftMax
+              ? `drift ${drift === null ? "–" : pc(drift)}>${pc(driftMax)} %`
+              : null;
+      return runtime.stillWhy === null;
     }
 
     /**
@@ -2412,6 +2461,28 @@ export function useLiveDetect({
       // A wobble keeps the cue; shaking (the hold-still hint owed) does not.
       const keep = footing && !covered && shown === null && raw === null;
       const isReady = guidance.ready.update(strict, keep, now);
+      // The HUD's reason: the first condition keeping the cue off.
+      runtime.blockWhy = isReady
+        ? null
+        : !tracking
+          ? "no page locked"
+          : covered
+            ? "corner under a control"
+            : raw !== null
+              ? `hint ${raw}`
+              : shown !== null
+                ? `hint slot ${shown}`
+                : runtime.suspectAt !== null
+                  ? "a pass missed the page"
+                  : runtime.watchMoved
+                    ? `camera moved (watch ${runtime.watchScore === null ? "–" : runtime.watchScore.toFixed(3)})`
+                    : runtime.confirmedAt === null || now - runtime.confirmedAt > READY_STALE_MS + 2 * runtime.intervalMs
+                      ? `no fresh pass (${runtime.confirmedAt === null ? "none" : `${Math.round(now - runtime.confirmedAt)} ms`})`
+                      : !runtime.readyVerdict
+                        ? (runtime.stillWhy ?? "not still")
+                        : reading?.sharp === false
+                          ? "blurry"
+                          : "dwell";
       if (guidance.tick.update(isReady, tracking, now)) setReadyTick((n) => n + 1);
       let fire = false;
       runtime.countdown = null;
@@ -2429,9 +2500,19 @@ export function useLiveDetect({
           confirmedAt: runtime.confirmedAt,
         });
         runtime.countdown = auto.countdown;
+        if (isReady && !auto.fire) {
+          runtime.blockWhy = !guidance.auto.armed
+            ? "auto: waiting for another page"
+            : auto.countdown === null
+              ? "auto: no sheet"
+              : auto.countdown < 1
+                ? `auto: countdown ${Math.round(auto.countdown * 100)} %`
+                : "auto: waiting for a fresh pass";
+        }
         // One last look at the camera, at the instant of the photo.
         fire = auto.fire && watch(now);
         if (auto.fire && !fire) {
+          runtime.blockWhy = `auto: cancelled, camera moved (watch ${runtime.watchScore === null ? "–" : runtime.watchScore.toFixed(3)})`;
           guidance.ready.update(false, false, now);
           runtime.countdown = null;
         }
@@ -2466,9 +2547,39 @@ export function useLiveDetect({
       return !runtime.watchMoved;
     }
 
+    /** Whether the overlay has been sampled since the capture froze it. */
+    let frozenProbed = false;
+
     function frame(now: number): void {
       frameHandle = null;
       if (cancelled) return;
+      if (runtime.capturing) {
+        // Frozen on the quad the tap was made on: no easing, no fade, no
+        // guidance — only the same brackets, painted where they were.
+        runtime.lastFrameAt = now;
+        paint();
+        if (probing() && (!frozenProbed || now - overlayProbedAt >= OVERLAY_PROBE_INTERVAL_MS)) {
+          // The first frozen frame is always sampled: the quad of the tap.
+          frozenProbed = true;
+          overlayProbedAt = now;
+          probe({
+            type: "overlay",
+            t: now,
+            quad: runtime.current,
+            opacity: runtime.opacity,
+            hasQuad: trackedQuad,
+            searching: announcedSearching,
+            locked: runtime.locked,
+            ready: announcedReady,
+            countdown: null,
+            watch: runtime.watchScore,
+            capturing: true,
+          });
+        }
+        frameHandle = window.requestAnimationFrame(frame);
+        return;
+      }
+      frozenProbed = false;
       const deltaMs =
         runtime.lastFrameAt === 0
           ? 16
@@ -2615,6 +2726,7 @@ export function useLiveDetect({
       locked: runtime.locked,
       ready: guidanceRef.current.ready.onSince !== null,
       autoArmed: guidanceRef.current.auto.armed,
+      blocked: runtime.blockWhy,
     };
   }, []);
 
@@ -2626,6 +2738,7 @@ export function useLiveDetect({
     overlay,
     takeQuadForCapture,
     noteCapture,
+    endCapture,
     hint,
     ready,
     readyTick,
