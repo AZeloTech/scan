@@ -35,6 +35,20 @@ freezes at 1.0.
   is then flagged `low-resolution` on the confirm screen. `onDiagnostics`
   reports it: the new `stream-cap` event (applied or not, and why) and
   `streamCapped` / `restore` on `capture`.
+- **Endireitar stops reading a sharper page as lost text.** Its before/after
+  check compared the flat page (the photo shrunk to 896 px, warped, shrunk
+  again) with a straightened page sampled once from the full photo. The
+  straightened page's thinner strokes counted as lost ink, so curled pages
+  that the correction had fixed were kept flat with "Conferimos: esta página
+  fica melhor como está." The straightened page is now judged from the same
+  small copy, at the same size, with the page's corners placed on that copy by
+  pixel centre and per axis, as the browser's own downscale places them. On
+  the synthetic bench, curled pages fixed go from 13 to 25 of 51 and all fixes
+  from 49 to 73 of 255. On the labelled real stills they go from 4 to 7 of 30.
+  There is one new harm, a 0.3° tilt increase on a page that was already
+  nearly level. Three tilted pages that were fixed before are now kept flat.
+  On a tilted flat page the check finds only 2 or 3 text lines, and a shift of
+  a quarter of a pixel can decide which.
 - **The rail's camera fills the whole screen again.** A Phase 5a build
   letterboxed it (`contain`, sized to the screen above the controls); with a
   browser's bars, a gesture bar or larger text a 9:16 stream then shrank on

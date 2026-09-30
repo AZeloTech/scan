@@ -28,7 +28,9 @@
  *    compares its candidate against a flat rendering of the same quad, and that
  *    rendering must come from the implementation that ships — scanic — or the
  *    A/B is measuring two different flatteners. It is rendered small because
- *    `measureSurface` downsamples to 448 px anyway.
+ *    `measureSurface` downsamples to 448 px anyway — and the small copy it is
+ *    warped from is handed over as well, so the candidate goes through the
+ *    same resampling rather than looking sharper than any flat page can.
  *  * **A device that cannot do this in time stops being asked.** The engine
  *    measures its own gate and refuses to judge it; the judgement is here, and
  *    it latches for the session ({@link dewarpAvailable}) — the same
@@ -65,7 +67,7 @@ import { resolveGeometryMode } from "@/lib/dewarp/engine-mode";
 import { dewarpReasonCode } from "@/lib/dewarp/types";
 import { warpToCanvas } from "@/lib/flatten";
 import { decodeCanonical, releaseCanvas } from "@/lib/image";
-import { denormalizeQuad, type NormalizedQuad } from "@/lib/quad";
+import { denormalizeQuad, normalizeQuad, type NormalizedQuad } from "@/lib/quad";
 import type { AssetUrls } from "@/lib/runtime-config";
 
 /**
@@ -382,7 +384,21 @@ function loadEngine(): Promise<DewarpEngineModule> {
 }
 
 /**
- * The flat rendering of the same quad, small — the engine's A/B baseline.
+ * The flat rendering of the same quad, small — the engine's A/B baseline —
+ * and the small copy of the canonical it was warped from.
+ *
+ * The copy goes to the engine too, so its candidate is sampled from the very
+ * pixels this warp saw (whatever filter this browser's `drawImage` used) at the
+ * very size it produced: a page that is geometrically the same must measure
+ * the same, and a candidate sampled once from the full canonical is sharper
+ * than any flat rendering — thinner strokes that read as lost ink.
+ *
+ * The quad goes onto the copy by the engine's own pixel-centre rule
+ * (`quadOnScaledCopy`), per axis — the rule its candidate samples the copy by,
+ * so the two sides of the A/B look at the same place. `copy` is `"canonical"`
+ * when the canonical already fit (it *is* the copy), and null when the copy
+ * could not be read back: the A/B then falls back to sampling the canonical,
+ * which costs fairness, not the attempt.
  *
  * Null when scanic could not extract at all, which is also how the caller's own
  * warp would end: the page is about to go in flat either way, and there is
@@ -390,17 +406,38 @@ function loadEngine(): Promise<DewarpEngineModule> {
  */
 async function homographyBaseline(
   source: HTMLCanvasElement,
-  corners: NormalizedQuad,
+  quad: DewarpQuad,
+  engine: DewarpEngineModule,
   assets: AssetUrls,
-): Promise<RgbaImage | null> {
+): Promise<{ baseline: RgbaImage; copy: RgbaImage | "canonical" | null } | null> {
   const small = scaleSurface(source, BASELINE_SOURCE_LONG_EDGE, htmlSurface);
   let flat: HTMLCanvasElement | null = null;
   try {
+    const onCopy =
+      small === source
+        ? quad
+        : engine.quadOnScaledCopy(quad, engine.copyScale(source, small));
+    const corners = normalizeQuad(onCopy, small.width, small.height);
+    if (corners === null) return null;
     flat = await warpToCanvas(small, corners, assets);
     if (flat === null) return null;
     const context = surfaceContext(flat, { willReadFrequently: true });
     if (context === null) return null;
-    return context.getImageData(0, 0, flat.width, flat.height);
+    const baseline = context.getImageData(0, 0, flat.width, flat.height);
+    if (small === source) return { baseline, copy: "canonical" };
+    let copy: RgbaImage | null = null;
+    try {
+      copy =
+        surfaceContext(small, { willReadFrequently: true })?.getImageData(
+          0,
+          0,
+          small.width,
+          small.height,
+        ) ?? null;
+    } catch {
+      copy = null;
+    }
+    return { baseline, copy };
   } catch {
     return null;
   } finally {
@@ -547,8 +584,14 @@ export async function runDewarpStage(
 
   let canonical: RgbaImage | null = null;
   try {
-    const baseline = await homographyBaseline(source, request.corners, request.assets);
-    if (baseline === null) {
+    const width = source.width;
+    const height = source.height;
+    // scanic's corners and the engine's quad are the same four points in the
+    // same pixels; the engine declares its own type only so it can be run
+    // without the DOM.
+    const quad: DewarpQuad = denormalizeQuad(request.corners, width, height);
+    const flat = await homographyBaseline(source, quad, engine, request.assets);
+    if (flat === null) {
       note({
         pageId,
         engineMode: mode,
@@ -559,12 +602,6 @@ export async function runDewarpStage(
       return { canvas: null, reason: "baseline-unavailable", replay: null };
     }
 
-    const width = source.width;
-    const height = source.height;
-    // scanic's corners and the engine's quad are the same four points in the
-    // same pixels; the engine declares its own type only so it can be run
-    // without the DOM.
-    const quad: DewarpQuad = denormalizeQuad(request.corners, width, height);
     const output = engine.outputDimsFromQuad(quad);
     const context = surfaceContext(source, { willReadFrequently: true });
     if (context === null) {
@@ -615,7 +652,12 @@ export async function runDewarpStage(
         outputHeight: output.height,
       },
       canonical,
-      baseline,
+      baseline: flat.baseline,
+      // The canonical itself when it already fit the baseline's source size;
+      // none when the copy could not be read (the engine's legacy A/B).
+      ...(flat.copy === null
+        ? {}
+        : { baselineSource: flat.copy === "canonical" ? canonical : flat.copy }),
       ...(request.onPhase === undefined ? {} : { onPhase: request.onPhase }),
       ...(request.signal === undefined ? {} : { signal: request.signal }),
     });

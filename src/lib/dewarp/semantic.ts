@@ -25,8 +25,9 @@
  * be tested without ever rendering anything.
  */
 
-import { downscale } from "./sampler.ts";
-import type { RgbaImage } from "./types.ts";
+import type { CoarseGrid } from "./grid.ts";
+import { copyScale, downscale, fitLongEdge, renderThroughGrid } from "./sampler.ts";
+import type { CropBox, RgbaImage } from "./types.ts";
 
 /**
  * Long edge of the comparison rendering.
@@ -497,6 +498,95 @@ export interface SemanticMeasurement {
 export function measureSurface(image: RgbaImage): SemanticMeasurement {
   const gray = toGray(downscale(image, SEMANTIC_LONG_EDGE));
   return { occupancy: occupancyStats(gray), straightness: lineStraightness(gray) };
+}
+
+/* ── The candidate rendering ───────────────────────────────────────────── */
+
+export interface SemanticCandidateRequest {
+  /** The full-resolution canonical the grid is expressed against. */
+  canonical: RgbaImage;
+  /** The caller's flat rendering — its size is the size the candidate takes. */
+  baseline: RgbaImage;
+  /**
+   * The scaled copy of the canonical the caller warped `baseline` from.
+   *
+   * With it, the candidate goes through exactly the baseline's chain — the
+   * same source pixels, one bilinear warp at the same output size, then the
+   * same {@link measureSurface} downscale — so a geometrically identical page
+   * measures identically. Without it (a caller that never had a small copy)
+   * the candidate is sampled once from the canonical at the comparison size,
+   * which is sharper than any flat rendering and reads as *lost ink*: every
+   * resample the baseline went through thickens its strokes, and the ink
+   * clause is an absolute delta of two percent.
+   */
+  baselineSource?: RgbaImage;
+  grid: CoarseGrid;
+  crop: CropBox;
+  /** The page's full output size — only used without a `baselineSource`. */
+  outputWidth: number;
+  outputHeight: number;
+  shouldCancel?: () => boolean;
+}
+
+/**
+ * Whether `copy` can stand in for `canonical` as the candidate's source: a
+ * real image, and a *reduction* of the canonical — anything else is not the
+ * copy the baseline was warped from, and the candidate falls back to the
+ * canonical rather than being sampled through a scale it cannot mean.
+ */
+function isScaledCopy(copy: RgbaImage, canonical: RgbaImage): boolean {
+  return (
+    copy.width >= 1 &&
+    copy.height >= 1 &&
+    copy.width <= canonical.width &&
+    copy.height <= canonical.height &&
+    copy.data.length >= copy.width * copy.height * 4
+  );
+}
+
+/**
+ * Render the dewarped page for the A/B, through the baseline's own pipeline.
+ *
+ * With a usable `baselineSource`, the candidate is sampled from it at the
+ * baseline's own size, positions mapped pixel-centre to pixel-centre
+ * (`sampler.ts :: toScaledCopy`). Without one — an older caller, or a copy that
+ * is not a reduction of the canonical — it is the single sample from the
+ * canonical at the comparison size, as before.
+ *
+ * Null when `shouldCancel` says so between bands.
+ */
+export function renderSemanticCandidate(
+  request: SemanticCandidateRequest,
+): RgbaImage | null {
+  const { canonical, baseline, baselineSource, grid, crop } = request;
+  const cancel =
+    request.shouldCancel === undefined ? {} : { shouldCancel: request.shouldCancel };
+  if (baselineSource === undefined || !isScaledCopy(baselineSource, canonical)) {
+    const preview = fitLongEdge(
+      request.outputWidth,
+      request.outputHeight,
+      SEMANTIC_LONG_EDGE,
+    );
+    return renderThroughGrid({
+      source: canonical,
+      grid,
+      crop,
+      width: preview.width,
+      height: preview.height,
+      ...cancel,
+    });
+  }
+  const scale = copyScale(canonical, baselineSource);
+  return renderThroughGrid({
+    source: baselineSource,
+    grid,
+    crop,
+    width: baseline.width,
+    height: baseline.height,
+    // The canonical itself (it already fit) is sampled as it is.
+    ...(scale.x === 1 && scale.y === 1 ? {} : { sourceScale: scale }),
+    ...cancel,
+  });
 }
 
 /** Extra blank border the dewarp may introduce before it counts as lost page. */
