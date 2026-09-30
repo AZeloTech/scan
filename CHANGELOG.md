@@ -6,17 +6,37 @@ freezes at 1.0.
 
 ## [Unreleased]
 
+### Fixed
+- **The rail's camera fills the whole screen again.** A Phase 5a build
+  letterboxed it (`contain`, sized to the screen above the controls); with a
+  browser's bars, a gesture bar or larger text a 9:16 stream then shrank on
+  both axes to about half the screen. The rail is back to `cover`, with the
+  page judged against the visible part of the frame.
+- **The ready cue comes on when the loop reads slower than its interval.**
+  "Still" needed five readings inside a window sized by the loop's interval;
+  a pass that takes longer than that (a 4K stream to grab and shrink, a busy
+  worker) reads the page less often, so the window never held five and the
+  cue never came on — the page stayed "locked" with auto-capture armed and
+  nothing happening. The window now follows how often the page is actually
+  read; the five readings, the stillness and the drift limits are unchanged.
+- **The corner marks hold still while a photo is taken.** From the tap or
+  the automatic fire to the confirm screen the live loop no longer tears
+  down (the marks faded out and the framing marks came back) and runs no
+  passes on the preview the still pipeline is disturbing; the overlay stays
+  on the tapped quad.
+- The diagnostics HUD says what holds the ready cue or auto-capture back
+  (`why: …`).
+
 ### Added
 - **The page is judged against what the person sees** (Phase 5a). The hints
   ("Afaste um pouco", "Aproxime"), the ready cue and auto-capture now use the
   visible part of the frame — the video under the layout's fit, clipped by
   the screen and a pinch zoom, minus the safe areas and the chrome a layout
   declares opaque — re-measured on every resize, rotation, zoom, text-size or
-  chrome change. On the default `rail` layout the camera now shows its whole
-  frame, as large as fits the screen above the controls, with dark ground
-  where it does not reach (it filled the whole screen before, cropping the
-  sides of a tall phone's frame and hiding its bottom under the controls — a
-  well-framed page read "Afaste um pouco" and never became ready). `standard` is unchanged. Detection still uses the
+  chrome change. The default `rail` layout stays full-bleed (the camera under
+  the whole screen, the controls over a dark fade): the part of the frame
+  cropped off a tall screen or hidden under the controls simply counts as
+  not visible. `standard` is unchanged. Detection still uses the
   whole frame; the photo keeps the camera's full frame.
 - **Every photo is checked before the confirm screen.** The corners the
   viewfinder vouched for are mapped onto the photo (its shape, field of view
