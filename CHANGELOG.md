@@ -35,6 +35,26 @@ freezes at 1.0.
   is then flagged `low-resolution` on the confirm screen. `onDiagnostics`
   reports it: the new `stream-cap` event (applied or not, and why) and
   `streamCapped` / `restore` on `capture`.
+- **Endireitar says what it corrected, and answers a second tap.** After a
+  tap the card now names what happened: the tilted text was straightened,
+  the curve was taken out, both, or the text was straightened and the curve
+  left as it was. Before, a page whose tilt was fixed while the engine left
+  the curl alone said nothing about either. When the deskew measures the print
+  level and the level page flat, and the engine then declines, the card says
+  there was nothing to straighten. Any other decline is a limit of the
+  correction, and its sentence now says so ("não deu para endireitar esta
+  página com segurança", "está além do que o Endireitar consegue corrigir")
+  instead of "Conferimos: esta página fica melhor como está". That old
+  sentence was shown over pages the engine simply could not handle. When the
+  engine changes a page the deskew measured level and flat, the card claims
+  no curl. The support code stays beside every decline, including the curl's
+  code under a fixed tilt. Tapping Endireitar again over an answer that
+  cannot change for this photo used to do nothing at all. Now the card comes
+  forward, is announced again, and says that adjusting the corners or
+  retaking the photo is what would change it. The help text and the "about"
+  sheet now mention tilted text. On both benches every page's pixels and
+  verdict are unchanged. The synthetic bench shows "nothing to straighten" on
+  8 pages and the real stills on 10, all of them pages with nothing to do.
 - **Endireitar stops reading a sharper page as lost text.** Its before/after
   check compared the flat page (the photo shrunk to 896 px, warped, shrunk
   again) with a straightened page sampled once from the full photo. The

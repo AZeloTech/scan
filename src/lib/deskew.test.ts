@@ -904,6 +904,33 @@ test("an abstaining estimate leaves the page to the engine, on the confirmed out
   assert.equal(result.runEngine, true);
 });
 
+test("a level, flat page is said to be level and flat — and the engine is still asked", async () => {
+  const result = await straighten([{ layout: "paragraphs", deg: 0 }]);
+  assert.equal(result.estimate.reason, "negligible");
+  assert.ok(result.level !== null, "the level page's own curl was measured");
+  assert.equal(result.level.evidence, false, result.level.why.join(","));
+  // Only the page view reads it: the engine runs exactly as before.
+  assert.equal(result.runEngine, true);
+});
+
+test("a level page that is curled is not said to be flat", async () => {
+  // Bowed lines whose halves still agree on the level: the estimate calls it
+  // level, and the bow is what says it is not flat.
+  const result = await straighten([{ layout: "paragraphs", deg: 0, bow: 5 }]);
+  assert.equal(result.estimate.reason, "negligible");
+  assert.ok(result.level !== null);
+  assert.equal(result.level.evidence, true);
+  assert.ok(result.level.why.includes("bow"), result.level.why.join(","));
+});
+
+test("a page with a rotation, or one the estimate abstained on, carries no level verdict", async () => {
+  const tilted = await straighten([{ layout: "paragraphs", deg: 4 }]);
+  assert.equal(tilted.level, null);
+  const blank = await straighten([]);
+  assert.notEqual(blank.estimate.reason, "negligible");
+  assert.equal(blank.level, null);
+});
+
 test("a render that fails is no rotation, not an error", async () => {
   const { canonical, quad } = photo([{ layout: "paragraphs", deg: 4 }]);
   const result = await planStraighten({

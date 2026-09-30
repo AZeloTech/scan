@@ -192,11 +192,42 @@ test("the deskew an inference planned is remembered for the render's retries", a
   assert.equal(memo.deskew, ROTATION);
 });
 
-test("a stored map wins over any stored rotation: an engine surface carries none", () => {
+test("a stored map is resampled, and carries the rotation it was accepted with as a record", async () => {
   const memo = dewarpMemoFor({
     ...REQUEST,
     dewarp: { sourceId: "page-1", generation: 6, replay: ACCEPTED, deskew: ROTATION },
   });
   assert.equal(memo.accepted, ACCEPTED);
-  assert.equal(memo.deskew, undefined);
+  // The engine's surface never carries the rotation; the record is what lets
+  // the page view say the tilt was levelled too — and what a failed resample's
+  // flat page is rotated by, rather than a fresh plan.
+  assert.equal(memo.deskew, ROTATION);
+  const outcome = await curvedSurface<string>(memo, {
+    infer: async () => assert.fail("a stored map is not inferred again"),
+    resample: async () => "surface",
+  });
+  assert.deepEqual(outcome, { canvas: "surface", reason: null });
+});
+
+test("an inference that found the page level and flat says so to the memo", async () => {
+  const memo = newDewarpMemo();
+  await curvedSurface<string>(memo, {
+    infer: async () => ({
+      canvas: null,
+      reason: "semantic-regression" as const,
+      replay: null,
+      deskew: null,
+      alreadyStraight: true as const,
+    }),
+    resample: async () => null,
+  });
+  assert.equal(memo.alreadyStraight, true);
+  assert.equal(memo.deskew, null);
+
+  const other = newDewarpMemo();
+  await curvedSurface<string>(other, {
+    infer: async () => ({ canvas: null, reason: "semantic-regression" as const, replay: null, deskew: null }),
+    resample: async () => null,
+  });
+  assert.equal(other.alreadyStraight, undefined, "no verdict, no claim");
 });

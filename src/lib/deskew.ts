@@ -2086,12 +2086,28 @@ export interface StraightenResult {
    * still shows a curl — the rotation then stands only if the engine declines.
    */
   runEngine: boolean;
+  /**
+   * When the estimate found the print already level (`negligible`), the flat
+   * page's own curl evidence — what lets the page view say "already level and
+   * flat" instead of guessing at why the engine declined. Null otherwise. It
+   * never decides whether the engine runs.
+   */
+  level: CurlEvidence | null;
   /** Wall time of the whole step, ms. */
   ms: number;
 }
 
 function copyImage(image: DeskewImage): DeskewImage {
   return { width: image.width, height: image.height, data: new Uint8ClampedArray(image.data) };
+}
+
+/** The flat page's own curl evidence, for a page whose print is already level. */
+function levelCurl(flat: DeskewImage, estimate: SkewEstimate): CurlEvidence | null {
+  try {
+    return curlEvidence(estimate, measureSurface(flat).straightness);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -2111,6 +2127,7 @@ export async function planStraighten(input: StraightenInput): Promise<Straighten
     plan: null,
     judgement: null,
     runEngine: true,
+    level: null,
     ...rest,
     ms: now() - started,
   });
@@ -2121,7 +2138,9 @@ export async function planStraighten(input: StraightenInput): Promise<Straighten
     return done(abstain("too-small"));
   }
   const { estimate, sample } = detailed;
-  if (!estimate.act) return done(estimate);
+  if (!estimate.act) {
+    return done(estimate, estimate.reason === "negligible" ? { level: levelCurl(input.flat, estimate) } : {});
+  }
   try {
     const dims = flatPageDims(input.quad);
     const geometry = deskewQuad({

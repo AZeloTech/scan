@@ -5,7 +5,7 @@
  */
 
 import { CLIP, PAINT } from "./measure.mjs";
-import { outcomeHistogram, perTilt, quantile, TOL, DEVICE_BUDGET_MS } from "./score.mjs";
+import { cardHistogram, cardOf, outcomeHistogram, perTilt, quantile, TOL, DEVICE_BUDGET_MS } from "./score.mjs";
 
 const pct = (v, digits = 1) => (v === null || v === undefined || !Number.isFinite(v) ? "–" : `${(v * 100).toFixed(digits)} %`);
 const deg = (v) => (v === null || v === undefined || !Number.isFinite(v) ? "–" : `${v.toFixed(2)}°`);
@@ -108,7 +108,19 @@ export function renderStraightenReport(results, { banner = null } = {}) {
     "|---|---:|---:|---:|",
     ...outcomeHistogram(rows).map((o) => `| ${o.key} | ${o.n} | ${o.shouldAct} | ${o.nothingToDo} |`),
     "",
+    "## What the card says",
+    "",
+    "The sentence the page view shows after the tap (`straightenOutcome`), against what the page needed. \"nothing\" (already level and flat) on a should-act page is a false claim; \"none\" is no card (the engine changed a page measured level and flat, so no curl is claimed).",
+    "",
+    "| card | pages | complete | partial | no-op | harm | unverified | nothing to do |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ...cardHistogram(rows).map((c) => `| ${c.key} | ${c.n} | ${c.complete} | ${c.partial} | ${c.noop} | ${c.harm} | ${c.unverified} | ${c.nothingToDo} |`),
+    "",
   );
+  const falseNothing = rows.filter((r) => !r.error && r.truth.shouldAct && cardOf(r) === "nothing");
+  if (falseNothing.length > 0) {
+    out.push("Should-act pages told \"nothing to straighten\":", "", ...falseNothing.map((r) => `- \`${r.id}\` (${outcomeOf(r)})`), "");
+  }
   if (results.synthetic) {
     for (const [title, mode] of [["correct outline — tilted print inside a right outline", "correct"], ["every outline", null]]) {
       const table = tiltTable(rows, mode);

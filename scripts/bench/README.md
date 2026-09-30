@@ -1160,6 +1160,16 @@ fill against the real paper right across the fill's edge (p10/p50/p90, grey
 levels, + = fill brighter).
 Counts sit beside every rate in the report.
 
+**What the card says.** The report also tallies the sentence the page view
+would show after the tap (`straightenOutcome` in `scan-store.ts`, rebuilt from
+each record by `cardOf` in `straighten/score.mjs`: tilt, curl, both,
+tilt-only, nothing, or the decline's bucket) against each page's verdict.
+`nothing` ("already level and flat") comes from the deskew's own measurement
+of a page it found level (`deskew.level`); on a should-act page it is a false
+claim, and every such page is listed by name. `none` is a page the engine
+changed although the deskew measured it level and flat: the app shows no
+card there rather than claim a curl.
+
 **Provenance and runtime.** `config.engine` records the engine root, its HEAD
 and — when it has uncommitted changes — a sha256 over its diff and untracked
 files, so "the same dirty worktree" is provably the same code or not. The

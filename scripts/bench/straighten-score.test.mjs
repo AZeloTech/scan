@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { checkComparable, compareSummaries, RESULTS_SCHEMA } from "./report.mjs";
-import { flaggedScenes, sceneRegressions, summarize, summarizeRun, verdict } from "./straighten/score.mjs";
+import { cardHistogram, cardOf, flaggedScenes, sceneRegressions, summarize, summarizeRun, verdict } from "./straighten/score.mjs";
 
 const page = (tiltDeg, { bowFrac = 0.001, borderDarkFrac = 0 } = {}) => ({
   tiltDeg, tiltConfidence: 2, bowFrac, bowFracMax: bowFrac, curvBands: 6, ink: 20_000, inkFrac: 0.1, inkAbs: 0.05,
@@ -174,4 +174,39 @@ test("sheets: harms, unverified pages, lost fixes and new acts are flagged", () 
   assert.deepEqual(flags.get("a"), ["new act"]);
   assert.deepEqual(flags.get("b"), ["lost fix"]);
   assert.deepEqual(flags.get("c"), ["unverified"]);
+});
+
+test("cardOf: the card the page view would show, rebuilt from the record as the store builds it", () => {
+  const level = (evidence) => ({ mode: "paper", act: false, planned: false, reason: "negligible", deg: 0, level: { evidence, why: evidence ? ["bow"] : [] } });
+  const regression = { accepted: false, reason: "semantic-regression", code: "#001", bucket: "declined" };
+  const timeout = { accepted: false, reason: "timeout", code: "#042", bucket: "transient" };
+  const curlAbsent = { accepted: false, reason: "curl-absent", code: "#050", bucket: "nothing" };
+  assert.equal(cardOf(rec({ outcome: acceptedOutcome })), "curl");
+  assert.equal(cardOf(rec({ outcome: acceptedOutcome, deskew: level(false) })), "none", "no curl claimed over a page measured flat");
+  assert.equal(cardOf(rec({ outcome: acceptedOutcome, deskew: level(true) })), "curl");
+  assert.equal(cardOf(rec({ outcome: acceptedOutcome, deskew: { ...deskewed(3), act: false, planned: true } })), "both");
+  assert.equal(cardOf(rec({ outcome: curlAbsent, deskew: deskewed(3) })), "tilt");
+  assert.equal(cardOf(rec({ deskew: deskewed(3) })), "tilt-only");
+  assert.equal(cardOf(rec({ outcome: regression, deskew: level(false) })), "nothing");
+  assert.equal(cardOf(rec({ outcome: regression, deskew: level(true) })), "declined", "a curl on the level page is not 'flat'");
+  assert.equal(cardOf(rec({ outcome: regression })), "declined");
+  assert.equal(cardOf(rec({ outcome: timeout, deskew: level(false) })), "transient", "a retry is still the thing to say");
+  assert.equal(cardOf(rec()), "page");
+  // Results written before the split still read.
+  assert.equal(cardOf(rec({ outcome: { ...regression, bucket: "better-flat" } })), "declined");
+  assert.equal(cardOf({ id: "x", error: "boom" }), null);
+});
+
+test("cardHistogram: a 'nothing' card on a should-act page is counted where it can be seen", () => {
+  const regression = { accepted: false, reason: "semantic-regression", code: "#001", bucket: "declined" };
+  const flatDeskew = { mode: "paper", act: false, planned: false, reason: "negligible", deg: 0, level: { evidence: false, why: [] } };
+  const rows = [
+    rec({ id: "a", outcome: regression, deskew: flatDeskew }),
+    rec({ id: "b", outcome: regression, deskew: flatDeskew, truth: { shouldAct: false, tiltDeg: 0, curl: "none", flatAndStraight: true }, flat: page(0) }),
+  ].map((r) => ({ ...r, verdict: verdict(r) }));
+  const [nothing] = cardHistogram(rows);
+  assert.equal(nothing.key, "nothing");
+  assert.equal(nothing.n, 2);
+  assert.equal(nothing.noop, 1, "the should-act page it was said over");
+  assert.equal(nothing.nothingToDo, 1);
 });

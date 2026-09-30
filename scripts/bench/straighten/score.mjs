@@ -328,3 +328,43 @@ export function outcomeHistogram(rows) {
   }
   return [...m.values()].sort((a, b) => b.n - a.n);
 }
+
+/** scan-store.ts :: dewarpOutcomeIsFinal — the declines a re-run would repeat. */
+const FINAL_BUCKETS = new Set(["nothing", "declined", "unverified", "page"]);
+
+/**
+ * The sentence the page view's card would show for this page — the app's
+ * `straightenOutcome` (scan-store.ts), rebuilt from the record: what the tap
+ * corrected (tilt, curl, both, tilt-only), or why it corrected nothing. Null
+ * for a page the step never ran on. Held against the verdict, it is how the
+ * copy is checked for honesty: "nothing" said over a page that needed work
+ * is a false claim, whatever the pixels.
+ */
+export function cardOf(r) {
+  if (r.error || !r.outcome) return null;
+  const d = r.deskew ?? null;
+  if (r.outcome.accepted) {
+    if (d?.planned) return "both";
+    // Accepted on a page measured level and flat: the app claims no curl.
+    return d?.level && d.level.evidence === false ? "none" : "curl";
+  }
+  if (d?.act) return r.outcome.reason === "curl-absent" ? "tilt" : "tilt-only";
+  const bucket = r.outcome.bucket ?? "transient";
+  if (FINAL_BUCKETS.has(bucket) && d?.level && d.level.evidence === false) return "nothing";
+  return bucket === "better-flat" ? "declined" : bucket;
+}
+
+/** Pages per card sentence, by what the page needed and what it got. */
+export function cardHistogram(rows) {
+  const m = new Map();
+  for (const r of rows) {
+    const key = cardOf(r);
+    if (key === null) continue;
+    const e = m.get(key) ?? { key, n: 0, complete: 0, partial: 0, noop: 0, harm: 0, unverified: 0, nothingToDo: 0 };
+    e.n += 1;
+    if (!r.truth.shouldAct) e.nothingToDo += 1;
+    else if (r.verdict.cls in e) e[r.verdict.cls] += 1;
+    m.set(key, e);
+  }
+  return [...m.values()].sort((a, b) => b.n - a.n);
+}

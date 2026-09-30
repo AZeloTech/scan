@@ -182,6 +182,14 @@ export interface DewarpStageResult {
    * on its own, see {@link planDeskewStage}).
    */
   deskew?: AppliedDeskew | null;
+  /**
+   * The deskew planned no rotation because the print was already level, and
+   * the level page showed no curl either — measured on this run's own B₀, so
+   * absent whenever the deskew came from `knownDeskew`. The engine still
+   * runs; this only lets the page view say "already level and flat" rather
+   * than guess at why the engine declined.
+   */
+  alreadyStraight?: true;
 }
 
 /**
@@ -539,7 +547,8 @@ async function planDeskewFor(
   baseline: RgbaImage,
   quad: DewarpQuad,
   assets: AssetUrls,
-): Promise<AppliedDeskew | null> {
+): Promise<DeskewAnswer> {
+  const none: DeskewAnswer = { deskew: null, alreadyStraight: false };
   try {
     const deskew = await loadDeskew();
     const width = source.width;
@@ -551,13 +560,24 @@ async function planDeskewFor(
       canonicalHeight: height,
       renderSmall: (rotated) => warpSmall(copy, source, rotated, deskew, assets),
     });
-    if (result.plan === null) return null;
+    if (result.plan === null) {
+      // Already level (no rotation needed) and no curl on the level page.
+      const alreadyStraight = result.level !== null && !result.level.evidence;
+      return { deskew: null, alreadyStraight };
+    }
     const corners = normalizeQuad(result.plan.quad, width, height);
-    if (corners === null) return null;
-    return { plan: result.plan, corners };
+    if (corners === null) return none;
+    return { deskew: { plan: result.plan, corners }, alreadyStraight: false };
   } catch {
-    return null;
+    return none;
   }
+}
+
+/** {@link planDeskewFor}'s answer: the rotation, and whether none was needed at all. */
+interface DeskewAnswer {
+  deskew: AppliedDeskew | null;
+  /** See {@link DewarpStageResult.alreadyStraight}. */
+  alreadyStraight: boolean;
 }
 
 /**
@@ -580,7 +600,7 @@ export async function planDeskewStage(
     const quad = denormalizeQuad(corners, source.width, source.height);
     const baseline = await warpSmall(copy, source, quad, deskew, assets);
     if (baseline === null) return null;
-    return await planDeskewFor(copy, source, baseline, quad, assets);
+    return (await planDeskewFor(copy, source, baseline, quad, assets)).deskew;
   } catch {
     return null;
   } finally {
@@ -763,8 +783,15 @@ export async function runDewarpStage(
   // Planned once B₀ exists; every answer below carries it, so a decline still
   // hands the flat path the rotation.
   let deskew: AppliedDeskew | null | undefined;
+  // Level and flat already, as this run measured it (never for a known deskew).
+  let alreadyStraight = false;
   // What the device spent on the deskew: counted in the same wait budget.
   let deskewMs = 0;
+  // The deskew's answer, for every return once it may have been planned.
+  const planned = (): Pick<DewarpStageResult, "deskew" | "alreadyStraight"> => ({
+    ...(deskew === undefined ? {} : { deskew }),
+    ...(alreadyStraight ? { alreadyStraight: true as const } : {}),
+  });
   try {
     const width = source.width;
     const height = source.height;
@@ -790,10 +817,13 @@ export async function runDewarpStage(
     // exactly as before; the rotation is the flat path's.
     if (request.deskew !== false) {
       const deskewStarted = Date.now();
-      deskew =
-        request.knownDeskew !== undefined
-          ? request.knownDeskew
-          : await planDeskewFor(copy, source, flat, confirmed, request.assets);
+      if (request.knownDeskew !== undefined) {
+        deskew = request.knownDeskew;
+      } else {
+        const answer = await planDeskewFor(copy, source, flat, confirmed, request.assets);
+        deskew = answer.deskew;
+        alreadyStraight = answer.alreadyStraight;
+      }
       deskewMs = Date.now() - deskewStarted;
       if (deskew && !deskew.plan.curl.evidence) {
         // Level and straight: the rotation is the whole correction, and the
@@ -826,7 +856,7 @@ export async function runDewarpStage(
         durationMs: Date.now() - startedAt,
         extra: { stage: "canonical-readout" },
       });
-      return { canvas: null, reason: "source-unavailable", replay: null, ...(deskew === undefined ? {} : { deskew }) };
+      return { canvas: null, reason: "source-unavailable", replay: null, ...planned() };
     }
     canonical = context.getImageData(0, 0, width, height);
     // The pixels are read out; the decode's own backing store is dead weight
@@ -910,7 +940,7 @@ export async function runDewarpStage(
         durationMs: Date.now() - startedAt,
         extra,
       });
-      return { canvas: null, reason, replay: null, ...(deskew === undefined ? {} : { deskew }) };
+      return { canvas: null, reason, replay: null, ...planned() };
     }
     note({
       pageId,
@@ -923,7 +953,7 @@ export async function runDewarpStage(
       canvas: toCanvas(surface),
       reason: null,
       replay: run.geometry ?? null,
-      ...(deskew === undefined ? {} : { deskew }),
+      ...planned(),
     };
   } catch (error) {
     // A refused allocation on the way in or out. The page is not lost — it is
@@ -936,7 +966,7 @@ export async function runDewarpStage(
       durationMs: Date.now() - startedAt,
       ...errorFields(error),
     });
-    return { canvas: null, reason: "render-failed", replay: null, ...(deskew === undefined ? {} : { deskew }) };
+    return { canvas: null, reason: "render-failed", replay: null, ...planned() };
   } finally {
     // Idempotent: zeroing an already-zeroed surface costs nothing.
     releaseSmallCopy(copy, source);

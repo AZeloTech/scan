@@ -193,6 +193,8 @@ async function runStraighten(host, dk, mode, canonical, quad, id, curlGate) {
       ...(e.rulesDeg !== undefined ? { rulesDeg: r3(e.rulesDeg) } : {}),
       ...(j ? { judge: { ok: j.ok, rejection: j.rejection, clipped: r3(j.clippedShare), residual: r3(j.residualDeg), flatLines: j.flat.lineCount, flatBow: r3(j.flat.medianCurvature * 1000) / 1000, lines: j.rotated.lineCount, bow: r3(j.rotated.medianCurvature * 1000) / 1000 } } : {}),
       ...(curl ? { curl: { evidence: curl.evidence, spread: r3(curl.spread), midOffset: r3(curl.midOffset), bow: r3(curl.bow * 1000) / 1000, bowLines: curl.bowLines, why: curl.why } } : {}),
+      // Print already level: the flat page's own curl evidence (the card's "nothing").
+      ...(step.level ? { level: { evidence: step.level.evidence, bow: r3(step.level.bow * 1000) / 1000, midOffset: r3(step.level.midOffset), why: step.level.why } } : {}),
     },
   };
 }

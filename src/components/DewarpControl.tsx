@@ -6,18 +6,24 @@ import { useCopy } from "@/components/I18n";
 import { CorrectionTile } from "@/components/CorrectionTile";
 import { WaveIcon } from "@/components/icons";
 import { Button } from "@/components/ui";
-import { useDewarpActivity, useDewarpConsented, useStore } from "@/hooks/useScanStore";
+import {
+  useDewarpActivity,
+  useDewarpConsented,
+  useDewarpRetap,
+  useStore,
+} from "@/hooks/useScanStore";
 import { useAssetUrls } from "@/hooks/useScanRuntime";
 import { dewarpAvailable, dewarpLatchCode } from "@/lib/dewarp-stage";
 import { resolveGeometryMode, type DewarpEngineMode } from "@/lib/dewarp/engine-mode";
 import { dewarpAssetsCached } from "@/lib/dewarp/prefetch";
 import { formatBytes } from "@/lib/image";
+import { pulse } from "@/lib/motion";
 import { connectionKind, shouldPrefetchHeavyAssets } from "@/lib/network";
 import {
   dewarpConsentRequired,
-  dewarpOutcome,
-  dewarpOutcomeCode,
-  type DewarpOutcome,
+  straightenOutcome,
+  straightenOutcomeCode,
+  type StraightenOutcome,
   type ScanPage,
 } from "@/lib/scan-store";
 
@@ -32,14 +38,17 @@ import {
  *
  *  * **The switch reflects the page, not the wish.** When a run falls
  *    back, the store hands the switch back to OFF and the line under it says
- *    what happened — per outcome bucket, in the outcome's own tone: "we
- *    checked, it reads better flat" is a confirmation, not the amber the
- *    blurry-page warning wears. The first shape of this control kept the
+ *    what happened — per outcome, in the outcome's own tone: "the text was
+ *    already level and the sheet flat" is a confirmation, not the amber the
+ *    blurry-page warning wears. A tap that corrected only the tilt keeps the
+ *    switch on and says so, curl and all. The first shape of this control kept the
  *    switch ON to honor the *request*; a field report showed what
  *    that reads as — a control claiming a correction the page visibly does
  *    not have. The old cost argument (a retry re-pays twelve seconds for a
  *    deterministic answer) is now carried by the store instead: it refuses to
- *    re-run a verdict that is final for these exact pixels.
+ *    re-run a verdict that is final for these exact pixels — and answers the
+ *    tap anyway (the card comes forward and says what would change it), so
+ *    the control never goes dead under a finger.
  *  * **Consent is asked once per session, before a byte is fetched — for the
  *    engine whose download is worth asking about.** uvdoc's ~19 MB earns the
  *    paragraph: the size, the per-page seconds and the on-device promise, and
@@ -72,8 +81,14 @@ export interface DewarpControlState {
   available: boolean;
   /** This page's own correction is running right now, on *this* engine. */
   running: boolean;
-  /** What the last attempt came to, when it did not correct. */
-  outcome: DewarpOutcome | null;
+  /** What the last tap came to: what it corrected, or why it corrected nothing. */
+  outcome: StraightenOutcome | null;
+  /**
+   * The store's answer to a tap over a final verdict, while it is still about
+   * the pixels on screen: a counter, so each such tap is answered on its own.
+   * Null when there is none.
+   */
+  retap: number | null;
   /**
    * The support code behind whatever line the panel is about to show — the
    * guard's own `#0xx` for a per-page outcome, the latch's `#1xx` when the
@@ -114,6 +129,7 @@ export function useDewarpControl(
 ): DewarpControlState {
   const consented = useDewarpConsented();
   const activity = useDewarpActivity();
+  const lastRetap = useDewarpRetap();
   const hintId = React.useId();
   const [asking, setAsking] = React.useState(false);
   // Read once at mount rather than on every render: the value is a module
@@ -167,7 +183,7 @@ export function useDewarpControl(
   }, [mode, page.id, store]);
   const dismissConsent = React.useCallback(() => setAsking(false), []);
 
-  const outcome = dewarpOutcome(page, mode);
+  const outcome = straightenOutcome(page, mode);
   // The latch's own code wins whenever the feature is paused, because that is
   // the line the panel shows there — the page's last outcome is behind it and
   // no longer what the reader is being told.
@@ -175,13 +191,23 @@ export function useDewarpControl(
     ? dewarpLatchCode()
     : outcome === null
       ? null
-      : dewarpOutcomeCode(page, mode);
+      : straightenOutcomeCode(page, mode);
+  // Only while it is about these pixels, and only while there is a verdict
+  // on screen for it to point at.
+  const retap =
+    lastRetap !== null &&
+    lastRetap.pageId === page.id &&
+    lastRetap.revision === page.revision &&
+    outcome !== null
+      ? lastRetap.seq
+      : null;
 
   return React.useMemo(
     () => ({
       available,
       running,
       outcome,
+      retap,
       code,
       asking,
       requested,
@@ -199,6 +225,7 @@ export function useDewarpControl(
       hintId,
       outcome,
       requested,
+      retap,
       running,
       toggle,
     ],
@@ -339,6 +366,13 @@ export function DewarpPanel({
     };
   }, [control.asking, urls]);
 
+  // A tap over a final verdict: the card comes forward, once per tap. The
+  // words change too (below), which is the half reduced motion keeps.
+  const cardRef = React.useRef<HTMLDivElement | null>(null);
+  React.useEffect(() => {
+    if (control.retap !== null) pulse(cardRef.current);
+  }, [control.retap]);
+
   if (control.asking) {
     return (
       <div className="rounded-[13px] border border-shell-line bg-shell-sunken p-3">
@@ -412,9 +446,9 @@ export function DewarpPanel({
   }
 
   // Amber is this app's genuine-warning tone (the blurry page wears it). Of
-  // the outcomes, only the two retryable ones have earned it: "we checked and
-  // it reads better flat" is the feature *working*, and painting it amber was
-  // exactly the "odd error" reported from the field.
+  // the outcomes, only the two retryable ones have earned it: a correction,
+  // or a page that needed none, is the feature *working*, and painting a
+  // decline amber was exactly the "odd error" reported from the field.
   const warn = outcome === "download" || outcome === "transient";
 
   // The editor's status line already carries — and announces — the sentence for
@@ -428,6 +462,7 @@ export function DewarpPanel({
 
   return (
     <div
+      ref={cardRef}
       className={clsx(
         "rounded-[13px] border p-3 text-[12.5px] leading-relaxed",
         warn
@@ -449,6 +484,14 @@ export function DewarpPanel({
               {control.code}
             </span>
           </>
+        )}
+        {/* The answer to a tap over a final verdict: why it changed nothing,
+            and what would. Keyed by the tap, so each one is a new node in the
+            live region and is announced again, not only the first. */}
+        {control.retap !== null && !warn && (
+          <span key={control.retap} className="mt-1 block text-shell-ink">
+            {copy.retapHint}
+          </span>
         )}
       </p>
     </div>
