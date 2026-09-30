@@ -1129,7 +1129,9 @@ export function scoreVisibility(script, record, gtAt, captures) {
           ...(marks.holdFrom !== undefined && marks.holdTo !== undefined ? [[marks.holdFrom, marks.holdTo]] : []),
           ...(marks.lockFrom2 !== undefined && marks.holdTo2 !== undefined ? [[marks.lockFrom2, marks.holdTo2]] : []),
         ];
-  const cue = record.events.filter((e) => e.type === "overlay").map((e) => ({ t: e.t, ready: e.ready === true }));
+  // A report frozen by a capture in flight (`capturing`) is the tapped
+  // photo's marks held still, not a cue inviting one: no cue.
+  const cue = record.events.filter((e) => e.type === "overlay").map((e) => ({ t: e.t, ready: e.ready === true && e.capturing !== true }));
   // The cue as displayed at `t`: the overlay's last report, while it is
   // still reporting (every ≤ 100 ms while the loop runs). A longer silence
   // is a viewfinder that is not on screen — a confirm screen over it, the
