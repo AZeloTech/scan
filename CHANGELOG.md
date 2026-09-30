@@ -24,6 +24,11 @@ freezes at 1.0.
   down (the marks faded out and the framing marks came back) and runs no
   passes on the preview the still pipeline is disturbing; the overlay stays
   on the tapped quad.
+- **"Too small to be a page" is judged on the screen.** The detector's
+  coverage floor was a share of the whole camera frame; on the full-bleed
+  rail a stream wider than the screen shows only part of it, and a page
+  filling the screen could sit under the floor. It is now the same share of
+  the visible region.
 - The diagnostics HUD says what holds the ready cue or auto-capture back
   (`why: …`).
 
