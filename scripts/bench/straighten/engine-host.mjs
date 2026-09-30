@@ -136,8 +136,14 @@ export async function loadEngineHost(root) {
     engineMs = 0;
     // baseline: scaleSurface(source, 896) + scanic warpToCanvas(small, corners)
     const small = bilinearDownscale(canonical, BASELINE_SOURCE_LONG_EDGE);
-    const k = small.width / canonical.width;
-    const smallQuad = mapQuad(quad, (p) => ({ x: p.x * k, y: p.y * k }));
+    // Per axis, as the app's normalized corners are. An engine that exports
+    // its pixel-centre rule (`quadOnScaledCopy`, F4) has the app put the
+    // baseline's corners on the copy by it; older checkouts' app scales them
+    // linearly (`denormalizeQuad` of the normalized corners).
+    const kx = small.width / canonical.width, ky = small.height / canonical.height;
+    const smallQuad = typeof idx.quadOnScaledCopy === "function"
+      ? idx.quadOnScaledCopy(quad, idx.copyScale(canonical, small))
+      : mapQuad(quad, (p) => ({ x: p.x * kx, y: p.y * ky }));
     const bd = outputDims(smallQuad);
     const baseline = warpQuad(small, smallQuad, bd.width, bd.height);
 

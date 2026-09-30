@@ -48,8 +48,8 @@ export async function loadDeskew(root) {
 /** The engine's own A/B baseline (scaleSurface 896 + scanic warp), which the estimate reads. */
 export function smallBaseline(canonical, quad) {
   const small = bilinearDownscale(canonical, BASELINE_SOURCE_LONG_EDGE);
-  const k = small.width / canonical.width;
-  const smallQuad = mapQuad(quad, (p) => ({ x: p.x * k, y: p.y * k }));
+  const kx = small.width / canonical.width, ky = small.height / canonical.height;
+  const smallQuad = mapQuad(quad, (p) => ({ x: p.x * kx, y: p.y * ky }));
   const bd = outputDims(smallQuad);
   return warpQuad(small, smallQuad, bd.width, bd.height);
 }

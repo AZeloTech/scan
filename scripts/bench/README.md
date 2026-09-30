@@ -1084,7 +1084,10 @@ flat page of the outline they confirmed, and did anything get worse?*
 dewarp wasm named by its own `wasm-manifest.json` — driven the way
 `dewarp-stage.ts` drives it: a 896 px baseline, the padded crop, the output
 size, the engine's A/B verdict and its guards (`straighten/engine-host.mjs`).
-The app's worker is replaced by an in-thread stand-in that makes exactly the
+The baseline's corners go onto the 896 px copy per axis, by the engine's own
+`quadOnScaledCopy` (pixel centre to pixel centre) when the engine exports it
+and linearly, as older app code did, when it does not; the copy is handed to
+the engine as `baselineSource`, which older engines ignore. The app's worker is replaced by an in-thread stand-in that makes exactly the
 worker's calls. When the engine root has a text-deskew module
 (`src/lib/deskew.ts`), the step runs first and the page the user sees is the
 engine's surface or the flat page of the rotated outline with its wedges
