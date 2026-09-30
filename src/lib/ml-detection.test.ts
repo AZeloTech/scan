@@ -11,6 +11,7 @@ import {
   shouldWarmUpMl,
   supersedesDetection,
   type DetectionCandidate,
+  onScreenFloor,
 } from "./ml-detection.ts";
 
 test("a sure model is held to the trusted floor, everyone else to the caller's", () => {
@@ -140,4 +141,12 @@ test("the first detection of an attempt is always taken", () => {
     supersedesDetection(candidate("classical", null, 10), null, 10, AUTHORITY_MS),
     true,
   );
+});
+
+test("the coverage floor is a share of what is on screen", () => {
+  assert.equal(onScreenFloor(0.1, { width: 1, height: 1 }), 0.1);
+  // The rail's cover crop of a 3:4 stream on a tall phone: ~47 % of the frame on screen.
+  assert.ok(Math.abs(onScreenFloor(0.1, { width: 0.62, height: 0.76 }) - 0.0471) < 1e-3);
+  // A landscape stream on a portrait screen shows a sliver; the floor keeps a lower bound.
+  assert.equal(onScreenFloor(0.1, { width: 0.26, height: 0.4 }), 0.1 * 0.15);
 });

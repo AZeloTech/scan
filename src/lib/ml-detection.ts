@@ -133,6 +133,20 @@ export function coverageFloor(
     : unconditionedFloor;
 }
 
+/**
+ * A coverage floor (a share of the whole frame) as the same share of the
+ * visible region — the part of the frame on screen — so "too small to be a
+ * page" means too small on the screen. Never below {@link ON_SCREEN_FLOOR_MIN_SHARE}
+ * of the frame's own floor: a sliver of a region is no licence for specks.
+ */
+export function onScreenFloor(floor: number, visible: { width: number; height: number }): number {
+  const share = Math.min(1, Math.max(ON_SCREEN_FLOOR_MIN_SHARE, visible.width * visible.height));
+  return floor * share;
+}
+
+/** {@link onScreenFloor}'s lower bound, as a share of the frame's floor. */
+const ON_SCREEN_FLOOR_MIN_SHARE = 0.15;
+
 /** What the caller knows about the ML runtime, from `lib/flatten.ts`. */
 export interface MlAvailability {
   /** The runtime has loaded and answered at least once this session. */

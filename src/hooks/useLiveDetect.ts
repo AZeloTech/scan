@@ -80,6 +80,7 @@ import {
 import { loadScanic } from "@/lib/scanic-runtime";
 import {
   coverageFloor,
+  onScreenFloor,
   isMlResultFresh,
   ML_CADENCE_MS,
   ML_CALL_BUDGET_MS,
@@ -1326,10 +1327,9 @@ export function useLiveDetect({
     // The buffer was accepted by `accept`, so it is judged by the same
     // conditioned floor it cleared there — from the candidate that produced
     // it, which travels with it.
-    const floor = coverageFloor(
-      buffered.source,
-      buffered.confidence,
-      MIN_QUAD_AREA_FRACTION,
+    const floor = onScreenFloor(
+      coverageFloor(buffered.source, buffered.confidence, MIN_QUAD_AREA_FRACTION),
+      visibleRef.current,
     );
     if (normalizedCoverage(buffered.quad) < floor) return null;
     return {
@@ -2030,10 +2030,9 @@ export function useLiveDetect({
         floor:
           detection === null
             ? null
-            : coverageFloor(
-                detection.source,
-                detection.confidence,
-                MIN_QUAD_AREA_FRACTION,
+            : onScreenFloor(
+                coverageFloor(detection.source, detection.confidence, MIN_QUAD_AREA_FRACTION),
+                visibleRef.current,
               ),
         accepted,
         passMs,
@@ -2191,10 +2190,12 @@ export function useLiveDetect({
       // object-cover window can still be well under 0.35 of the full 16:9 frame
       // this loop samples, and holding a sure model to the classical floor is
       // what made the brackets flash on and off over a perfectly framed page.
-      const floor = coverageFloor(
-        detection.source,
-        detection.confidence,
-        MIN_QUAD_AREA_FRACTION,
+      // …and judged as a share of what the person SEES: a full-bleed
+      // viewfinder over a stream wider than the screen shows a fraction of
+      // the frame, and a page filling the screen is that fraction's page.
+      const floor = onScreenFloor(
+        coverageFloor(detection.source, detection.confidence, MIN_QUAD_AREA_FRACTION),
+        visibleRef.current,
       );
       if (quad === null || normalizedCoverage(quad) < floor) {
         return { accepted: false, rejected: "floor" };
