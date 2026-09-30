@@ -85,6 +85,22 @@ test("clipping: print pushed into a border the flat page kept clear of is clippe
   assert.equal(c.clipped, true, JSON.stringify(c));
 });
 
+test("clipping: print scaled down whole, clear of the edges, is shrunk, not clipped", () => {
+  const flatImg = flatOf(buildScene(spec("tilt/paragraphs/correct/t0/p0/none")));
+  const flat = measurePage(flatImg);
+  // The page redrawn at 90 % about its centre, paper around it.
+  const w = flatImg.width, h = flatImg.height, k = 0.9;
+  const small = painted(flatImg, (x, y) => {
+    const sx = Math.round(w / 2 + (x - w / 2) / k), sy = Math.round(h / 2 + (y - h / 2) / k);
+    if (sx < 0 || sy < 0 || sx >= w || sy >= h) return 240;
+    return flatImg.data[(sy * w + sx) * 4];
+  });
+  const c = clippingCheck(flat, measurePage(small));
+  assert.ok(c.inkRatio < 0.92, JSON.stringify(c));
+  assert.equal(c.clipped, false, JSON.stringify(c));
+  assert.equal(c.shrunk, true);
+});
+
 test("clipping: a page with too little print is unmeasured, never a pass", () => {
   const blank = newImage(600, 800);
   blank.data.fill(240);

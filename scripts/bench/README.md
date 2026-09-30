@@ -1132,7 +1132,10 @@ A page with nothing to do is `left-alone`, `harm`, `unverified` or `acted-ok`.
 < 92 % of the flat page's), on the ink in each border band and on the ink's
 bounding box (print pushed into a border the flat page's print kept clear
 of) — not on ink density over the visible sheet, which a kept wedge of table
-fools one way and a sheet that grew the other. **Painted** pages carry fill
+fools one way and a sheet that grew the other. Print that lost ink but shrank
+with its bounding box alike on both axes, touching no new border, was scaled
+down, not cut: it is reported as shrunk, not as print lost (a page shrunk into
+a frame of table is still harm, as background brought in). **Painted** pages carry fill
 without the photo's grain; a **seam** is a fill that steps more than 6 grey
 levels against the paper beside it; both are net of what the flat page
 itself shows, and **dark wedges** count table newly in the border band.

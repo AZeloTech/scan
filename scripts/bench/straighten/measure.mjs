@@ -245,6 +245,10 @@ export const CLIP = {
   edge: 0.02,
   /** Band ink up by this much (density) on the side that newly touches. */
   bandRise: 0.004,
+  /** Ink lost with the bbox shrinking alike (ink per bbox area at least this share of the flat page's): scaled, not cut. */
+  shrunkInkPerBox: 0.97,
+  /** …and the box's width and height ratios within this of each other. */
+  shrunkAspectSlack: 0.03,
   /** Fewer ink pixels than this on the flat page: too little print to judge. */
   minInk: 1500,
 };
@@ -260,13 +264,29 @@ const SIDES = ["top", "right", "bottom", "left"];
  * shrinks the sheet and hid lost print, a sheet that grew diluted it into a
  * false loss. A side is "pushed" when the finished page's print now touches
  * a border the flat page's print kept clear of and its band holds more ink.
+ * Print that lost ink but shrank with its bounding box alike on both axes,
+ * touching no new edge, was scaled down rather than cut (`shrunk`, not
+ * clipped).
  */
 export function clippingCheck(flat, out) {
   if (!(flat.ink >= CLIP.minInk)) return { clipped: null, inkRatio: NaN, why: `flat page has ${flat.ink} ink px (< ${CLIP.minInk})` };
   const inkRatio = out.inkAbs / Math.max(1e-9, flat.inkAbs);
-  if (inkRatio < CLIP.inkRatio) return { clipped: true, inkRatio, why: `ink ${(inkRatio * 100).toFixed(0)}% of flat` };
   const touches = (b) => [b[1] < CLIP.edge, b[2] > 1 - CLIP.edge, b[3] > 1 - CLIP.edge, b[0] < CLIP.edge];
   const tf = touches(flat.bbox), to = touches(out.bbox);
+  if (inkRatio < CLIP.inkRatio) {
+    // Print that shrank with its bounding box, alike on both axes and clear
+    // of every edge, was scaled down, not cut: a geometric correction cannot
+    // drop lines from the middle of a page without cutting through one at an
+    // edge, and a cut shortens one side of the box, not both alike.
+    const wRatio = (out.bbox[2] - out.bbox[0]) / Math.max(1e-9, flat.bbox[2] - flat.bbox[0]);
+    const hRatio = (out.bbox[3] - out.bbox[1]) / Math.max(1e-9, flat.bbox[3] - flat.bbox[1]);
+    const perBox = inkRatio / Math.max(1e-9, wRatio * hRatio);
+    const uniform = Math.abs(wRatio - hRatio) <= CLIP.shrunkAspectSlack;
+    if (uniform && perBox >= CLIP.shrunkInkPerBox && !to.some((t, i) => t && !tf[i])) {
+      return { clipped: false, inkRatio, shrunk: true, why: `print shrank to ${(inkRatio * 100).toFixed(0)}% of the flat page's ink with its bounding box (scaled, not cut)` };
+    }
+    return { clipped: true, inkRatio, why: `ink ${(inkRatio * 100).toFixed(0)}% of flat` };
+  }
   const flatBand = flat.band ?? [0, 0, 0, 0], outBand = out.band ?? [0, 0, 0, 0];
   const pushed = SIDES.filter((_, i) => to[i] && !tf[i] && outBand[i] > flatBand[i] + CLIP.bandRise);
   if (pushed.length > 0 && inkRatio < CLIP.pushedInkRatio) {
