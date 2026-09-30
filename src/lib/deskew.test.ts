@@ -25,9 +25,14 @@ import {
   homographyFrom,
   inscribedScale,
   judgeDeskew,
+  flatPageDims,
+  measuredFlat,
+  measuredLevel,
   outsideEdge,
   paintWedgeWindow,
   planStraighten,
+  renderDeskewed,
+  warpQuadAt,
   wedgeFillFrom,
   wedgePaintBoxes,
   wedgeSampleBoxes,
@@ -942,4 +947,200 @@ test("a render that fails is no rotation, not an error", async () => {
   });
   assert.equal(result.plan, null);
   assert.equal(result.runEngine, true);
+  // …and flagged, so no caller remembers it as this page's "no rotation".
+  assert.equal(result.failed, true);
+});
+
+test("a render that throws is flagged the same; a judged answer never is", async () => {
+  const { canonical, quad } = photo([{ layout: "paragraphs", deg: 4 }]);
+  const thrown = await planStraighten({
+    flat: warp(canonical, quad, W, H),
+    quad,
+    canonicalWidth: canonical.width,
+    canonicalHeight: canonical.height,
+    renderSmall: async () => {
+      throw new Error("out of memory");
+    },
+  });
+  assert.equal(thrown.plan, null);
+  assert.equal(thrown.failed, true);
+  const rotated = await straighten([{ layout: "paragraphs", deg: 4 }]);
+  assert.equal(rotated.failed, undefined);
+  const level = await straighten([{ layout: "paragraphs", deg: 0 }]);
+  assert.equal(level.plan, null);
+  assert.equal(level.failed, undefined, "planned, no rotation: an answer");
+});
+
+/* ── The page at the confirmed outline's own size ─────────────────────── */
+
+/** A keystone outline (the top edge shorter), inside a 700×860 photo. */
+const KEYSTONE: DeskewQuad = {
+  topLeft: { x: 150, y: 90 },
+  topRight: { x: 540, y: 110 },
+  bottomRight: { x: 640, y: 780 },
+  bottomLeft: { x: 60, y: 760 },
+};
+
+function grey(width: number, height: number, v = 230): DeskewImage {
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0; i < data.length; i += 4) data.set([v, v, v, 255], i);
+  return { width, height, data };
+}
+
+test("warpQuadAt at the outline's own size is scanic's page (the stage's small render, pixel for pixel within a level)", () => {
+  const { canonical, quad } = photo([{ layout: "paragraphs", deg: 3 }]);
+  const dims = flatPageDims(quad);
+  const ours = warpQuadAt(canonical, quad, dims.width, dims.height);
+  const reference = warp(canonical, quad, dims.width, dims.height);
+  assert.equal(ours.width, dims.width);
+  assert.equal(ours.height, dims.height);
+  let worst = 0;
+  for (let i = 0; i < ours.data.length; i += 1) worst = Math.max(worst, Math.abs(ours.data[i] - reference.data[i]));
+  assert.ok(worst <= 1, `worst ${worst}`);
+});
+
+test("a rotated perspective outline rendered at the confirmed size keeps the page's proportions", () => {
+  // The flat page of Q is W×H; a mark at output point p₀ of the page rotated
+  // by θ sits, in the photo, at H_Q(c + R(θ)(p₀ − c)). Rendered at Q's size,
+  // Q′ puts it back at p₀; scanic's own size (Q′'s sides) would stretch the
+  // page along its axes and move it.
+  for (const deg of [3, 8, -15]) {
+    const dims = flatPageDims(KEYSTONE);
+    const geometry = deskewQuad({
+      quad: KEYSTONE,
+      outputWidth: dims.width,
+      outputHeight: dims.height,
+      canonicalWidth: 700,
+      canonicalHeight: 860,
+      deg,
+      mode: "paper",
+    });
+    const drift = flatPageDims(geometry.quad);
+    const aspect = (d: { width: number; height: number }) => d.width / d.height;
+    assert.ok(
+      Math.abs(aspect(drift) / aspect(dims) - 1) > 0.005,
+      `${deg}°: the rotated outline's own sides are not the page's (${drift.width}×${drift.height} vs ${dims.width}×${dims.height})`,
+    );
+    const photoImage = grey(700, 860);
+    const rect = [
+      { x: 0, y: 0 },
+      { x: dims.width - 1, y: 0 },
+      { x: dims.width - 1, y: dims.height - 1 },
+      { x: 0, y: dims.height - 1 },
+    ];
+    const toPhoto = homographyFrom(rect, [KEYSTONE.topLeft, KEYSTONE.topRight, KEYSTONE.bottomRight, KEYSTONE.bottomLeft]);
+    const cx = (dims.width - 1) / 2;
+    const cy = (dims.height - 1) / 2;
+    const t = (deg * Math.PI) / 180;
+    const marks = [
+      { x: 0.2 * dims.width, y: 0.25 * dims.height },
+      { x: 0.8 * dims.width, y: 0.7 * dims.height },
+    ];
+    for (const p of marks) {
+      const f = { x: cx + Math.cos(t) * (p.x - cx) - Math.sin(t) * (p.y - cy), y: cy + Math.sin(t) * (p.x - cx) + Math.cos(t) * (p.y - cy) };
+      const at = applyHomography(toPhoto, f);
+      for (let dy = -3; dy <= 3; dy += 1) {
+        for (let dx = -3; dx <= 3; dx += 1) {
+          photoImage.data.set([0, 0, 0, 255], ((Math.round(at.y) + dy) * 700 + Math.round(at.x) + dx) * 4);
+        }
+      }
+    }
+    const page = warpQuadAt(photoImage, geometry.quad, dims.width, dims.height);
+    assert.equal(page.width, dims.width);
+    assert.equal(page.height, dims.height);
+    for (const p of marks) {
+      let sx = 0;
+      let sy = 0;
+      let n = 0;
+      for (let y = Math.round(p.y) - 20; y <= Math.round(p.y) + 20; y += 1) {
+        for (let x = Math.round(p.x) - 20; x <= Math.round(p.x) + 20; x += 1) {
+          if (page.data[(y * dims.width + x) * 4] < 100) {
+            sx += x;
+            sy += y;
+            n += 1;
+          }
+        }
+      }
+      assert.ok(n > 0, `${deg}°: the mark near (${p.x.toFixed(0)}, ${p.y.toFixed(0)}) is in the page`);
+      assert.ok(Math.hypot(sx / n - p.x, sy / n - p.y) < 1.5, `${deg}°: mark at (${(sx / n).toFixed(1)}, ${(sy / n).toFixed(1)}), expected (${p.x.toFixed(1)}, ${p.y.toFixed(1)})`);
+    }
+  }
+});
+
+test("the page the user sees for a rotation: the confirmed size, and the wedges painted", async () => {
+  const { canonical, quad } = photo([{ layout: "paragraphs", deg: 5 }]);
+  const result = await straighten([{ layout: "paragraphs", deg: 5 }]);
+  assert.ok(result.plan !== null);
+  const { image, filled } = renderDeskewed(canonical, quad, result.plan);
+  const dims = flatPageDims(quad);
+  assert.equal(image.width, dims.width);
+  assert.equal(image.height, dims.height);
+  assert.equal(filled, true);
+  const expected = warpQuadAt(canonical, result.plan.quad, dims.width, dims.height);
+  fillDeskewWedges(expected, result.plan);
+  assert.deepEqual(image.data, expected.data);
+  // A plan that paints nothing says so.
+  const crop = renderDeskewed(canonical, quad, { ...result.plan, mode: "crop" });
+  assert.equal(crop.filled, false);
+});
+
+/* ── What may be claimed ──────────────────────────────────────────────── */
+
+test("the judge fails closed when the rotated page's own lean cannot be measured", () => {
+  const flat = page("paragraphs", 4);
+  const verdict = judgeDeskew({ flat, rotated: grey(W, H), deg: 4, sample: null });
+  assert.ok(Number.isNaN(verdict.residualDeg));
+  assert.equal(verdict.ok, false);
+  assert.equal(verdict.rejection, "unmeasured");
+});
+
+test("the judge refuses a rotation that cuts a rule or a border, not only glyphs", () => {
+  const flat = page("paragraphs", 4);
+  const rotated = rotateImage(flat, 4);
+  const glyphs = { xs: new Float64Array([0, 10, -10]), ys: new Float64Array([0, 5, -5]), width: W, height: H };
+  // A printed border hugging the frame: every side of it, its corners too.
+  const bx: number[] = [];
+  const by: number[] = [];
+  for (let i = 0; i <= 200; i += 1) {
+    const u = (i / 200 - 0.5) * (W - 20);
+    const v = (i / 200 - 0.5) * (H - 20);
+    bx.push(u, u, -(W - 20) / 2, (W - 20) / 2);
+    by.push(-(H - 20) / 2, (H - 20) / 2, v, v);
+  }
+  const verdict = judgeDeskew({
+    flat,
+    rotated,
+    deg: 4,
+    sample: { ...glyphs, rules: { xs: Float64Array.from(bx), ys: Float64Array.from(by) } },
+  });
+  assert.equal(verdict.clippedShare, 0, "no glyph leaves the frame");
+  assert.ok(verdict.rulesClippedShare > 0.01, `${verdict.rulesClippedShare}`);
+  assert.equal(verdict.rejection, "clips");
+  // The same rotation with the border well inside: kept.
+  const inner = judgeDeskew({
+    flat,
+    rotated,
+    deg: 4,
+    sample: { ...glyphs, rules: { xs: Float64Array.from(bx, (x) => x * 0.8), ys: Float64Array.from(by, (y) => y * 0.8) } },
+  });
+  assert.equal(inner.rulesClippedShare, 0);
+  assert.equal(inner.ok, true, `${inner.rejection}`);
+});
+
+test("a flat page is claimed only when a bow was looked for on enough lines", () => {
+  const level = { deg: 0.1, halves: [0.1, 0.1] } as SkewEstimate;
+  assert.equal(measuredFlat(curlEvidence(level, { lineCount: 20, medianCurvature: 0.0005 })), true);
+  // Too few lines to measure a bow: no evidence of curl, and no evidence of flat either.
+  const few = curlEvidence(level, { lineCount: 2, medianCurvature: 0.0005 });
+  assert.equal(few.evidence, false, "it still does not ask the engine");
+  assert.equal(measuredFlat(few), false);
+  assert.equal(measuredFlat(curlEvidence(level, null)), false);
+  assert.equal(measuredFlat(curlEvidence(level, { lineCount: 20, medianCurvature: CURL_BOW_FRACTION * 2 })), false);
+});
+
+test("a finished page is told it is level only when its lean is measured and small", () => {
+  assert.equal(measuredLevel(page("paragraphs", 0)), true);
+  assert.equal(measuredLevel(page("paragraphs", 1.5)), false);
+  assert.equal(measuredLevel(page("paragraphs", -1)), false);
+  assert.equal(measuredLevel(grey(W, H)), false, "nothing to measure is not level");
 });

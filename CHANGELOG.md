@@ -35,6 +35,31 @@ freezes at 1.0.
   is then flagged `low-resolution` on the confirm screen. `onDiagnostics`
   reports it: the new `stream-cap` event (applied or not, and why) and
   `streamCapped` / `restore` on `capture`.
+- **Endireitar records, shows and claims only what it did to a page.** A
+  straighten that could not finish (its code would not download, a readback
+  ran out of memory) used to be remembered as "no rotation" for that photo, so
+  the tilt was never fixed again until the corners changed, and the card
+  offered "tocar de novo dá a mesma resposta". It is now forgotten, the card
+  says a retry may help, and the next tap plans again. A turned page came out
+  a few percent stretched on a perspective outline (the flattener sized it
+  from the turned outline's own sides): it is now rendered at the confirmed
+  outline's size, in one resample, and keeps its proportions. The PDF's
+  `/Subject` now says a page was turned to level its print and by how much
+  (`deskewed 3.5deg`), and whether paper was painted into the corners the
+  turn uncovered (`corners filled`). "Sem melhorias" is no longer offered on a
+  turned page, whose comparison would have shown a different geometry. The
+  "both" card ("endireitamos o texto torto e tiramos a curva") needs the
+  engine's page measured level: 3 synthetic pages that kept 0.5–1.6° of tilt
+  now say only that the curve was taken out. "A folha, plana" needs a bow
+  looked for on at least three lines. A turned page whose curve check failed
+  (a timeout, a download) says so and how to try the curve again, in the warn
+  tone, instead of "a curva ficou como estava". The deskew's own check now
+  refuses a turn whose result it cannot measure, and one that pushes a rule or
+  a printed border out of the frame, not only glyphs. The card no longer
+  pulses again when you swipe back to a page. On the synthetic bench every
+  verdict is unchanged (225 of 255 fixed, no harm) and on the real stills too
+  (23 of 30); one synthetic seam flag flips at its threshold (6.0 grey
+  levels, the fill's step across its edge still within ±1).
 - **Endireitar says what it corrected, and answers a second tap.** After a
   tap the card now names what happened: the tilted text was straightened,
   the curve was taken out, both, or the text was straightened and the curve

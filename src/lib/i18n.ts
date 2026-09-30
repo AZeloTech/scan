@@ -567,6 +567,12 @@ export interface AppCopy {
        */
       retryHint: string;
       /**
+       * The same, for a tilt that was straightened while the curve could not
+       * be checked: the switch is on, so a tap would turn it off — the retry
+       * is off and on again, and the card says so.
+       */
+      retryCurlHint: string;
+      /**
        * The whole of what is downloaded, said once per session before anything
        * is fetched: the size, that the cache may lose it, and that the picture
        * stays here.
@@ -613,6 +619,7 @@ export interface AppCopy {
         | "curl"
         | "both"
         | "tilt-only"
+        | "tilt-retry"
         | "nothing"
         | "declined"
         | "unverified"
@@ -1260,6 +1267,8 @@ const PT: AppCopy = {
       label: "Endireitar a folha",
       help: "Para texto torto na foto, folha de livro ou papel que não fica reto.",
       retryHint: "Dá para tentar de novo: toque em endireitar.",
+      retryCurlHint:
+        "Para tentar a curva de novo, desligue e ligue o endireitar.",
       consent:
         `Baixa um modelo de ${DEWARP_ASSET_SIZE_LABEL} uma vez para endireitar ` +
         "folhas curvadas neste aparelho. A melhoria leva alguns segundos por " +
@@ -1294,6 +1303,9 @@ const PT: AppCopy = {
         "tilt-only":
           "Endireitamos o texto, que estava torto. A curva da folha ficou " +
           "como estava.",
+        "tilt-retry":
+          "Endireitamos o texto, que estava torto, mas não deu para conferir " +
+          "a curva da folha agora.",
         nothing: "O texto já estava reto e a folha, plana — não havia o que endireitar.",
         declined:
           "Não deu para endireitar esta página com segurança — mantivemos " +
@@ -1930,6 +1942,7 @@ const EN: AppCopy = {
       label: "Straighten the sheet",
       help: "For tilted text in the photo, a page from a book, or paper that will not lie flat.",
       retryHint: "You can try again: tap straighten.",
+      retryCurlHint: "To try the curve again, turn straighten off and on.",
       consent:
         `Downloads a ${DEWARP_ASSET_SIZE_LABEL} model once to straighten curved ` +
         "sheets on this device. The improvement takes a few seconds per page. " +
@@ -1964,6 +1977,9 @@ const EN: AppCopy = {
         "tilt-only":
           "We levelled the text, which was tilted. The curve of the sheet was " +
           "left as it was.",
+        "tilt-retry":
+          "We levelled the text, which was tilted, but the curve of the sheet " +
+          "could not be checked this time.",
         nothing: "The text was already level and the sheet flat — there was nothing to straighten.",
         declined:
           "We could not straighten this page safely — we kept it as it was.",

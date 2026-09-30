@@ -231,3 +231,20 @@ test("an inference that found the page level and flat says so to the memo", asyn
   });
   assert.equal(other.alreadyStraight, undefined, "no verdict, no claim");
 });
+
+test("an inference whose deskew could not finish leaves the memo unplanned, and flagged", async () => {
+  const memo = newDewarpMemo();
+  await curvedSurface<string>(memo, {
+    infer: async () => ({
+      canvas: null,
+      reason: "semantic-regression" as const,
+      replay: null,
+      deskewFailed: true as const,
+    }),
+    resample: async () => null,
+  });
+  // Not `null` ("planned, no rotation"): nothing was planned, and the flat
+  // path must not plan again inside this render either.
+  assert.equal(memo.deskew, undefined);
+  assert.equal(memo.deskewFailed, true);
+});

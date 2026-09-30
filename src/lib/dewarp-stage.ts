@@ -190,6 +190,13 @@ export interface DewarpStageResult {
    * than guess at why the engine declined.
    */
   alreadyStraight?: true;
+  /**
+   * The deskew was attempted and could not finish (its code would not load,
+   * a readback or a render failed): `deskew` is absent — there is no answer
+   * for these pixels, and none may be remembered as one. The next render
+   * plans again.
+   */
+  deskewFailed?: true;
 }
 
 /**
@@ -519,6 +526,36 @@ async function warpSmall(
   }
 }
 
+/**
+ * The small page of another outline at a given size — B′ at B₀'s own size, so
+ * the two differ by the rotation alone. scanic sizes its page from the
+ * outline's sides, which on a perspective outline are not B₀'s, so this is
+ * the deskew module's port of scanic's warp with the size given, on the very
+ * copy B₀ was warped from, its corners put there by the same rule. Null when
+ * the copy cannot be read or the warp fails.
+ */
+function warpSmallAt(
+  copy: SmallCopy,
+  source: HTMLCanvasElement,
+  quad: DewarpQuad,
+  deskew: DeskewModule,
+  size: { width: number; height: number },
+): RgbaImage | null {
+  try {
+    const small = copy.canvas;
+    const pixels =
+      copy.pixels !== null && copy.pixels !== "canonical"
+        ? copy.pixels
+        : (surfaceContext(small, { willReadFrequently: true })?.getImageData(0, 0, small.width, small.height) ??
+          null);
+    if (pixels === null) return null;
+    const onCopy = small === source ? quad : deskew.quadOnScaledCopy(quad, deskew.copyScale(source, small));
+    return deskew.warpQuadAt(pixels, onCopy, size.width, size.height);
+  } catch {
+    return null;
+  }
+}
+
 type DeskewModule = typeof import("@/lib/deskew");
 
 let deskewPromise: Promise<DeskewModule> | null = null;
@@ -538,38 +575,42 @@ function loadDeskew(): Promise<DeskewModule> {
 /**
  * The deskew step on the small flat page B₀ of the confirmed outline: the
  * rotation, judged against B₀ on B′ (the small page of the rotated outline,
- * warped from the same copy). Never throws: any failure is "no rotation",
- * and the engine then runs on the confirmed outline as it always has.
+ * warped from the same copy at B₀'s size). Never throws: any failure is "no
+ * rotation" for this run, flagged `failed` so no caller remembers it as the
+ * page's answer, and the engine then runs on the confirmed outline as it
+ * always has.
  */
 async function planDeskewFor(
   copy: SmallCopy,
   source: HTMLCanvasElement,
   baseline: RgbaImage,
   quad: DewarpQuad,
-  assets: AssetUrls,
 ): Promise<DeskewAnswer> {
-  const none: DeskewAnswer = { deskew: null, alreadyStraight: false };
+  const failed: DeskewAnswer = { deskew: null, alreadyStraight: false, failed: true };
   try {
     const deskew = await loadDeskew();
     const width = source.width;
     const height = source.height;
+    const size = { width: baseline.width, height: baseline.height };
     const result = await deskew.planStraighten({
       flat: baseline,
       quad,
       canonicalWidth: width,
       canonicalHeight: height,
-      renderSmall: (rotated) => warpSmall(copy, source, rotated, deskew, assets),
+      renderSmall: async (rotated) => warpSmallAt(copy, source, rotated, deskew, size),
     });
+    if (result.failed === true) return failed;
     if (result.plan === null) {
-      // Already level (no rotation needed) and no curl on the level page.
-      const alreadyStraight = result.level !== null && !result.level.evidence;
-      return { deskew: null, alreadyStraight };
+      // Already level (no rotation needed) and no curl on the level page —
+      // measured, with lines enough to have looked for a bow.
+      const alreadyStraight = result.level !== null && deskew.measuredFlat(result.level);
+      return { deskew: null, alreadyStraight, failed: false };
     }
     const corners = normalizeQuad(result.plan.quad, width, height);
-    if (corners === null) return none;
-    return { deskew: { plan: result.plan, corners }, alreadyStraight: false };
+    if (corners === null) return { deskew: null, alreadyStraight: false, failed: false };
+    return { deskew: { plan: result.plan, corners }, alreadyStraight: false, failed: false };
   } catch {
-    return none;
+    return failed;
   }
 }
 
@@ -578,6 +619,8 @@ interface DeskewAnswer {
   deskew: AppliedDeskew | null;
   /** See {@link DewarpStageResult.alreadyStraight}. */
   alreadyStraight: boolean;
+  /** See {@link DewarpStageResult.deskewFailed}: `deskew` is then no answer at all. */
+  failed: boolean;
 }
 
 /**
@@ -585,12 +628,14 @@ interface DeskewAnswer {
  * planning it — a device the latch has closed, an engine chunk that would not
  * load. Decodes the canonical, renders the same small page B₀, plans. The
  * engine is not asked, whatever the curl evidence says: it is not available.
+ * `"failed"`: the step could not finish (never "no rotation": see
+ * {@link DewarpStageResult.deskewFailed}).
  */
 export async function planDeskewStage(
   canonical: Blob,
   corners: NormalizedQuad,
   assets: AssetUrls,
-): Promise<AppliedDeskew | null> {
+): Promise<AppliedDeskew | null | "failed"> {
   let source: HTMLCanvasElement | null = null;
   let copy: SmallCopy | null = null;
   try {
@@ -599,10 +644,11 @@ export async function planDeskewStage(
     copy = smallCopyOf(source);
     const quad = denormalizeQuad(corners, source.width, source.height);
     const baseline = await warpSmall(copy, source, quad, deskew, assets);
-    if (baseline === null) return null;
-    return (await planDeskewFor(copy, source, baseline, quad, assets)).deskew;
+    if (baseline === null) return "failed";
+    const answer = await planDeskewFor(copy, source, baseline, quad);
+    return answer.failed ? "failed" : answer.deskew;
   } catch {
-    return null;
+    return "failed";
   } finally {
     releaseSmallCopy(copy, source);
     releaseCanvas(source);
@@ -610,36 +656,46 @@ export async function planDeskewStage(
 }
 
 /**
- * Paint a deskewed page's corner wedges, in place, with the paper beside each
- * one (`deskew.ts`'s fill). Only the boxes the fill reads and paints are read
- * back — never the whole full-resolution page a second time — and each pixel
- * is decided on its own, so the result is the pure `fillDeskewWedges` pixel
- * for pixel. `"crop"` plans have no wedges and paint nothing. Never throws: a
- * page that cannot be painted keeps its wedges, which is a cosmetic loss.
+ * The page the user sees for a rotation, at full resolution: the decoded
+ * canonical warped through the rotated outline at the *confirmed* outline's
+ * size — so the page keeps its proportions (scanic would size it from the
+ * rotated outline's own sides) — and its wedges painted with the paper beside
+ * them, in one pass over pixels this reads once. Null when it cannot be made
+ * (the caller then renders the confirmed outline plainly, and says so);
+ * `filled` is whether anything was painted, for the page's record.
  */
-export async function paintDeskewWedges(canvas: HTMLCanvasElement, plan: DeskewPlan): Promise<void> {
+export async function renderDeskewedPage(
+  decoded: HTMLCanvasElement,
+  confirmed: NormalizedQuad,
+  applied: AppliedDeskew,
+): Promise<{ canvas: HTMLCanvasElement; filled: boolean } | null> {
+  let canvas: HTMLCanvasElement | null = null;
   try {
     const deskew = await loadDeskew();
-    if (!deskew.paintsAnything(plan)) return;
-    const context = surfaceContext(canvas, { willReadFrequently: true });
-    if (context === null) return;
-    const width = canvas.width;
-    const height = canvas.height;
-    const windows = deskew
-      .wedgeSampleBoxes(plan, width, height)
-      .flatMap((box) =>
-        box === null
-          ? []
-          : [{ x: box.x, y: box.y, image: context.getImageData(box.x, box.y, box.width, box.height) }],
-      );
-    const fill = deskew.wedgeFillFrom(windows, plan, width, height);
-    for (const box of deskew.wedgePaintBoxes(plan, width, height)) {
-      const image = context.getImageData(box.x, box.y, box.width, box.height);
-      deskew.paintWedgeWindow({ x: box.x, y: box.y, image }, plan, fill, width, height);
-      context.putImageData(image, box.x, box.y);
-    }
+    const context = surfaceContext(decoded, { willReadFrequently: true });
+    if (context === null) return null;
+    const width = decoded.width;
+    const height = decoded.height;
+    let pixels: RgbaImage | null = context.getImageData(0, 0, width, height);
+    const { image, filled } = deskew.renderDeskewed(
+      pixels,
+      denormalizeQuad(confirmed, width, height),
+      { ...applied.plan, quad: denormalizeQuad(applied.corners, width, height) },
+    );
+    // The source's copy is dead weight from here: the page is in `image`.
+    pixels = null;
+    canvas = htmlSurface(image.width, image.height);
+    const target = surfaceContext(canvas);
+    if (target === null) throw new Error("no 2-D context for the deskewed page");
+    target.putImageData(
+      new ImageData(new Uint8ClampedArray(image.data.buffer as ArrayBuffer), image.width, image.height),
+      0,
+      0,
+    );
+    return { canvas, filled };
   } catch {
-    // The rotation stands; only the fill is lost.
+    releaseCanvas(canvas);
+    return null;
   }
 }
 
@@ -785,12 +841,15 @@ export async function runDewarpStage(
   let deskew: AppliedDeskew | null | undefined;
   // Level and flat already, as this run measured it (never for a known deskew).
   let alreadyStraight = false;
+  // The step was attempted and could not finish: `deskew` stays unset.
+  let deskewFailed = false;
   // What the device spent on the deskew: counted in the same wait budget.
   let deskewMs = 0;
   // The deskew's answer, for every return once it may have been planned.
-  const planned = (): Pick<DewarpStageResult, "deskew" | "alreadyStraight"> => ({
+  const planned = (): Pick<DewarpStageResult, "deskew" | "alreadyStraight" | "deskewFailed"> => ({
     ...(deskew === undefined ? {} : { deskew }),
     ...(alreadyStraight ? { alreadyStraight: true as const } : {}),
+    ...(deskewFailed ? { deskewFailed: true as const } : {}),
   });
   try {
     const width = source.width;
@@ -820,9 +879,13 @@ export async function runDewarpStage(
       if (request.knownDeskew !== undefined) {
         deskew = request.knownDeskew;
       } else {
-        const answer = await planDeskewFor(copy, source, flat, confirmed, request.assets);
-        deskew = answer.deskew;
-        alreadyStraight = answer.alreadyStraight;
+        const answer = await planDeskewFor(copy, source, flat, confirmed);
+        if (answer.failed) {
+          deskewFailed = true;
+        } else {
+          deskew = answer.deskew;
+          alreadyStraight = answer.alreadyStraight;
+        }
       }
       deskewMs = Date.now() - deskewStarted;
       if (deskew && !deskew.plan.curl.evidence) {
@@ -942,12 +1005,25 @@ export async function runDewarpStage(
       });
       return { canvas: null, reason, replay: null, ...planned() };
     }
+    // The engine's surface is on the confirmed outline and carries no
+    // rotation: it levels the lines it models, but only on average. The tilt
+    // the deskew found is claimed as levelled only when the surface is
+    // measured level; otherwise the page is the engine's, and so is its
+    // record — no rotation is reported for it.
+    if (deskew) {
+      try {
+        if (!(await loadDeskew()).measuredLevel(surface)) deskew = undefined;
+      } catch {
+        // Unmeasured is not level: the surface stands, the tilt is not claimed.
+        deskew = undefined;
+      }
+    }
     note({
       pageId,
       engineMode: mode,
       event: "corrected",
       durationMs: Date.now() - startedAt,
-      extra,
+      extra: { ...extra, ...(extra.deskewDeg !== undefined && !deskew ? { deskewLevelled: false } : {}) },
     });
     return {
       canvas: toCanvas(surface),

@@ -21,8 +21,10 @@ import { pulse } from "@/lib/motion";
 import { connectionKind, shouldPrefetchHeavyAssets } from "@/lib/network";
 import {
   dewarpConsentRequired,
+  retapPulseDue,
   straightenOutcome,
   straightenOutcomeCode,
+  straightenOutcomeRetryable,
   type StraightenOutcome,
   type ScanPage,
 } from "@/lib/scan-store";
@@ -367,10 +369,14 @@ export function DewarpPanel({
   }, [control.asking, urls]);
 
   // A tap over a final verdict: the card comes forward, once per tap. The
-  // words change too (below), which is the half reduced motion keeps.
+  // words change too (below), which is the half reduced motion keeps. Only a
+  // tap made while this card is on screen: coming back to the page (a swipe,
+  // a remount) finds the last tap still current and must not replay it.
   const cardRef = React.useRef<HTMLDivElement | null>(null);
+  const seenRetap = React.useRef(control.retap);
   React.useEffect(() => {
-    if (control.retap !== null) pulse(cardRef.current);
+    if (retapPulseDue(seenRetap.current, control.retap)) pulse(cardRef.current);
+    seenRetap.current = control.retap;
   }, [control.retap]);
 
   if (control.asking) {
@@ -449,7 +455,7 @@ export function DewarpPanel({
   // the outcomes, only the two retryable ones have earned it: a correction,
   // or a page that needed none, is the feature *working*, and painting a
   // decline amber was exactly the "odd error" reported from the field.
-  const warn = outcome === "download" || outcome === "transient";
+  const warn = straightenOutcomeRetryable(outcome);
 
   // The editor's status line already carries — and announces — the sentence for
   // exactly those two outcomes, with its own `por quê?` beside it. Repeating it
@@ -471,7 +477,7 @@ export function DewarpPanel({
       )}
     >
       <p id={control.hintId} role={echoed ? undefined : "status"}>
-        {echoed ? copy.retryHint : message}
+        {echoed ? (outcome === "tilt-retry" ? copy.retryCurlHint : copy.retryHint) : message}
         {/* The one thing a screenshot can carry that the sentence cannot: five
             sentences cover twenty-two guards, and this names the exact one. Not
             part of the copy — composed here, so every locale shows the same

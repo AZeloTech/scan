@@ -7,4 +7,4 @@
  * same photo and outline — estimator, judge, curl gate, wedge fill. A cached
  * answer planned under another version is never reused.
  */
-export const DESKEW_POLICY_VERSION = "deskew-4";
+export const DESKEW_POLICY_VERSION = "deskew-5";

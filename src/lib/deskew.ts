@@ -33,9 +33,12 @@
  * **Q stays the document's outline.** The rotation is a separate record
  * ({@link DeskewPlan}: θ, the wedge policy, what it was judged on) that is
  * composed with Q at render time. Composing is exact: a homography is fixed
- * by four point pairs, so warping the outline Q′ = H_Q(R(rect)) onto the
- * output rectangle *is* "homography, then rotate about the centre", in a
- * single resample — flat path and curved path alike. Nothing downstream
+ * by four point pairs, so warping the outline Q′ = H_Q(R(rect)) onto *the
+ * same output rectangle* — Q's own size, never Q′'s — *is* "homography, then
+ * rotate about the centre", in a single resample ({@link warpQuadAt}).
+ * scanic sizes its output from the outline's own sides; on a perspective Q
+ * the sides of Q′ are not Q's, and a page warped at Q′'s size comes out
+ * stretched along its axes (a few percent at 8°). Nothing downstream
  * replaces Q with Q′; a corner edit throws the rotation away and asks again.
  *
  * The estimator is deliberately conservative — it *abstains* unless the page
@@ -623,11 +626,24 @@ function abstain(reason: DeskewReason, partial: Partial<SkewEstimate> = {}): Ske
   };
 }
 
-/** The estimate, and the glyph-pixel sample it was made from (for the judge). */
+/** Pixels of one kind of ink, centred on the small page, in its pixels. */
+export interface InkSample {
+  xs: Float64Array;
+  ys: Float64Array;
+  width: number;
+  height: number;
+  /**
+   * The line art's own pixels (rules, a form's grid, a printed border),
+   * centred alike — what the glyph sample leaves out. Absent: none sampled.
+   */
+  rules?: { xs: Float64Array; ys: Float64Array };
+}
+
+/** The estimate, and the ink sample it was made from (for the judge). */
 interface DetailedEstimate {
   estimate: SkewEstimate;
-  /** Glyph pixels, centred on the small page, in its pixels. */
-  sample: { xs: Float64Array; ys: Float64Array; width: number; height: number } | null;
+  /** Glyph pixels (and the line art beside them). */
+  sample: InkSample | null;
 }
 
 function pixelSample(g: Glyphs, blobs: Blob[], limit: number): { xs: Float64Array; ys: Float64Array } {
@@ -844,7 +860,13 @@ function estimateDetailed(image: DeskewImage): DetailedEstimate {
   const { xs: fx, ys: fy } = pixelSample(g, glyphs, 120_000);
   const fineBins = new Float64Array(Math.ceil(2 * span) + 4);
   const deg = refineAround(fx, fy, coarseDeg, REFINE_RANGE_DEG, REFINE_STEP_DEG, span, fineBins);
-  const sample = { xs: fx, ys: fy, width, height };
+  const sample: InkSample = {
+    xs: fx,
+    ys: fy,
+    width,
+    height,
+    ...(g.rules.length === 0 ? {} : { rules: pixelSample(g, g.rules, 60_000) }),
+  };
 
   // The two halves of the *ink*, each on its own — split at the ink's own
   // median, not the page's centre, so a single column off to one side still
@@ -1105,6 +1127,133 @@ export function flatPageDims(quad: DeskewQuad): { width: number; height: number 
   };
 }
 
+/**
+ * scanic's own flat warp (`extractDocument`, 1.6) with the output size given
+ * instead of taken from the outline's sides: the homography from `quad` onto
+ * (0,0), (w−1,0), (w−1,h−1), (0,h−1), solved and inverted exactly as scanic
+ * does, inverse-mapped per output pixel, bilinear with the edge clamped,
+ * rounded. For `width`×`height` = {@link flatPageDims}(quad) it is scanic's
+ * page pixel for pixel; a rotated outline Q′ warped at Q's own size is the
+ * flat page of Q, rotated — see the module comment for why that size.
+ * Throws on a degenerate outline, as scanic does.
+ */
+export function warpQuadAt(source: DeskewImage, quad: DeskewQuad, width: number, height: number): DeskewImage {
+  const src = quadPoints(quad).map((p) => [p.x, p.y]);
+  const dst = [
+    [0, 0],
+    [width - 1, 0],
+    [width - 1, height - 1],
+    [0, height - 1],
+  ];
+  // scanic's elimination: forward with partial pivoting, then back-substitution.
+  const rows: number[][] = [];
+  const rhs: number[] = [];
+  for (let k = 0; k < 4; k += 1) {
+    const [x, y] = src[k];
+    rows.push([x, y, 1, 0, 0, 0, -x * dst[k][0], -y * dst[k][0]]);
+    rows.push([0, 0, 0, x, y, 1, -x * dst[k][1], -y * dst[k][1]]);
+    rhs.push(dst[k][0], dst[k][1]);
+  }
+  for (let i = 0; i < 8; i += 1) {
+    let pivot = i;
+    for (let r = i + 1; r < 8; r += 1) if (Math.abs(rows[r][i]) > Math.abs(rows[pivot][i])) pivot = r;
+    [rows[i], rows[pivot]] = [rows[pivot], rows[i]];
+    [rhs[i], rhs[pivot]] = [rhs[pivot], rhs[i]];
+    for (let r = i + 1; r < 8; r += 1) {
+      const f = rows[r][i] / rows[i][i];
+      for (let c = i; c < 8; c += 1) rows[r][c] -= f * rows[i][c];
+      rhs[r] -= f * rhs[i];
+    }
+  }
+  const h = new Array<number>(8);
+  for (let i = 7; i >= 0; i -= 1) {
+    let v = rhs[i];
+    for (let c = i + 1; c < 8; c += 1) v -= rows[i][c] * h[c];
+    h[i] = v / rows[i][i];
+  }
+  // Its inverse by the adjugate, as scanic inverts it.
+  const [m00, m01, m02, m10, m11, m12, m20, m21] = h;
+  const m22 = 1;
+  const e = m11 * m22 - m12 * m21;
+  const n = -(m10 * m22 - m12 * m20);
+  const a = m10 * m21 - m11 * m20;
+  const s = -(m01 * m22 - m02 * m21);
+  const c = m00 * m22 - m02 * m20;
+  const r = -(m00 * m21 - m01 * m20);
+  const hh = m01 * m12 - m02 * m11;
+  const l = -(m00 * m12 - m02 * m10);
+  const y = m00 * m11 - m01 * m10;
+  const det = m00 * e + m01 * n + m02 * a;
+  if (det === 0) throw new Error("Singular matrix");
+  const i00 = e / det, i01 = s / det, i02 = hh / det;
+  const i10 = n / det, i11 = c / det, i12 = l / det;
+  const i20 = a / det, i21 = r / det, i22 = y / det;
+  const sw = source.width;
+  const maxX = sw - 1;
+  const maxY = source.height - 1;
+  const from = source.data;
+  const out = new Uint8ClampedArray(width * height * 4);
+  for (let row = 0; row < height; row += 1) {
+    const bx = i01 * row + i02;
+    const by = i11 * row + i12;
+    const bw = i21 * row + i22;
+    for (let col = 0; col < width; col += 1) {
+      const q = 1 / (i20 * col + bw);
+      const px = (i00 * col + bx) * q;
+      const py = (i10 * col + by) * q;
+      const cx = px < 0 ? 0 : px > maxX ? maxX : px;
+      const cy = py < 0 ? 0 : py > maxY ? maxY : py;
+      const x0 = cx | 0;
+      const y0 = cy | 0;
+      const x1 = x0 < maxX ? x0 + 1 : x0;
+      const y1 = y0 < maxY ? y0 + 1 : y0;
+      const fx = cx - x0;
+      const fy = cy - y0;
+      const gx = 1 - fx;
+      const gy = 1 - fy;
+      const w00 = gx * gy;
+      const w10 = fx * gy;
+      const w01 = gx * fy;
+      const w11 = fx * fy;
+      const p00 = (y0 * sw + x0) << 2;
+      const p10 = (y0 * sw + x1) << 2;
+      const p01 = (y1 * sw + x0) << 2;
+      const p11 = (y1 * sw + x1) << 2;
+      const o = (row * width + col) << 2;
+      out[o] = (from[p00] * w00 + from[p10] * w10 + from[p01] * w01 + from[p11] * w11 + 0.5) | 0;
+      out[o + 1] = (from[p00 + 1] * w00 + from[p10 + 1] * w10 + from[p01 + 1] * w01 + from[p11 + 1] * w11 + 0.5) | 0;
+      out[o + 2] = (from[p00 + 2] * w00 + from[p10 + 2] * w10 + from[p01 + 2] * w01 + from[p11 + 2] * w11 + 0.5) | 0;
+      out[o + 3] = 255;
+    }
+  }
+  return { width, height, data: out };
+}
+
+/**
+ * The page the user sees for a rotation, at full resolution: the photo warped
+ * through Q′ at the confirmed outline's own size (so the page keeps its
+ * proportions), then its wedges painted. `filled` says whether any pixel was
+ * painted — what the PDF's record says of the page. Throws only where the
+ * warp itself would (a degenerate outline).
+ */
+export function renderDeskewed(
+  source: DeskewImage,
+  confirmed: DeskewQuad,
+  plan: DeskewPlan,
+): { image: DeskewImage; filled: boolean } {
+  const size = flatPageDims(confirmed);
+  const image = warpQuadAt(source, plan.quad, size.width, size.height);
+  let filled = false;
+  try {
+    filled = fillDeskewWedges(image, plan) > 0;
+  } catch {
+    // The rotation stands; the wedges keep scanic's clamp, and the record
+    // says nothing was painted.
+    filled = false;
+  }
+  return { image, filled };
+}
+
 /* ── The plan ─────────────────────────────────────────────────────────── */
 
 /**
@@ -1152,6 +1301,28 @@ export function curlEvidence(estimate: SkewEstimate, levelled: StraightnessStats
   else if (midOffset > CURL_HALF_OFFSET_DEG) why.push("halves-offset");
   if (bowLines >= CURL_BOW_MIN_LINES && bow > CURL_BOW_FRACTION) why.push("bow");
   return { evidence: why.length > 0, spread, midOffset, bow, bowLines, why };
+}
+
+/**
+ * Whether the evidence *measured* a flat page — no curl found, and enough
+ * lines to have looked for a bow. Absence of evidence from too few lines is
+ * not a flat page: the page view may only say "a folha, plana" on this.
+ * (It never gates the engine: {@link CurlEvidence.evidence} does.)
+ */
+export function measuredFlat(evidence: CurlEvidence): boolean {
+  return !evidence.evidence && evidence.bowLines >= CURL_BOW_MIN_LINES;
+}
+
+/**
+ * Whether a finished page's print is level enough to be *told* it was
+ * straightened: its own lean measured, and within the tolerance the bench
+ * counts as a complete fix. NaN (too little print to measure) is not level.
+ */
+export const LEVEL_CLAIM_MAX_DEG = 0.35;
+
+export function measuredLevel(image: DeskewImage): boolean {
+  const lean = residualLean(image);
+  return Number.isFinite(lean) && Math.abs(lean) <= LEVEL_CLAIM_MAX_DEG;
 }
 
 export interface DeskewPlan {
@@ -1846,10 +2017,11 @@ export function paintsAnything(plan: DeskewPlan): boolean {
 }
 
 /**
- * Paint the wedges of a deskewed page, in place — the whole-image form. The
- * canvas painter in `dewarp-stage.ts` reads and writes only the boxes
- * ({@link wedgeSampleBoxes}, {@link wedgePaintBoxes}) and calls the same
- * functions, so the two give the same pixels.
+ * Paint the wedges of a deskewed page, in place — the whole-image form, what
+ * {@link renderDeskewed} runs on the page it has just warped. A painter that
+ * cannot hold the whole page can read and write only the boxes
+ * ({@link wedgeSampleBoxes}, {@link wedgePaintBoxes}) with the same
+ * functions, and gets the same pixels.
  */
 export function fillDeskewWedges(image: DeskewImage, plan: DeskewPlan): number {
   if (!paintsAnything(plan)) return 0;
@@ -1971,6 +2143,13 @@ export function decideWedgePaint(plan: DeskewPlan, flat: DeskewImage, deskewed: 
 
 /** Print pushed out of the frame by the rotation, as a share of the glyph ink, above which it is refused. */
 export const JUDGE_MAX_CLIPPED_SHARE = 0.002;
+/**
+ * The same for line art — rules, a form's grid, a printed border, which the
+ * glyph sample leaves out. Looser, because a long rule's ends reaching a
+ * corner is a small share of a long component; a border the rotation cuts
+ * across a corner is more than this.
+ */
+export const JUDGE_MAX_RULES_CLIPPED_SHARE = 0.01;
 /** The rotated page's own lean may be at most this share of the rotation… */
 const JUDGE_RESIDUAL_SHARE = 0.5;
 /** …or this many degrees, whichever is larger. */
@@ -1983,13 +2162,15 @@ const JUDGE_BOW_FLOOR = 0.002;
 const JUDGE_MIN_LINE_SHARE = 0.6;
 const JUDGE_MIN_LINES = 3;
 
-export type DeskewRejection = "clips" | "not-level" | "bow-worse" | "lines-lost";
+export type DeskewRejection = "clips" | "unmeasured" | "not-level" | "bow-worse" | "lines-lost";
 
 export interface DeskewJudgement {
   ok: boolean;
   rejection: DeskewRejection | null;
   /** Glyph ink the rotation pushes out of the frame, as a share of all of it. */
   clippedShare: number;
+  /** The same for the line art (rules, grids, borders); 0 when the page has none. */
+  rulesClippedShare: number;
   /** The lean left on the rotated page, degrees (NaN: not measurable). */
   residualDeg: number;
   /** The engine's straightness measure on the original flat page and on the rotated one. */
@@ -2009,36 +2190,25 @@ export function judgeDeskew(input: {
   rotated: DeskewImage;
   deg: number;
   scale?: number;
-  sample: { xs: Float64Array; ys: Float64Array; width: number; height: number } | null;
+  sample: InkSample | null;
 }): DeskewJudgement {
   const { deg } = input;
   const scale = input.scale ?? 1;
-  let clippedShare = 0;
-  if (input.sample !== null) {
-    const { xs, ys, width, height } = input.sample;
-    const t = (deg * Math.PI) / 180;
-    const c = Math.cos(t);
-    const s = Math.sin(t);
-    const hx = (width - 1) / 2;
-    const hy = (height - 1) / 2;
-    let out = 0;
-    for (let i = 0; i < xs.length; i += 1) {
-      // Where this flat-page pixel lands in the rotated output: R(−θ)(f − c)/scale.
-      const ox = (c * xs[i] + s * ys[i]) / scale;
-      const oy = (-s * xs[i] + c * ys[i]) / scale;
-      if (ox < -hx || ox > hx || oy < -hy || oy > hy) out += 1;
-    }
-    clippedShare = xs.length === 0 ? 0 : out / xs.length;
-  }
+  const sample = input.sample;
+  const clippedShare = sample === null ? 0 : clippedShareOf(sample.xs, sample.ys, sample, deg, scale);
+  const rulesClippedShare =
+    sample?.rules === undefined ? 0 : clippedShareOf(sample.rules.xs, sample.rules.ys, sample, deg, scale);
   const residualDeg = residualLean(input.rotated);
   const flat = measureSurface(input.flat).straightness;
   const rotated = measureSurface(input.rotated).straightness;
   let rejection: DeskewRejection | null = null;
-  if (clippedShare > JUDGE_MAX_CLIPPED_SHARE) rejection = "clips";
-  else if (
-    Number.isFinite(residualDeg) &&
-    Math.abs(residualDeg) > Math.max(JUDGE_RESIDUAL_FLOOR_DEG, JUDGE_RESIDUAL_SHARE * Math.abs(deg))
-  ) {
+  if (clippedShare > JUDGE_MAX_CLIPPED_SHARE || rulesClippedShare > JUDGE_MAX_RULES_CLIPPED_SHARE) {
+    rejection = "clips";
+  } else if (!Number.isFinite(residualDeg)) {
+    // The estimate found lines on B₀; a rotated page on which its own vote
+    // can no longer be taken proves nothing about being level. Fail closed.
+    rejection = "unmeasured";
+  } else if (Math.abs(residualDeg) > Math.max(JUDGE_RESIDUAL_FLOOR_DEG, JUDGE_RESIDUAL_SHARE * Math.abs(deg))) {
     rejection = "not-level";
   } else if (
     flat.lineCount >= JUDGE_MIN_LINES &&
@@ -2052,7 +2222,33 @@ export function judgeDeskew(input: {
   ) {
     rejection = "lines-lost";
   }
-  return { ok: rejection === null, rejection, clippedShare, residualDeg, flat, rotated };
+  return { ok: rejection === null, rejection, clippedShare, rulesClippedShare, residualDeg, flat, rotated };
+}
+
+/**
+ * Share of the sampled ink pixels that the rotation pushes out of the frame:
+ * where a flat-page pixel lands in the rotated output is R(−θ)(f − c)/scale.
+ */
+function clippedShareOf(
+  xs: Float64Array,
+  ys: Float64Array,
+  frame: { width: number; height: number },
+  deg: number,
+  scale: number,
+): number {
+  if (xs.length === 0) return 0;
+  const t = (deg * Math.PI) / 180;
+  const c = Math.cos(t);
+  const s = Math.sin(t);
+  const hx = (frame.width - 1) / 2;
+  const hy = (frame.height - 1) / 2;
+  let out = 0;
+  for (let i = 0; i < xs.length; i += 1) {
+    const ox = (c * xs[i] + s * ys[i]) / scale;
+    const oy = (-s * xs[i] + c * ys[i]) / scale;
+    if (ox < -hx || ox > hx || oy < -hy || oy > hy) out += 1;
+  }
+  return out / xs.length;
 }
 
 /* ── The step, end to end ─────────────────────────────────────────────── */
@@ -2093,6 +2289,13 @@ export interface StraightenResult {
    * never decides whether the engine runs.
    */
   level: CurlEvidence | null;
+  /**
+   * The step could not finish: B′ would not render, or something threw on
+   * the way. `plan` is null, but *not* because a rotation was judged
+   * unneeded — a caller must not remember this as "no rotation" for these
+   * pixels (a download, a readback, memory: the next tap may well succeed).
+   */
+  failed?: true;
   /** Wall time of the whole step, ms. */
   ms: number;
 }
@@ -2112,8 +2315,13 @@ function levelCurl(flat: DeskewImage, estimate: SkewEstimate): CurlEvidence | nu
 
 /**
  * The deskew, planned and judged, from the small flat page the stage already
- * has. Never throws: every failure is "no rotation", and then the engine
- * runs on Q exactly as it did before this step existed.
+ * has. Never throws: every failure is "no rotation" *for this run*, flagged
+ * `failed` so it is never remembered as the page's answer, and then the
+ * engine runs on Q exactly as it did before this step existed.
+ *
+ * `renderSmall` must render the other outline at B₀'s own size (the stage
+ * and the bench both pass `flat`'s width and height), so B′ and B₀ differ by
+ * the rotation alone — see {@link warpQuadAt}.
  */
 export async function planStraighten(input: StraightenInput): Promise<StraightenResult> {
   const now = input.now ?? (() => Date.now());
@@ -2135,7 +2343,7 @@ export async function planStraighten(input: StraightenInput): Promise<Straighten
   try {
     detailed = estimateDetailed(input.flat);
   } catch {
-    return done(abstain("too-small"));
+    return done(abstain("too-small"), { failed: true });
   }
   const { estimate, sample } = detailed;
   if (!estimate.act) {
@@ -2153,7 +2361,7 @@ export async function planStraighten(input: StraightenInput): Promise<Straighten
       mode,
     });
     const rotated = await input.renderSmall(geometry.quad);
-    if (rotated === null) return done(estimate);
+    if (rotated === null) return done(estimate, { failed: true });
     let plan: DeskewPlan = {
       policyVersion: DESKEW_POLICY_VERSION,
       deg: estimate.deg,
@@ -2177,6 +2385,6 @@ export async function planStraighten(input: StraightenInput): Promise<Straighten
     plan = { ...plan, curl: curlEvidence(estimate, judgement.rotated) };
     return done(estimate, { plan, judgement, runEngine: plan.curl.evidence });
   } catch {
-    return done(estimate);
+    return done(estimate, { failed: true });
   }
 }

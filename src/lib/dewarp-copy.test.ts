@@ -14,6 +14,7 @@ const OUTCOMES = [
   "curl",
   "both",
   "tilt-only",
+  "tilt-retry",
   "nothing",
   "declined",
   "unverified",
@@ -69,3 +70,17 @@ test("a re-tap is answered with what would change the answer", () => {
   assert.match(APP_COPY.pt.preview.dewarp.retapHint, /cantos|refaça/);
   assert.match(APP_COPY.en.preview.dewarp.retapHint, /corners|retake/);
 });
+
+test("a tilt corrected while the curve could not be checked says so, and how to try the curve again", () => {
+  const pt = APP_COPY.pt.preview.dewarp;
+  assert.match(pt.outcomes["tilt-retry"], /torto/);
+  assert.match(pt.outcomes["tilt-retry"], /curva/);
+  // Not "ficou como estava": the engine may never have run.
+  assert.doesNotMatch(pt.outcomes["tilt-retry"], /como estava/);
+  assert.match(pt.retryCurlHint, /desligue e ligue/);
+  const en = APP_COPY.en.preview.dewarp;
+  assert.match(en.outcomes["tilt-retry"], /tilted/);
+  assert.doesNotMatch(en.outcomes["tilt-retry"], /as it was/);
+  assert.match(en.retryCurlHint, /off and on/);
+});
+

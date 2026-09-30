@@ -184,6 +184,18 @@ export interface RenderedTransforms {
    * no rotation.
    */
   alreadyStraight?: true;
+  /**
+   * The rotation's corner wedges were painted with paper the photo does not
+   * have — pixels invented, which the PDF's record says. Only with
+   * {@link deskewDeg} on the flat geometry.
+   */
+  deskewFilled?: true;
+  /**
+   * The tap's deskew could not finish in this render (its code, a readback,
+   * a render failed): the print's tilt was not checked, and a retry may
+   * succeed where this did not. Never set with {@link deskewDeg}.
+   */
+  deskewFailed?: true;
 }
 
 /** How far along a running curved-page correction is, for the page view. */
@@ -523,6 +535,24 @@ export function effectiveFinish(page: ScanPage): PageFinish {
 }
 
 /**
+ * Whether "sem melhorias" can show this page with the improvement left out
+ * and *only* the improvement: the comparison is rendered through the
+ * confirmed outline's homography with no rotation, so any page whose pixels
+ * came out of another geometry — the engine's surface, or the outline turned
+ * by the deskew (rotated, resized, corners painted) — would put two different
+ * documents either side of the flip. Nor is there anything to compare on a
+ * page whose finish is already `original`.
+ */
+export function comparableRendering(rendered: RenderedTransforms | null): boolean {
+  return (
+    rendered !== null &&
+    rendered.finish !== "original" &&
+    !rendered.dewarped &&
+    rendered.deskewDeg === undefined
+  );
+}
+
+/**
  * What the page view says about a correction that did not happen — six
  * sentences for twenty-odd engine reasons, because the reader needs the
  * *consequence*, not the diagnosis.
@@ -566,8 +596,14 @@ export type StraightenOutcome =
   | "curl"
   /** The print was tilted and curled, and the engine corrected both. */
   | "both"
-  /** The tilt was straightened; the curl was left as it was (the engine declined or failed). */
+  /** The tilt was straightened; the curl was left as it was (the engine declined). */
   | "tilt-only"
+  /**
+   * The tilt was straightened; the curl could not be checked this time (the
+   * engine's download or run failed) — worth a retry, and the switch is on,
+   * so the retry is off and on again.
+   */
+  | "tilt-retry"
   | DewarpOutcome;
 
 const DEWARP_OUTCOMES: Record<string, DewarpOutcome> = {
@@ -638,6 +674,10 @@ export function dewarpOutcome(
   const reason = dewarpFallbackReason(page, mode);
   if (reason === null) return null;
   const outcome = DEWARP_OUTCOMES[reason] ?? "transient";
+  // The engine's answer may be final for these pixels, but the tilt was never
+  // checked: the tap as a whole is worth another go, and its retry must not
+  // be refused as "the same answer".
+  if (page.rendered?.deskewFailed === true && dewarpOutcomeIsFinal(outcome)) return "transient";
   // A limit of the engine on a page that, measured, needed nothing: the
   // page's own fact is the one worth saying. A retryable failure still says
   // it is one — the retry is the useful half there.
@@ -662,6 +702,8 @@ export function straightenOutcome(
   if (rendered === null || rendered.revision !== page.revision) return null;
   if (rendered.dewarpEngineMode !== mode) return null;
   if (rendered.dewarped) {
+    // Only when the engine's surface was measured level (`dewarp-stage.ts`):
+    // it carries no rotation of its own.
     if (rendered.deskewDeg !== undefined) return "both";
     // The engine changed a page the deskew measured level and flat: "we took
     // the curve out" would claim a curl that was measured absent, so the card
@@ -670,9 +712,31 @@ export function straightenOutcome(
   }
   if (rendered.deskewDeg !== undefined) {
     const reason = rendered.dewarpFallbackReason;
-    return reason === undefined || reason === "curl-absent" ? "tilt" : "tilt-only";
+    if (reason === undefined || reason === "curl-absent") return "tilt";
+    const curl = DEWARP_OUTCOMES[reason] ?? "transient";
+    return dewarpOutcomeIsFinal(curl) ? "tilt-only" : "tilt-retry";
   }
   return dewarpOutcome(page, mode);
+}
+
+/**
+ * Whether a tap's outcome is worth another go — the warn tone, the status
+ * line's sentence and the card's "try again". Only a failure of the machinery
+ * (`download`, `transient`) or a curve that could not be checked under a
+ * straightened tilt (`tilt-retry`).
+ */
+export function straightenOutcomeRetryable(outcome: StraightenOutcome | null): boolean {
+  return outcome === "download" || outcome === "transient" || outcome === "tilt-retry";
+}
+
+/**
+ * Whether the card should come forward for this re-tap answer: a new tap
+ * (`current`) since the last one the card saw (`seen`). The card starts out
+ * having seen whatever was current when it mounted, so coming back to a page
+ * does not replay a tap made before.
+ */
+export function retapPulseDue(seen: number | null, current: number | null): boolean {
+  return current !== null && current !== seen;
 }
 
 /**
@@ -688,7 +752,7 @@ export function straightenOutcomeCode(
   if (outcome === null || outcome === "tilt" || outcome === "curl" || outcome === "both") {
     return null;
   }
-  if (outcome === "tilt-only") {
+  if (outcome === "tilt-only" || outcome === "tilt-retry") {
     const reason = curlFallbackReason(page, mode);
     return reason === null ? null : dewarpReasonCode(reason);
   }
@@ -1377,6 +1441,10 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
             dewarpEngineMode: mode,
             ...(reason === undefined ? {} : { dewarpFallbackReason: reason }),
             ...(deskew === null || reason === "cancelled" ? {} : { deskewDeg: deskew.plan.deg }),
+            ...(deskew !== null && reason !== "cancelled" && rendered.deskewFilled === true
+              ? { deskewFilled: true as const }
+              : {}),
+            ...(rendered.deskewFailed === true && reason !== "cancelled" ? { deskewFailed: true as const } : {}),
             ...(alreadyStraight ? { alreadyStraight: true as const } : {}),
           },
           // Any fallback hands the switch back: the toggle reflects the
@@ -1921,6 +1989,15 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
             finish: rendered.finish,
             rotation: rendered.rotation,
             dewarped: rendered.dewarped,
+            // A rotation the pixels carry (the flat geometry only: an engine
+            // surface is never rotated, and "dewarped" already says it was
+            // remade), and whether paper was painted into its corners.
+            ...(rendered.deskewDeg !== undefined && !rendered.dewarped
+              ? {
+                  deskewDeg: rendered.deskewDeg,
+                  ...(rendered.deskewFilled === true ? { filled: true } : {}),
+                }
+              : {}),
           },
         });
       }

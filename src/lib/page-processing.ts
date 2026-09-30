@@ -53,8 +53,8 @@
 import { bakeRotation, htmlSurface, scaleSurface } from "@/lib/canvas-surface";
 import {
   dewarpAvailable,
-  paintDeskewWedges,
   planDeskewStage,
+  renderDeskewedPage,
   replayDewarpStage,
   runDewarpStage,
   type AppliedDeskew,
@@ -203,6 +203,15 @@ export interface RenderedPage {
    * there was nothing to straighten. Measured by this render only.
    */
   alreadyStraight?: true;
+  /**
+   * The tap's deskew could not finish in this render — its planning failed,
+   * or the rotated page could not be made — so these pixels carry no
+   * rotation and `deskew` is absent. Never remembered as "no rotation": the
+   * next render asks again, and the page view says a retry may help.
+   */
+  deskewFailed?: true;
+  /** The rotated page's wedges were painted with invented paper (for the PDF's record). */
+  deskewFilled?: true;
   rotation: PageRotation;
 }
 
@@ -322,6 +331,11 @@ export interface DewarpMemo {
   deskew?: AppliedDeskew | null;
   /** The stage found the print level and the page flat (see {@link RenderedPage.alreadyStraight}). */
   alreadyStraight?: boolean;
+  /**
+   * The deskew was attempted in this render and could not finish (see
+   * {@link RenderedPage.deskewFailed}): not planned again within the render.
+   */
+  deskewFailed?: boolean;
 }
 
 /** A fresh memo. One per logical render. */
@@ -337,6 +351,7 @@ export interface DewarpLane<Surface> {
     replay: DewarpReplay | null;
     deskew?: AppliedDeskew | null;
     alreadyStraight?: true;
+    deskewFailed?: true;
   }>;
   resample(accepted: DewarpReplay): Promise<Surface | null>;
 }
@@ -365,6 +380,7 @@ export async function curvedSurface<Surface>(
   const attempt = await lane.infer();
   if (attempt.deskew !== undefined) memo.deskew = attempt.deskew;
   if (attempt.alreadyStraight === true) memo.alreadyStraight = true;
+  if (attempt.deskewFailed === true) memo.deskewFailed = true;
   if (attempt.canvas === null) {
     memo.declined = attempt.reason ?? "render-failed";
     return { canvas: null, reason: memo.declined };
@@ -434,6 +450,10 @@ interface Geometry {
   deskew?: AppliedDeskew | null;
   /** See {@link RenderedPage.alreadyStraight}. */
   alreadyStraight?: true;
+  /** See {@link RenderedPage.deskewFailed}. */
+  deskewFailed?: true;
+  /** See {@link RenderedPage.deskewFilled}. */
+  deskewFilled?: true;
 }
 
 /**
@@ -502,15 +522,17 @@ async function geometry(
     // that would not load) plans here, on its own. A cancel is the user
     // taking the tap back: no rotation either.
     if (dewarpFallbackReason !== "cancelled") {
-      if (memo.deskew === undefined) {
-        memo.deskew = await planDeskewStage(canonical, corners, requireAssets(request));
+      if (memo.deskew === undefined && memo.deskewFailed !== true) {
+        const planned = await planDeskewStage(canonical, corners, requireAssets(request));
+        if (planned === "failed") memo.deskewFailed = true;
+        else memo.deskew = planned;
       }
       deskew = memo.deskew ?? null;
     }
   }
 
   const decoded = await atStageAsync("decode", () => decodeCanonical(canonical));
-  const flat = {
+  const flat: Omit<Geometry, "canvas" | "warped"> = {
     dewarped: false,
     ...(dewarpFallbackReason === undefined ? {} : { dewarpFallbackReason }),
     // Planned and none: said, so the store can remember it.
@@ -521,25 +543,44 @@ async function geometry(
     memo.alreadyStraight === true
       ? { alreadyStraight: true as const }
       : {}),
+    // Attempted and unfinished: said, so the store never remembers it as none.
+    ...(ask !== null && dewarpFallbackReason !== "cancelled" && memo.deskew === undefined && memo.deskewFailed === true
+      ? { deskewFailed: true as const }
+      : {}),
   };
   if (corners === null || identity) return { canvas: decoded, warped: false, ...flat };
+  let record = flat;
+  if (deskew !== null) {
+    // The rotation composed with the confirmed outline: one warp, one
+    // resample, at the confirmed outline's size, wedges painted.
+    const straightened = await renderDeskewedPage(decoded, corners, deskew);
+    if (straightened !== null) {
+      releaseCanvas(decoded);
+      return {
+        canvas: straightened.canvas,
+        warped: true,
+        ...flat,
+        deskew,
+        ...(straightened.filled ? { deskewFilled: true as const } : {}),
+      };
+    }
+    // The rotated page could not be made: the confirmed outline, plainly —
+    // and the record says the straightening did not happen and may be tried
+    // again, rather than claiming a rotation these pixels lack.
+    record = { ...flat, deskewFailed: true };
+  }
   let warped: HTMLCanvasElement | null;
   try {
-    // The rotation composed with the confirmed outline: one warp, one resample.
-    warped = await warpToCanvas(decoded, deskew?.corners ?? corners, requireAssets(request));
+    warped = await warpToCanvas(decoded, corners, requireAssets(request));
   } catch (error) {
     // The ladder may retry this page flat, which decodes again — so the canvas
     // this attempt allocated goes back now rather than at the next GC.
     releaseCanvas(decoded);
     throw labelled("warp", error);
   }
-  if (warped === null) return { canvas: decoded, warped: false, ...flat };
+  if (warped === null) return { canvas: decoded, warped: false, ...record };
   releaseCanvas(decoded);
-  if (deskew !== null) {
-    await paintDeskewWedges(warped, deskew.plan);
-    return { canvas: warped, warped: true, ...flat, deskew };
-  }
-  return { canvas: warped, warped: true, ...flat };
+  return { canvas: warped, warped: true, ...record };
 }
 
 async function renderOnce(
@@ -549,8 +590,17 @@ async function renderOnce(
   remote: boolean,
   memo: DewarpMemo,
 ): Promise<RenderedPage> {
-  const { canvas: source, warped, dewarped, dewarpFallbackReason, dewarpReplay, deskew, alreadyStraight } =
-    await geometry(request, identity, memo);
+  const {
+    canvas: source,
+    warped,
+    dewarped,
+    dewarpFallbackReason,
+    dewarpReplay,
+    deskew,
+    alreadyStraight,
+    deskewFailed,
+    deskewFilled,
+  } = await geometry(request, identity, memo);
   const job: PixelJob = {
     finish,
     rotation: request.rotation,
@@ -586,6 +636,8 @@ async function renderOnce(
     ...(dewarpReplay === undefined ? {} : { dewarpReplay }),
     ...(deskew === undefined ? {} : { deskew }),
     ...(alreadyStraight === undefined ? {} : { alreadyStraight }),
+    ...(deskewFailed === undefined ? {} : { deskewFailed }),
+    ...(deskewFilled === undefined ? {} : { deskewFilled }),
     rotation: request.rotation,
   };
 }
