@@ -37,6 +37,7 @@ import { LangProvider } from "./components/I18n";
 import { createExitGate, type ExitGate } from "./lib/exit-gate";
 import { SHELL_ROOT_STYLE } from "./lib/shell-theme";
 import { autoCaptureOffered, pickCaptureLayout } from "./lib/capture-layout";
+import { diagnosticsSinkFor, type DiagnosticsSink } from "./lib/diagnostics-events";
 
 const DEFAULT_MAX_PAGES = 20;
 
@@ -52,6 +53,7 @@ export function ScanFlow(props: ScanFlowProps) {
     onCancel,
     onPagesChange,
     onEvent,
+    onDiagnostics,
     className,
     // Left `undefined` when omitted: omitted and `false` mean different things
     // (`autoCaptureOffered`).
@@ -72,11 +74,26 @@ export function ScanFlow(props: ScanFlowProps) {
    * The ref is updated during render rather than in an effect: an event can be
    * emitted from a layout effect deeper in the tree, before ours would have run.
    */
-  const handlers = useRef({ onComplete, onCancel, onPagesChange, onEvent });
-  handlers.current = { onComplete, onCancel, onPagesChange, onEvent };
+  const handlers = useRef({ onComplete, onCancel, onPagesChange, onEvent, onDiagnostics });
+  handlers.current = { onComplete, onCancel, onPagesChange, onEvent, onDiagnostics };
+
+  /**
+   * The diagnostics stream (`onDiagnostics`, experimental): a sink only while
+   * the host passes a callback — without one every call site meets `null`
+   * and builds nothing. Created once per instance and per presence of the
+   * callback, never per render of the host.
+   */
+  const diagnosticsWanted = onDiagnostics !== undefined;
+  const diagnosticsSink = useMemo<DiagnosticsSink | null>(
+    () => diagnosticsSinkFor(diagnosticsWanted ? (event) => handlers.current.onDiagnostics?.(event) : undefined),
+    [diagnosticsWanted]
+  );
+  const sinkRef = useRef(diagnosticsSink);
+  sinkRef.current = diagnosticsSink;
 
   const emit = useCallback((event: ScanEvent) => {
     handlers.current.onEvent?.(event);
+    sinkRef.current?.emit({ type: "flow", event });
   }, []);
 
   /**
@@ -170,11 +187,33 @@ export function ScanFlow(props: ScanFlowProps) {
       },
       captureLayout,
       diagnostics: experimentalDiagnostics === true,
+      diagnosticsSink,
       emit,
       reportError,
     }),
-    [urls, lang, maxPages, maxBytes, fileNameProp, intake?.camera, intake?.images, intake?.pdf, experimentalAutoCapture, experimentalDiagnostics, captureLayout, emit]
+    [urls, lang, maxPages, maxBytes, fileNameProp, intake?.camera, intake?.images, intake?.pdf, experimentalAutoCapture, experimentalDiagnostics, diagnosticsSink, captureLayout, emit]
   );
+
+  // The session's facts, once, and the page going out of view and back.
+  useEffect(() => {
+    if (diagnosticsSink === null) return;
+    diagnosticsSink.emit({
+      type: "session-start",
+      layout: captureLayout,
+      autoOffered: autoCaptureOffered(captureLayout, experimentalAutoCapture),
+      lang,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      dpr: window.devicePixelRatio,
+      safeArea: readSafeArea(),
+      vibrate: typeof navigator.vibrate === "function",
+    });
+    const onVisibility = () =>
+      diagnosticsSink.emit({ type: "visibility", state: document.visibilityState === "hidden" ? "hidden" : "visible" });
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+    // Once per sink: the session's opening facts, not a log of prop changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [diagnosticsSink]);
 
   const handleStep = useCallback((step: ScanStep) => emit({ name: "step", step }), [emit]);
 
@@ -207,4 +246,22 @@ export function ScanFlow(props: ScanFlowProps) {
       </LangProvider>
     </div>
   );
+}
+
+/** The safe-area insets in CSS pixels, read once off a throwaway element. */
+function readSafeArea(): { top: number; right: number; bottom: number; left: number } {
+  const probe = document.createElement("div");
+  probe.style.cssText =
+    "position:fixed;visibility:hidden;pointer-events:none;" +
+    "padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)";
+  document.body.appendChild(probe);
+  const style = getComputedStyle(probe);
+  const inset = {
+    top: parseFloat(style.paddingTop) || 0,
+    right: parseFloat(style.paddingRight) || 0,
+    bottom: parseFloat(style.paddingBottom) || 0,
+    left: parseFloat(style.paddingLeft) || 0,
+  };
+  probe.remove();
+  return inset;
 }

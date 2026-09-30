@@ -19,6 +19,7 @@ test("the diagnostics HUD says what the loop is doing, in numbers only", () => {
       ready: true,
       autoArmed: true,
       blocked: "auto: countdown 40 %",
+      passes: 12,
     },
     { torch: false, autoOffered: true, autoOn: true, autoFires: 2, still: { width: 2250, height: 4000, attention: "corner-outside" } },
     false,

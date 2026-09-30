@@ -175,6 +175,21 @@ export interface ScanFlowProps {
   /** Every internal event. Numbers and enums only. */
   onEvent?(event: ScanEvent): void;
 
+  /**
+   * **Experimental.** A field-test instrument: what the capture loop is doing
+   * on this device, as {@link ScanDiagnosticsEvent}s — timings, counts,
+   * enums, sizes and normalised geometry. Never pixels, thumbnails, crops,
+   * image hashes, text read from a page or file names.
+   *
+   * The library only calls this. It never sends, stores or buffers an event:
+   * whether one goes anywhere, and where, is the host's decision — and so is
+   * the lawful basis for it (LGPD) when a person is holding a medical
+   * document in front of the camera. Absent (the default), nothing is built
+   * and nothing is measured for it. Pass samples are limited to two a second.
+   * Its shape may change in any release; `v` says which one an event has.
+   */
+  onDiagnostics?(event: ScanDiagnosticsEvent): void;
+
   /** Applied to the library's root element, for layout only. */
   className?: string;
 
@@ -262,3 +277,126 @@ export type ScanCaptureLayout =
   | "onehand"
   | "collapse"
   | "default";
+
+/** The schema version every {@link ScanDiagnosticsEvent} carries as `v`. */
+export type ScanDiagnosticsVersion = 1;
+
+/** A size in pixels. */
+export interface ScanDiagnosticsSize {
+  width: number;
+  height: number;
+}
+
+/**
+ * One diagnostics event (`onDiagnostics`, experimental). Every event has the
+ * schema version `v`, a sequence number `seq` (per mounted flow, from 0) and
+ * `t`, milliseconds since the flow mounted. The rest depends on `type`.
+ * Numbers, booleans, enums, library-made reason strings and fractions of a
+ * frame only — see {@link ScanFlowProps.onDiagnostics}.
+ */
+export type ScanDiagnosticsEvent = { v: ScanDiagnosticsVersion; seq: number; t: number } & ScanDiagnosticsPayload;
+
+/** {@link ScanDiagnosticsEvent} without its envelope. */
+export type ScanDiagnosticsPayload =
+  /** The flow mounted. No user agent: a host that wants one has it already. */
+  | {
+      type: "session-start";
+      layout: string;
+      autoOffered: boolean;
+      lang: ScanLang;
+      /** CSS pixels. */
+      viewport: ScanDiagnosticsSize;
+      dpr: number;
+      /** CSS pixels (`env(safe-area-inset-*)`). */
+      safeArea: { top: number; right: number; bottom: number; left: number };
+      vibrate: boolean;
+    }
+  /** The camera came up for a capture screen (`live`), or could not (`unavailable`), or its track ended (`lost`). */
+  | {
+      type: "camera";
+      state: "live" | "unavailable" | "lost";
+      /** From asking for the camera to a playing preview. */
+      startMs: number | null;
+      stream: ScanDiagnosticsSize | null;
+      torch: boolean;
+      fit: string;
+    }
+  /** The detection lane was decided or moved; `reason` is `worker` or why not. */
+  | { type: "lane"; lane: "worker" | "main" | null; reason: string | null }
+  /** The live loop, sampled at most twice a second. */
+  | {
+      type: "pass";
+      detector: "classical" | "ml";
+      detectMs: number | null;
+      detectP50: number | null;
+      /** The loop's interval between passes (its cadence). */
+      intervalMs: number;
+      frameAgeMs: number | null;
+      /** Passes since the previous sample. */
+      passes: number;
+      found: boolean;
+      locked: boolean;
+      ready: boolean;
+      autoArmed: boolean;
+      /** The first thing keeping the ready cue off or auto-capture from firing (the HUD's "why:"). */
+      why: string | null;
+    }
+  /** The part of the frame the person can see changed (fractions of the frame). */
+  | { type: "visible"; x: number; y: number; width: number; height: number; fit: string }
+  /** A hint appeared, or went away after `ms`. */
+  | { type: "hint"; id: string; shown: boolean; ms: number | null }
+  /** The ready cue came on, or went off after `ms` (with why, when it is known). */
+  | { type: "ready"; on: boolean; ms: number | null; why: string | null }
+  /**
+   * Auto-capture: its countdown started, was cancelled (`reason`; `ms` into
+   * it), fired (`ms` since the page was steady and ready), or re-armed for
+   * another page.
+   */
+  | { type: "auto"; phase: "countdown" | "cancel" | "fire" | "rearmed"; ms: number | null; reason: string | null }
+  /** A photo was taken and handed to the confirm screen. */
+  | {
+      type: "capture";
+      trigger: "manual" | "auto";
+      /** What was tapped: the shutter or the frame; null for auto. */
+      tap: "shutter" | "frame" | null;
+      page: number;
+      /** From the tap to the confirm screen's hand-off. */
+      ms: number;
+      /** The camera's still photo, when one arrived. */
+      still: ScanDiagnosticsSize | null;
+      /** What became the page: the still photo or the preview frame. */
+      source: "still" | "preview";
+      frame: ScanDiagnosticsSize;
+      cornersFrom: "live" | "detected" | "fallback" | null;
+      registration: { fovScale: number; shiftX: number; shiftY: number; score: number; overlap: number } | null;
+      /** Why the photo's own check asked for a closer look, or null. */
+      flag: "no-page" | "corner-outside" | "moved" | "unverified" | null;
+    }
+  /**
+   * The confirm-corners screen was answered: kept as seeded (`accepted`),
+   * corners moved (`adjusted`, the largest move as % of the photo's
+   * diagonal), `retake`, or the whole photo.
+   */
+  | {
+      type: "confirm";
+      page: number;
+      result: "accepted" | "adjusted" | "retake" | "whole-photo";
+      maxMovePct: number | null;
+      /** From the screen opening to the answer. */
+      ms: number;
+      seededFrom: "capture" | "detected" | "editor-default" | null;
+      flag: "no-page" | "corner-outside" | "moved" | "unverified" | null;
+    }
+  /** The page was hidden or shown (locked phone, app switch). */
+  | { type: "visibility"; state: "hidden" | "visible" }
+  /** The first live pass after the page came back into view. */
+  | { type: "camera-resume"; ms: number }
+  /** The live loop stopped answering (`start`, after `ms` without a pass) and came back (`end`, `ms` in all). */
+  | { type: "stall"; phase: "start" | "end"; ms: number }
+  /** A page was removed, or replaced by a retake, after it was taken (1-based). */
+  | { type: "page"; action: "removed" | "retaken"; page: number }
+  | { type: "torch"; on: boolean }
+  /** The MANUAL · AUTOMÁTICO toggle changed. */
+  | { type: "auto-toggle"; on: boolean }
+  /** A {@link ScanEvent}, as `onEvent` receives it (page removed or retaken, steps, errors…). */
+  | { type: "flow"; event: ScanEvent };

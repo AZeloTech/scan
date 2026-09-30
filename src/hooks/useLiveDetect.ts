@@ -153,6 +153,7 @@ import {
 import { useAssetUrls } from "@/hooks/useScanRuntime";
 import { CAPTURE_GRACE_MS } from "@/lib/still-capture";
 import { probe, probing } from "@/lib/probe";
+import type { DiagnosticsSink } from "@/lib/diagnostics-events";
 import { ringOffset } from "@/lib/capture-layout";
 import {
   clearArea,
@@ -795,6 +796,11 @@ export interface UseLiveDetectOptions {
    * own box ({@link LiveDetect.videoBox}).
    */
   fit?: FitPolicy;
+  /**
+   * The host's diagnostics stream (`onDiagnostics`), or null: the ready cue
+   * and auto-capture report their transitions to it. Null costs a check.
+   */
+  diagnosticsSink?: DiagnosticsSink | null;
 }
 
 /** The video element's box and `object-position` for a fit other than `cover` (stage pixels). */
@@ -826,6 +832,8 @@ export interface LiveDiagnostics {
   autoArmed: boolean;
   /** The first thing keeping the ready cue off or auto-capture from firing, or null. */
   blocked: string | null;
+  /** Passes answered since this hook mounted (a stalled loop stops counting). */
+  passes: number;
 }
 
 /**
@@ -981,6 +989,7 @@ export function useLiveDetect({
   autoCapture = false,
   onAutoCapture,
   fit = "cover",
+  diagnosticsSink = null,
 }: UseLiveDetectOptions): LiveDetect {
   /**
    * Where the corner-detection model lives. Read from the flow's runtime rather
@@ -1022,6 +1031,18 @@ export function useLiveDetect({
   const autoCaptureRef = React.useRef(autoCapture);
   const onAutoCaptureRef = React.useRef(onAutoCapture);
   onAutoCaptureRef.current = onAutoCapture;
+  const diagRef = React.useRef(diagnosticsSink);
+  diagRef.current = diagnosticsSink;
+  /**
+   * The diagnostics stream's memory of the transitions it reports: when the
+   * ready cue came on, when auto-capture's countdown started, whether it was
+   * armed. Kept whether or not a stream is attached — three fields.
+   */
+  const diagStateRef = React.useRef<{ readyAt: number | null; countdownAt: number | null; armed: boolean }>({
+    readyAt: null,
+    countdownAt: null,
+    armed: true,
+  });
   React.useEffect(() => {
     // Switched on: count from now, whatever was ready before.
     if (autoCapture && !autoCaptureRef.current) guidanceRef.current.auto.enable(performance.now());
@@ -1074,6 +1095,7 @@ export function useLiveDetect({
   fitRef.current = fit;
   /** The newest passes' detector times, for the HUD's median. */
   const passTimesRef = React.useRef<number[]>([]);
+  const passCountRef = React.useRef(0);
   const frameAgeRef = React.useRef<number | null>(null);
 
   const [available, setAvailable] = React.useState(true);
@@ -1288,6 +1310,12 @@ export function useLiveDetect({
     // This page is taken, whoever took it: auto-capture waits for another.
     const sheet = runtime.locked && runtime.shown !== null ? toVisible(runtime.shown, visibleRef.current) : null;
     guidanceRef.current.auto.took(performance.now(), sheet);
+    const memo = diagStateRef.current;
+    if (memo.countdownAt !== null) {
+      const now = performance.now();
+      diagRef.current?.emit({ type: "auto", phase: "cancel", ms: now - memo.countdownAt, reason: "manual capture" });
+      memo.countdownAt = null;
+    }
     if (sheet !== null) runtime.firedLuma = runtime.motionHistory[runtime.motionHistory.length - 1]?.luma ?? null;
   }, []);
 
@@ -1841,6 +1869,7 @@ export function useLiveDetect({
       const times = passTimesRef.current;
       times.push(outcome.detectMs);
       if (times.length > 31) times.shift();
+      passCountRef.current += 1;
       frameAgeRef.current = performance.now() - outcome.frameAt;
       const keepGoing = adapt(outcome.costMs, outcome.detectMs, profile);
       reportPass(source, false, outcome.detection, outcome, elapsed, accepted, motionScore, false, holdBroken, rejected);
@@ -2524,11 +2553,50 @@ export function useLiveDetect({
         announcedHint = shown;
         setHint(shown);
       }
+      const diag = diagRef.current;
+      if (diag !== null) noteDiagnostics(diag, now, isReady, fire);
       if (isReady !== announcedReady) {
         announcedReady = isReady;
         setReady(isReady);
       }
       return fire;
+    }
+
+    /**
+     * The ready cue's and auto-capture's transitions, for the diagnostics
+     * stream: read from the state this pass of the guidance just left.
+     */
+    function noteDiagnostics(diag: DiagnosticsSink, now: number, isReady: boolean, fire: boolean): void {
+      const memo = diagStateRef.current;
+      const guidance = guidanceRef.current;
+      if (isReady !== announcedReady) {
+        diag.emit({
+          type: "ready",
+          on: isReady,
+          ms: isReady || memo.readyAt === null ? null : now - memo.readyAt,
+          why: isReady ? null : runtime.blockWhy,
+        });
+        memo.readyAt = isReady ? now : null;
+      }
+      const armed = guidance.auto.armed;
+      if (armed && !memo.armed && autoCaptureRef.current) diag.emit({ type: "auto", phase: "rearmed", ms: null, reason: null });
+      memo.armed = armed;
+      if (fire) {
+        const since = guidance.ready.onSince;
+        diag.emit({ type: "auto", phase: "fire", ms: since === null ? null : now - since, reason: null });
+        memo.countdownAt = null;
+      } else if (runtime.countdown !== null && memo.countdownAt === null) {
+        memo.countdownAt = now;
+        diag.emit({ type: "auto", phase: "countdown", ms: null, reason: null });
+      } else if (runtime.countdown === null && memo.countdownAt !== null) {
+        diag.emit({
+          type: "auto",
+          phase: "cancel",
+          ms: now - memo.countdownAt,
+          reason: autoCaptureRef.current ? (runtime.blockWhy ?? "ready lost") : "switched off",
+        });
+        memo.countdownAt = null;
+      }
     }
 
     /**
@@ -2728,6 +2796,7 @@ export function useLiveDetect({
       ready: guidanceRef.current.ready.onSince !== null,
       autoArmed: guidanceRef.current.auto.armed,
       blocked: runtime.blockWhy,
+      passes: passCountRef.current,
     };
   }, []);
 

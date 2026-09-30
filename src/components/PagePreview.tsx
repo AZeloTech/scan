@@ -4,6 +4,7 @@ import * as React from "react";
 import clsx from "clsx";
 import { useDocumentName, useStore } from "@/hooks/useScanStore";
 import { useDialogChrome } from "@/hooks/useDialogChrome";
+import { useScanRuntime } from "@/hooks/useScanRuntime";
 import { usePageTurn } from "@/hooks/usePageTurn";
 import { usePageView } from "@/hooks/usePageView";
 import { useRotatedFit } from "@/hooks/useRotatedFit";
@@ -120,6 +121,7 @@ export function PagePreview({
   const copy = useCopy();
   const { lang } = useLang();
   const store = useStore();
+  const { diagnosticsSink } = useScanRuntime();
   const documentName = useDocumentName();
   const backdropRef = React.useRef<HTMLDivElement | null>(null);
   const panelRef = React.useRef<HTMLDivElement | null>(null);
@@ -838,6 +840,7 @@ export function PagePreview({
           remaining={pageCount - 1}
           onConfirm={() => {
             store.removePage(pageId);
+            diagnosticsSink?.emit({ type: "page", action: "removed", page: current.humanNumber });
             onClose();
           }}
           onClose={() => setConfirmDelete(false)}

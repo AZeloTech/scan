@@ -13,6 +13,7 @@ import {
 } from "@/lib/quad";
 import type { Capture } from "@/lib/capture-intake";
 import { probe, probing, quadMoved } from "@/lib/probe";
+import { maxCornerMovePct } from "@/lib/diagnostics-events";
 import { deriveShellTheme, LOUPE_RING } from "@/lib/shell-theme";
 import { fillSlot, flyToSlot } from "@/lib/motion";
 import { useBlobUrl } from "@/hooks/useScanStore";
@@ -83,9 +84,11 @@ export function ConfirmCornersScreen({
 
   const copy = useCopy();
   const urls = useAssetUrls();
-  const { reportError } = useScanRuntime();
+  const { reportError, diagnosticsSink } = useScanRuntime();
   const { shell } = useShell();
-  const containerRef = useDialogChrome<HTMLDivElement>(onRetake);
+  // (`retake` is declared below; the dialog's Escape goes through it too.)
+  const retakeRef = React.useRef<() => void>(onRetake);
+  const containerRef = useDialogChrome<HTMLDivElement>(React.useCallback(() => retakeRef.current(), []));
   const previewUrl = useBlobUrl(capture.canonical);
 
   const canonical = capture.canonical;
@@ -93,6 +96,30 @@ export function ConfirmCornersScreen({
   const frameRef = React.useRef<{ width: number; height: number } | null>(null);
   /** What the editor showed at open, so the probe can tell an edit from a nod. */
   const seededRef = React.useRef<NormalizedQuad | null>(null);
+  /** The diagnostics stream (`onDiagnostics`): when the screen opened and what seeded it. */
+  const openedRef = React.useRef<{ at: number; seededFrom: "capture" | "detected" | "editor-default" | null }>({
+    at: performance.now(),
+    seededFrom: null,
+  });
+  const reportAnswer = React.useCallback(
+    (result: "accepted" | "adjusted" | "retake" | "whole-photo", maxMovePct: number | null) => {
+      diagnosticsSink?.emit({
+        type: "confirm",
+        page: pageNumber,
+        result,
+        maxMovePct,
+        ms: performance.now() - openedRef.current.at,
+        seededFrom: openedRef.current.seededFrom,
+        flag: capture.attention ?? null,
+      });
+    },
+    [capture.attention, diagnosticsSink, pageNumber],
+  );
+  const retake = React.useCallback(() => {
+    reportAnswer("retake", null);
+    onRetake();
+  }, [onRetake, reportAnswer]);
+  retakeRef.current = retake;
 
   /**
    * Keep this quad and fly the page into the slot.
@@ -120,6 +147,16 @@ export function ConfirmCornersScreen({
           wholePhoto: corners === FULL_FRAME_QUAD,
         });
       }
+      if (diagnosticsSink !== null) {
+        const seeded = seededRef.current;
+        const frame = frameRef.current;
+        if (corners === FULL_FRAME_QUAD) reportAnswer("whole-photo", null);
+        else if (seeded === null || corners === null || frame === null) reportAnswer("accepted", null);
+        else {
+          const moved = quadMoved(seeded, corners);
+          reportAnswer(moved ? "adjusted" : "accepted", maxCornerMovePct(seeded, corners, frame.width, frame.height));
+        }
+      }
       setPhase("flying");
       await flyToSlot(flyerRef.current, stageRef.current, slotRef.current);
       setLanded(true);
@@ -133,7 +170,7 @@ export function ConfirmCornersScreen({
         path: capture.path,
       });
     },
-    [canonical, capture.gate, capture.path, onConfirm],
+    [canonical, capture.gate, capture.path, diagnosticsSink, onConfirm, reportAnswer],
   );
 
   /** The editor's answer, in the pixel grid it was drawn on. */
@@ -214,7 +251,7 @@ export function ConfirmCornersScreen({
         editorRef.current = editor;
         // scanic names its handles in English and offers no option for it.
         localizeCornerHandles(host, handleLabels);
-        if (probing()) {
+        if (probing() || diagnosticsSink !== null) {
           // What the user is looking at: the seed, or — with none — the
           // editor's own inset quad, which is what "confirm" would hand back.
           // Read defensively: the instrument must not be able to fail the boot.
@@ -229,6 +266,13 @@ export function ConfirmCornersScreen({
             shown = null;
           }
           seededRef.current = shown;
+          openedRef.current = {
+            at: performance.now(),
+            seededFrom: capture.corners !== null ? "capture" : detected !== null ? "detected" : "editor-default",
+          };
+        }
+        if (probing()) {
+          const shown = seededRef.current;
           probe({
             type: "confirm-open",
             t: performance.now(),
@@ -262,7 +306,7 @@ export function ConfirmCornersScreen({
       editor?.destroy();
       editorRef.current = null;
     };
-  }, [canonical, capture.corners, handleLabels, reportError, shell, urls]);
+  }, [canonical, capture.corners, diagnosticsSink, handleLabels, reportError, shell, urls]);
 
   const busy = phase === "flying";
 
@@ -377,7 +421,7 @@ export function ConfirmCornersScreen({
               fullWidth
               icon={<CameraIcon size={20} />}
               disabled={busy}
-              onClick={onRetake}
+              onClick={retake}
             >
               {copy.confirm.retakeCta}
             </Button>

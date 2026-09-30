@@ -14,6 +14,7 @@
 import { createContext, useContext, type ReactNode } from "react";
 import type { AssetUrls } from "@/lib/runtime-config";
 import type { CaptureLayout } from "@/lib/capture-layout";
+import type { DiagnosticsSink } from "@/lib/diagnostics-events";
 import type { ScanErrorCode, ScanEvent, ScanLang } from "@/types";
 
 export interface ScanRuntime {
@@ -46,6 +47,8 @@ export interface ScanRuntime {
   readonly captureLayout: CaptureLayout;
   /** The diagnostics HUD over the viewfinder (`experimentalDiagnostics`). */
   readonly diagnostics: boolean;
+  /** The host's `onDiagnostics` stream, or null when it passed none (then nothing is built for it). */
+  readonly diagnosticsSink: DiagnosticsSink | null;
   /** Report something that happened. Numbers and enums only. */
   emit(event: ScanEvent): void;
   /**

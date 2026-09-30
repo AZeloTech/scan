@@ -21,4 +21,8 @@ export type {
   ScanIntake,
   ScanLang,
   ScanCaptureLayout,
+  ScanDiagnosticsEvent,
+  ScanDiagnosticsPayload,
+  ScanDiagnosticsSize,
+  ScanDiagnosticsVersion,
 } from "./types";

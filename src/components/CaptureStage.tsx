@@ -42,6 +42,8 @@ import { checkStill } from "@/lib/still-check";
 import { lumaThumb, registerStill, type LumaThumb, type StillRegistration } from "@/lib/still-register";
 import { resolveFit, type FitPolicy } from "@/lib/visible-region";
 import { DiagnosticsHud } from "@/components/DiagnosticsHud";
+import { PASS_SAMPLE_MS } from "@/lib/diagnostics-events";
+import { detectLaneReason } from "@/lib/detect-lane";
 import { useAssetUrls, useScanRuntime } from "@/hooks/useScanRuntime";
 import { useCopy } from "@/components/I18n";
 import { AutoCaptureIcon, CameraIcon, ImageIcon, SpinnerIcon, TorchIcon } from "@/components/icons";
@@ -114,6 +116,9 @@ export type { Capture } from "@/lib/capture-intake";
 
 /** The one haptic tick when the ready cue comes on (Android; iOS has no `vibrate`). */
 const READY_TICK_MS = 12;
+
+/** The diagnostics stream calls the live loop stalled after this long without a pass while it should be running. */
+const STALL_MS = 2000;
 
 /**
  * How long the Wi-Fi prefetch waits for the corner detector to settle.
@@ -327,7 +332,7 @@ export function CaptureStage({
   // explicitly rather than reading a module global: two mounts of the library
   // on one page must never race each other to a shared `wasmPaths`.
   const urls = useAssetUrls();
-  const { intake, reportError } = useScanRuntime();
+  const { intake, reportError, diagnosticsSink } = useScanRuntime();
   // Whether there is a door left when the camera closes. Read as a boolean
   // rather than through `intake` so the effects below depend on the fact, not
   // on the identity of the object carrying it.
@@ -410,6 +415,7 @@ export function CaptureStage({
     let cancelled = false;
 
     const handleTrackEnded = (): void => {
+      diagnosticsSink?.emit({ type: "camera", state: "lost", startMs: null, stream: null, torch: false, fit: fitRef.current });
       trackRef.current = null;
       setTrack(null);
       setTorchAvailable(false);
@@ -428,6 +434,7 @@ export function CaptureStage({
      */
     const cameraUnavailable = (code: "camera_denied" | "no_camera"): void => {
       if (cancelled) return;
+      diagnosticsSink?.emit({ type: "camera", state: "unavailable", startMs: null, stream: null, torch: false, fit: fitRef.current });
       setMode("fallback");
       reportError(code, intakeImages);
     };
@@ -450,6 +457,7 @@ export function CaptureStage({
         cameraUnavailable("no_camera");
         return;
       }
+      const askedAt = performance.now();
       try {
         stream = await media.getUserMedia({
           video: {
@@ -493,6 +501,19 @@ export function CaptureStage({
           // Autoplay refusal still leaves a usable frame after user gesture.
         }
       }
+      if (diagnosticsSink !== null && !cancelled) {
+        const settings = trackRef.current?.getSettings();
+        const width = video?.videoWidth || settings?.width || 0;
+        const height = video?.videoHeight || settings?.height || 0;
+        diagnosticsSink.emit({
+          type: "camera",
+          state: "live",
+          startMs: performance.now() - askedAt,
+          stream: width > 0 && height > 0 ? { width, height } : null,
+          torch: hasTorch(trackRef.current),
+          fit: fitRef.current,
+        });
+      }
       setMode("live");
     }
 
@@ -509,7 +530,7 @@ export function CaptureStage({
         }
       }
     };
-  }, [intakeImages, reportError, useCamera]);
+  }, [diagnosticsSink, intakeImages, reportError, useCamera]);
 
   /**
    * Auto-capture fires through the same path as a tap — set once the capture
@@ -519,6 +540,8 @@ export function CaptureStage({
   const handleAutoCapture = React.useCallback(() => autoFireRef.current(), []);
   // The layout's fit — or, on the bench only, the one a run forces.
   const fit = resolveFit(probeSetting("fit"), chrome?.fit ?? "cover");
+  const fitRef = React.useRef(fit);
+  fitRef.current = fit;
   /** Automatic captures this mount fired (the diagnostics HUD). */
   const autoFiresRef = React.useRef(0);
   /** The last photo's size (the diagnostics HUD). */
@@ -535,6 +558,7 @@ export function CaptureStage({
     paused,
     autoCapture: autoCapture && mode === "live" && !disabled,
     onAutoCapture: handleAutoCapture,
+    diagnosticsSink,
   });
 
   // ── the ready cue: one haptic tick and one spoken "ready", per page ──────
@@ -568,12 +592,21 @@ export function CaptureStage({
     };
   }, [track, torchAvailable, torchLit]);
 
+  // The torch as the person switched it (diagnostics stream only).
+  const torchReportedRef = React.useRef(torchOn);
+  React.useEffect(() => {
+    if (torchReportedRef.current === torchOn) return;
+    torchReportedRef.current = torchOn;
+    diagnosticsSink?.emit({ type: "torch", on: torchOn });
+  }, [diagnosticsSink, torchOn]);
+
   const toggleAutoCapture = React.useCallback(() => {
     const on = !autoCaptureChosen;
     setAutoCaptureChosen(on);
     onAutoCaptureChange?.(on);
+    diagnosticsSink?.emit({ type: "auto-toggle", on });
     setAnnouncement(on ? copy.capture.autoCaptureOnAnnounce : copy.capture.autoCaptureOffAnnounce);
-  }, [autoCaptureChosen, copy, onAutoCaptureChange]);
+  }, [autoCaptureChosen, copy, diagnosticsSink, onAutoCaptureChange]);
 
   /**
    * ── the curved-page engine, fetched on Wi-Fi before anyone asks ───────────
@@ -668,6 +701,10 @@ export function CaptureStage({
         stillUsed: boolean;
         /** The viewfinder's picture at the tap, for registering the photo against it. */
         previewThumb: LumaThumb | null;
+        /** When the tap was (the diagnostics stream's capture time). */
+        tappedAt: number;
+        /** The still that arrived, whether or not it became the page. */
+        still: { width: number; height: number } | null;
       } | null = null,
     ) => {
       // Run only when it can change the answer: this is a ~3 s WASM detect and
@@ -719,6 +756,30 @@ export function CaptureStage({
               registration,
             }).attention;
       lastStillRef.current = { width: frame.width, height: frame.height, attention };
+      if (diagnosticsSink !== null && check !== null) {
+        diagnosticsSink.emit({
+          type: "capture",
+          trigger: check.trigger === "auto" ? "auto" : "manual",
+          tap: check.trigger === "auto" ? null : check.trigger,
+          page: pageNumber,
+          ms: performance.now() - check.tappedAt,
+          still: check.still,
+          source: check.stillUsed ? "still" : "preview",
+          frame: { width: frame.width, height: frame.height },
+          cornersFrom: live !== null ? "live" : detected !== null ? "detected" : fallback !== null ? "fallback" : null,
+          registration:
+            registration === null
+              ? null
+              : {
+                  fovScale: registration.fovScale,
+                  shiftX: registration.shiftX,
+                  shiftY: registration.shiftY,
+                  score: registration.score,
+                  overlap: registration.overlap,
+                },
+          flag: attention,
+        });
+      }
       if (trace !== null) {
         const cornersFrom: CornersFrom =
           live !== null
@@ -786,7 +847,7 @@ export function CaptureStage({
         attention,
       });
     },
-    [onCapture, path, urls],
+    [diagnosticsSink, onCapture, pageNumber, path, urls],
   );
 
   /**
@@ -973,6 +1034,8 @@ export function CaptureStage({
           trigger,
           stillUsed,
           previewThumb,
+          tappedAt,
+          still: stillW !== null && stillH !== null ? { width: stillW, height: stillH } : null,
         },
       );
       setAnnouncement(copy.capture.captured(pageNumber));
@@ -1079,6 +1142,101 @@ export function CaptureStage({
       if (!before.includes(key)) probe({ type: "hint", t, key, shown: true });
     }
   }, [shownHints]);
+
+  // ── the diagnostics stream (`onDiagnostics`): hints, and the live loop sampled ──
+  const hintShownRef = React.useRef<{ key: HintKey; at: number } | null>(null);
+  React.useEffect(() => {
+    if (diagnosticsSink === null) return;
+    const previous = hintShownRef.current;
+    if ((previous?.key ?? null) === shownHint) return;
+    const now = performance.now();
+    if (previous !== null) diagnosticsSink.emit({ type: "hint", id: previous.key, shown: false, ms: now - previous.at });
+    hintShownRef.current = shownHint === null ? null : { key: shownHint, at: now };
+    if (shownHint !== null) diagnosticsSink.emit({ type: "hint", id: shownHint, shown: true, ms: null });
+  }, [diagnosticsSink, shownHint]);
+
+  const loopStateRef = React.useRef({ running: false, found: false });
+  loopStateRef.current = { running: mode === "live" && !paused && !disabled && !cameraLost, found: detect.hasQuad };
+  const readDiagnostics = detect.diagnostics;
+  React.useEffect(() => {
+    if (diagnosticsSink === null || mode !== "live") return;
+    /**
+     * The same numbers the HUD reads, sampled no faster than the stream
+     * allows: lane moves, the visible region changing, a pass sample, a
+     * stall (no pass for {@link STALL_MS} while the loop should be running)
+     * and the first pass after the page comes back into view.
+     */
+    let lane = "";
+    let visibleKey = "";
+    let seen = readDiagnostics().passes;
+    let sampled = seen;
+    let lastPassAt = performance.now();
+    let stalledAt: number | null = null;
+    let shownAt: number | null = null;
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") shownAt = performance.now();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    const tick = () => {
+      const d = readDiagnostics();
+      const now = performance.now();
+      const loop = loopStateRef.current;
+      const laneKey = `${d.lane ?? ""}|${detectLaneReason() ?? ""}`;
+      if (laneKey !== lane) {
+        lane = laneKey;
+        diagnosticsSink.emit({ type: "lane", lane: d.lane, reason: detectLaneReason() });
+      }
+      const v = d.visible;
+      const key = `${v.x.toFixed(3)} ${v.y.toFixed(3)} ${v.width.toFixed(3)} ${v.height.toFixed(3)} ${d.fit}`;
+      if (key !== visibleKey) {
+        visibleKey = key;
+        diagnosticsSink.emit({ type: "visible", x: v.x, y: v.y, width: v.width, height: v.height, fit: d.fit });
+      }
+      const fresh = d.passes > seen;
+      seen = d.passes;
+      if (fresh) {
+        lastPassAt = now;
+        if (stalledAt !== null) {
+          diagnosticsSink.emit({ type: "stall", phase: "end", ms: now - stalledAt });
+          stalledAt = null;
+        }
+        if (shownAt !== null) {
+          diagnosticsSink.emit({ type: "camera-resume", ms: now - shownAt });
+          shownAt = null;
+        }
+      } else if (!loop.running || document.visibilityState === "hidden" || busyRef.current) {
+        // Not expected to answer: nothing is stalled.
+        lastPassAt = now;
+      } else if (stalledAt === null && now - lastPassAt >= STALL_MS) {
+        stalledAt = lastPassAt;
+        diagnosticsSink.emit({ type: "stall", phase: "start", ms: now - lastPassAt });
+      }
+      const answered = d.passes - sampled;
+      if (answered > 0 && diagnosticsSink.passDue()) {
+        sampled = d.passes;
+        diagnosticsSink.emit({
+          type: "pass",
+          detector: d.detector,
+          detectMs: d.detectMs,
+          detectP50: d.detectP50,
+          intervalMs: d.intervalMs,
+          frameAgeMs: d.frameAgeMs,
+          passes: answered,
+          found: loop.found,
+          locked: d.locked,
+          ready: d.ready,
+          autoArmed: d.autoArmed,
+          why: d.blocked,
+        });
+      }
+    };
+    tick();
+    const timer = window.setInterval(tick, PASS_SAMPLE_MS);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [diagnosticsSink, mode, readDiagnostics]);
 
   // The HUD reads these through a stable callback: its timer is not restarted by every render.
   const hudStateRef = React.useRef({ torch: false, autoOffered: false, autoOn: false });
