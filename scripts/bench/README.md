@@ -1252,6 +1252,22 @@ flat page's own paper blocks within two blocks of each other already differ
 by 18–22 grey levels at p90 (43–58 at p99), against the 6 the seam flag
 allows, so there it counts the light more than the fill.
 
+**After the review fixes** (engine 7b48f49, bench 1d41453, full profile,
+`--jobs 8`, verdicts of both runs by this scorer): against the step-0
+baseline, complete 49 → 225 of 255 (tilt-only 36 → 200 of 204, tilted print
+in a correct outline 64/64 at every tilt from 0.5° to 15°), curl 13 → 25 of
+51, no-op 198 → 20, harms 3 → 1 (the bowed full-frame form), unverified 0,
+residual tilt p90 10° → 0°, 1 page over the 12 s budget (6 before), deskew
+323/418 ms p50/p90 in Node. Scene for scene against 0c95359 nothing changed
+class: the turned pages now keep the flat page's size (their aspect drifted
+by up to a few percent before, unscored), three `both` cards whose engine
+surface kept 0.5–1.6° of tilt now read `curl`, and one seam flag flips at
+its own threshold (tilt/twocol/jitter/t5: 3 blocks at 6.0 grey levels
+against 5.8 before; the fill's step across its edge is −1/0/+1 at
+p10/p50/p90 in both). Real stills: 4 → 23 of 30 complete (interior 2 → 12
+of 15), no harm, no lost fix, identical classes to 0c95359; the seam count
+stays at 18 for the reason above.
+
 ## Status
 
 Phase 3 (the live loop) added the sustained session, remounts and leak
