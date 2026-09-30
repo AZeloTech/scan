@@ -420,10 +420,27 @@ export interface AppCopy {
       rotate: string;
       corners: string;
       straighten: string;
-      /** The switch's word once the page is actually wearing the correction. */
-      straightenApplied: string;
       finish: string;
     };
+    /**
+     * What a tool's corner dot, or its dimmed state, means — the tool's
+     * accessible description (the dot itself is decoration). A dimmed tool
+     * always says why it cannot be used.
+     */
+    toolNotes: {
+      /** The page is wearing this correction (the small dot on the icon). */
+      applied: string;
+      /** The way out of what the status line reports (Cantos, on a page that went in flat). */
+      suggested: string;
+      /** The page could not be prepared at all. */
+      failed: string;
+      /** A render is running; the tool comes back when it lands. */
+      busy: string;
+      /** Endireitar needs the sheet's corners to know what to straighten. */
+      noCorners: string;
+    };
+    /** The small (i) beside "Página N de M": opens {@link about}, on any page. */
+    aboutButton: string;
     /**
      * The short line under the page — the ONE place on this screen that talks
      * about state, and silent on a page that is fine. Every sentence is composed at render from `rendered.*` and
@@ -628,19 +645,22 @@ export interface AppCopy {
     oneMoment: string;
     closeAction: string;
     /**
-     * The confirmation the top-right bin opens. It states the consequence — what the
-     * document is left with — rather than asking "are you sure?".
+     * The bin deletes at once; this toast offers the way back for a few
+     * seconds ("Página excluída · Desfazer"). No confirmation sheet.
      */
-    confirmDelete: {
-      title: (n: number) => string;
-      /**
-       * `remaining` is what the document is left with. Zero has its own
-       * sentence: "o PDF fica com 0 páginas" is a count nobody thinks in, and
-       * what actually happens there is that the document ends.
-       */
-      body: (remaining: number) => string;
-      confirm: string;
-      keep: string;
+    undoDelete: {
+      message: string;
+      action: string;
+      /** The Undo button's full name, for whoever meets it out of context. */
+      actionLabel: (n: number) => string;
+    };
+    /**
+     * The editor after its only page was deleted, while the undo is still on
+     * offer. When the toast goes, the editor closes onto the empty document.
+     */
+    emptied: {
+      title: string;
+      body: string;
     };
   };
 
@@ -1145,9 +1165,16 @@ const PT: AppCopy = {
       rotate: "Girar",
       corners: "Cantos",
       straighten: "Endireitar",
-      straightenApplied: "Endireitada",
       finish: "Acabamento",
     },
+    toolNotes: {
+      applied: "aplicado",
+      suggested: "recomendado",
+      failed: "indisponível — esta página falhou",
+      busy: "indisponível enquanto a página é preparada",
+      noCorners: "indisponível — ajuste os cantos primeiro",
+    },
+    aboutButton: "Sobre as melhorias",
     status: {
       ready: (finish) =>
         finish === "original"
@@ -1270,16 +1297,14 @@ const PT: AppCopy = {
     nextPage: "Próxima página",
     oneMoment: "Um instante…",
     closeAction: "Fechar",
-    confirmDelete: {
-      title: (n) => `Apagar a página ${n}?`,
-      body: (remaining) =>
-        remaining === 0
-          ? "A foto sai do documento e ele fica vazio. Não tem como voltar atrás."
-          : `A foto sai do documento e o PDF fica com ${remaining} ${
-              remaining === 1 ? "página" : "páginas"
-            }. Não tem como voltar atrás.`,
-      confirm: "Apagar a página",
-      keep: "Manter",
+    undoDelete: {
+      message: "Página excluída",
+      action: "Desfazer",
+      actionLabel: (n) => `Desfazer: trazer a página ${n} de volta`,
+    },
+    emptied: {
+      title: "O documento ficou vazio.",
+      body: "Toque em Desfazer para trazer a página de volta.",
     },
   },
 
@@ -1797,9 +1822,16 @@ const EN: AppCopy = {
       rotate: "Rotate",
       corners: "Corners",
       straighten: "Straighten",
-      straightenApplied: "Straightened",
       finish: "Finish",
     },
+    toolNotes: {
+      applied: "applied",
+      suggested: "recommended",
+      failed: "unavailable — this page failed",
+      busy: "unavailable while the page is being prepared",
+      noCorners: "unavailable — adjust the corners first",
+    },
+    aboutButton: "About the improvements",
     status: {
       ready: (finish) =>
         finish === "original"
@@ -1920,16 +1952,14 @@ const EN: AppCopy = {
     nextPage: "Next page",
     oneMoment: "One moment…",
     closeAction: "Close",
-    confirmDelete: {
-      title: (n) => `Delete page ${n}?`,
-      body: (remaining) =>
-        remaining === 0
-          ? "The photo leaves the document and it becomes empty. There is no way back."
-          : `The photo leaves the document and the PDF is left with ${remaining} ${
-              remaining === 1 ? "page" : "pages"
-            }. There is no undo.`,
-      confirm: "Delete the page",
-      keep: "Keep it",
+    undoDelete: {
+      message: "Page deleted",
+      action: "Undo",
+      actionLabel: (n) => `Undo: bring page ${n} back`,
+    },
+    emptied: {
+      title: "The document is empty.",
+      body: "Tap Undo to bring the page back.",
     },
   },
 

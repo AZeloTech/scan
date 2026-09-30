@@ -4,7 +4,7 @@ import * as React from "react";
 import clsx from "clsx";
 import { useCopy } from "@/components/I18n";
 import { CorrectionTile } from "@/components/CorrectionTile";
-import { CheckIcon, WaveIcon } from "@/components/icons";
+import { WaveIcon } from "@/components/icons";
 import { Button } from "@/components/ui";
 import { useDewarpActivity, useDewarpConsented, useStore } from "@/hooks/useScanStore";
 import { useAssetUrls } from "@/hooks/useScanRuntime";
@@ -223,10 +223,17 @@ export function useDewarpControl(
 export function DewarpTile({
   control,
   offered,
+  unavailableNote,
   label,
 }: {
   control: DewarpControlState;
   offered: boolean;
+  /**
+   * Why the editor is not offering it, when it is not (`offered` false): the
+   * dimmed tool's description. The engine's own unavailability is the
+   * explanation card's to say, through `describedBy`.
+   */
+  unavailableNote?: string;
   /**
    * The two-engine comparison's own name for this tile — "Curvatura · IA" or
    * "Curvatura · nova" (`copy.ab`) — replacing `copy.label` / the tile's own
@@ -253,11 +260,18 @@ export function DewarpTile({
       // about *which page this is for*, not an instruction, so it earns a
       // tooltip rather than a permanent line.
       title={dewarp.help}
-      icon={on ? <CheckIcon size={22} /> : <WaveIcon size={22} />}
-      label={
-        label ?? (on ? copy.tiles.straightenApplied : copy.tiles.straighten)
-      }
+      // The same icon and word either way: the applied state is the tool's
+      // dot and the switch's own `aria-checked`, as on the other three.
+      icon={<WaveIcon size={22} />}
+      label={label ?? copy.tiles.straighten}
       state={on ? "applied" : "default"}
+      note={
+        !offered
+          ? unavailableNote
+          : on
+            ? copy.toolNotes.applied
+            : undefined
+      }
       disabled={!offered || !control.available || control.running}
       onClick={control.toggle}
     />

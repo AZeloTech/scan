@@ -438,6 +438,17 @@ export function HelpIcon(props: IconProps) {
   );
 }
 
+/** "Sobre as melhorias" — the small (i) beside the page editor's position line. */
+export function InfoIcon(props: IconProps) {
+  return (
+    <Glyph {...props}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 11v5.5" />
+      <path d="M12 7.6h.01" />
+    </Glyph>
+  );
+}
+
 /**
  * "curvatura" — the tilde of a page that will not lie flat, which is exactly
  * the document the dewarp model exists for (a page out of a bound book, a sheet

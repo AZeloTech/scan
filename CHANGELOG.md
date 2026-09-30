@@ -67,6 +67,30 @@ freezes at 1.0.
   corner that the arrow keys move is marked only for a keyboard user
   (`:focus-visible`) and while a corner is held; a finger sees four identical
   pucks.
+- **No tool in the page editor looks pressed for no reason.** A phone keeps
+  `:hover` on whatever was last tapped (the thumbnail that opened the editor
+  sits where "Girar" lands), so the editor's hover styles now apply only
+  where there is a real hover.
+
+### Changed
+- **Deleting a page takes one tap and can be undone.** The page editor's bin
+  no longer asks for confirmation: the page leaves at once and a toast,
+  "Página excluída · Desfazer", offers it back for 5 s (not dismissed while
+  it has focus or a mouse over it). Undo brings the page back exactly as it
+  was — the page is held out of the document, not removed, until the toast
+  goes, another page is deleted, or the editor closes (closing, retaking,
+  adjusting the corners or unmounting all make the delete final, so a held
+  page can never reach a PDF). Deleting the last page shows the empty
+  document with the same toast; when it goes, the editor closes onto the
+  empty document. `onDiagnostics` reports `page` `removed` on the tap and
+  `undone` when it is undone.
+- **"Sobre as melhorias" from any page.** A small (i) beside "Página N de M"
+  opens it on every page; a flagged page keeps its "por quê?".
+- **The editor's four tools are drawn plain.** A correction the page is
+  wearing is a small dot on the tool's icon (described as "aplicado"), the
+  recommended "Cantos" on a page that went in flat is a warn-toned dot, and
+  a tool is dimmed only when it cannot be used, with the reason as its
+  description. "Endireitar" keeps its icon and word when on.
 
 ### Added
 - **`onDiagnostics` (experimental): a field-test event stream.** Versioned,
