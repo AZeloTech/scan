@@ -550,7 +550,7 @@ exact ground truth.
 | `page-swap` | a page is slid away and another document put down elsewhere; shutter on the new one |
 | `empty-desk-sweep` | an F6 desk with no page, wandered over for 10 s; shutter anyway |
 | `partial-frame` | 1–2 corners out of frame, shutter there; then backs off, holds, shoots again |
-| `wider-still` | `approach-hold`, but `takePhoto()` returns the whole 4:3 sensor — wider than the 16:9 preview (D-343 RC1) |
+| `wider-still` | `approach-hold`, but `takePhoto()` returns the whole 4:3 sensor — wider than the 16:9 preview (D-343 RC1). The app now asks for the whole sensor itself and cuts the preview's field of view out of it (`stillCropFor`), so this and `approach-hold` take the same path |
 | `wider-still-eis` | the still comes back at the preview's shape but 25 % wider (a stabilization crop): it passes the shape check |
 | `sustained-hold` | **not in a plain run** (name it): framed and held 75 s — 10 s of frames played forward and back — with the shutter at 20, 40 and 60 s; then the page unmounts and remounts the flow three times (warm start-up), unmounts it for good and counts what outlived it |
 | `sustained-90` | **not in a plain run**: 90 s on one page — a hold, a pan off and back, a tilt to 35° and back — the shutter at 20, 40, 60 and 80 s; then three remounts and a final unmount |
@@ -840,6 +840,25 @@ change size or jump in exposure while a photo is taken, as Android does.
 The scorer's `captureFreeze` reports, for every capture, how far the overlay
 moved between the tap (or auto fire) and the confirm screen.
 
+## Resolution (`npm run bench:quality`)
+
+Does the PDF keep every pixel the camera gave the page? `quality.mjs` drives
+the real `<ScanFlow>` (`app/page-quality.js`) on a fake phone camera — a drawn
+page on a dark desk, a 2160×3840 stream that is the centre 9:16 crop of the
+sensor, and an `ImageCapture` whose largest photo is the whole sensor —
+through shutter → confirm → step 2 → "Gerar PDF", and reads the PDF back with
+pdf-lib. Cases: `s25` (a 4000×3000 still), `50mp` (8160×6120), `safari` (no
+`ImageCapture`), `timeout` (`takePhoto` never answers), `closest` (a driver
+that answers 1704×3648 whatever is asked — the Galaxy S25 Ultra's field
+still). It fails unless: the still is asked for at the sensor's full size and
+becomes the page at its full resolution (or, without one, the stream's native
+frame does, with the reason reported); the PDF's image is the final JPEG's
+own pixels, embedded as-is (`/DCTDecode`, one PDF unit per pixel, rung 0);
+and it is the drawn page at the full resolution of its source (±3 %). Then
+girar + cantos + acabamento through the real store and render pipeline: every
+render from the canonical, at the canonical's size — no generational shrink.
+`--case s25,50mp`, `--no-edits`, `--headed`. Output: `.bench-out/quality-*/`.
+
 ## WebKit (`npm run bench:webkit`)
 
 The flow end to end in Playwright's WebKit — primer, a live viewfinder that
@@ -900,7 +919,7 @@ these settings change.
 
 **Stills are decoded the way the app decodes a photo**: `__bench.load` fetches
 the bytes, `createImageBitmap(…, { imageOrientation: "from-image" })`, then the
-library's own `bitmapToCanvas` (the still path's 3000 px cap).
+library's own `bitmapToCanvas` (the still path's draw, at full resolution).
 
 **real-stills** runs every variant on every still. GT-free: how often each
 variant finds a page, the share of the photo its quad claims, and how often ML
