@@ -49,6 +49,20 @@ freezes at 1.0.
   nearly level. Three tilted pages that were fixed before are now kept flat.
   On a tilted flat page the check finds only 2 or 3 text lines, and a shift of
   a quarter of a pixel can decide which.
+- **Endireitar stops reading a tilted page edge as smeared print.** Its check
+  for rows or columns copied inward at the page edge (what a correction that
+  runs off the photo leaves) called two strips copies when they were close on
+  average. On a mostly blank edge strip a few dark pixels of background or
+  glyph could all change and still pass, so small tilts were kept flat. Two
+  strips are now copies only when at most a tenth of their marked pixels
+  changed, measured against each pixel's own contrast so JPEG noise on a real
+  smear does not hide it. A strip also needs 2 % of its pixels clearly off the
+  paper, so a band of background pulled in along an edge now counts, and a
+  pale mark crossing the edge does not. On the synthetic bench, fixes go from
+  73 to 81 of 255 and partial fixes from 17 to 27. Two pages that had the
+  table pulled in along an edge are now kept flat. One form tilted 4° is now
+  accepted with its edges bent; the old check only turned it down by chance.
+  The labelled real stills do not change.
 - **The rail's camera fills the whole screen again.** A Phase 5a build
   letterboxed it (`contain`, sized to the screen above the controls); with a
   browser's bars, a gesture bar or larger text a 9:16 stream then shrank on
