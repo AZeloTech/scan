@@ -134,8 +134,8 @@ export async function loadEngineHost(root) {
   /** scaleSurface(source, 896): the small copy every A/B baseline is warped from. */
   const smallCopy = (canonical) => bilinearDownscale(canonical, BASELINE_SOURCE_LONG_EDGE);
 
-  /** scanic warpToCanvas(small, corners): the small flat page of `quad`, from the copy. */
-  function baselineOn(small, canonical, quad) {
+  /** scanic warpToCanvas(small, corners): the small flat page of `quad`, from the copy (at `size`, when given). */
+  function baselineOn(small, canonical, quad, size) {
     // Per axis, as the app's normalized corners are. An engine that exports
     // its pixel-centre rule (`quadOnScaledCopy`, F4) has the app put the
     // baseline's corners on the copy by it; older checkouts' app scales them
@@ -144,7 +144,8 @@ export async function loadEngineHost(root) {
     const smallQuad = typeof idx.quadOnScaledCopy === "function"
       ? idx.quadOnScaledCopy(quad, idx.copyScale(canonical, small))
       : mapQuad(quad, (p) => ({ x: p.x * kx, y: p.y * ky }));
-    const bd = outputDims(smallQuad);
+    // `size`: another outline at B₀'s own size (B′, as the app renders it).
+    const bd = size ?? outputDims(smallQuad);
     return warpQuad(small, smallQuad, bd.width, bd.height);
   }
 

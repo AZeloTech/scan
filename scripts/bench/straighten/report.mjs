@@ -94,9 +94,16 @@ export function renderStraightenReport(results, { banner = null } = {}) {
     `- profile: ${config.profile} (${config.scenes} scenes${config.only ? `, --only ${config.only}` : ""}) · scene set ${config.sceneHash}${config.scene ? ` · photo noise ${config.scene.noise ? "on" : "off"}, blur σ ${config.scene.blurSigma}` : ""}`,
     `- verdicts, the page the user sees against the ORIGINAL flat page of the outline: **harm** = tilt worse by > ${TOL.tiltWorseDeg}°, ` +
       `bow worse by > max(${pct(TOL.bowWorseAbs, 2)}, ${pct(TOL.bowWorseRel, 0)}) (engine surfaces only), print lost (absolute ink < ${pct(CLIP.inkRatio, 0)} of the flat page's, ` +
-      `or pushed into a border it kept clear of; print scaled down whole with its bounding box is shrunk, not lost), or background brought into a straight page; **complete** = no harm, |tilt| ≤ ${TOL.tiltFixedDeg}° and bow ≤ ${pct(TOL.bowFixedRel, 0)} of the flat page's; ` +
+      `or pushed into a border it kept clear of; print scaled down whole with its bounding box is shrunk, not lost), background brought into a page no rotation uncovered (a straight page, an engine surface, print shrunk into a frame), or the page's aspect off the flat page's by > ${pct(TOL.aspectDrift, 0)}; **complete** = no harm, |tilt| ≤ ${TOL.tiltFixedDeg}° and bow ≤ ${pct(TOL.bowFixedRel, 0)} of the flat page's; ` +
       `**unverified** = acted, no harm found, but a check could not be measured; **partial** = the rest of what acted. Rates are over the should-act pages. ` +
       `**Painted** = fill without the photo's grain (< ${pct(PAINT.roughRatio, 0)} of it); **seam** = ≥ ${PAINT.seamMinBlocks} painted blocks that step > ${PAINT.seamDelta} grey levels against the paper beside them.`,
+    ...(rows.some((r) => !r.error && r.truth.curl === "unknown")
+      ? [
+          "",
+          "> **Curl is not graded here.** These stills carry no curl truth: a page counts as complete on its tilt alone (and on no harm), " +
+            "and a still's own base and `rot-quad` variants are \"nothing to do\" only in the tilt this suite added, not in whatever skew or curl the photo itself has.",
+        ]
+      : []),
     "",
     "## Headline",
     "",

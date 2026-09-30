@@ -84,12 +84,45 @@ test("verdict: lost print is harm; an unmeasurable clip check is unverified", ()
   assert.equal(verdict(rec({ deskew: deskewed(4), final: page(0), clip: { clipped: null, inkRatio: NaN, why: "too little print" } })).cls, "unverified");
 });
 
-test("verdict: background brought into a straight page is harm; into a tilted one, the price of straightening", () => {
+test("verdict: background brought into a straight page is harm; into a turned tilted one, the price of straightening", () => {
   const straight = rec({ truth: { shouldAct: true, tiltDeg: 0, curl: "small", flatAndStraight: false }, flat: page(0, { bowFrac: 0.004 }), outcome: acceptedOutcome, final: page(0, { bowFrac: 0.001, borderDarkFrac: 0.2 }), clip: clean });
   assert.equal(verdict(straight).cls, "harm");
-  const tilted = rec({ outcome: acceptedOutcome, final: page(0.1, { borderDarkFrac: 0.2 }), clip: clean });
-  assert.equal(verdict(tilted).cls, "complete");
-  assert.equal(verdict(tilted).darkWedge, true);
+  // A rotation uncovers corners: table there is what turning the print cost.
+  const turned = rec({ deskew: deskewed(4), final: page(0.1, { borderDarkFrac: 0.2 }), clip: clean });
+  assert.equal(verdict(turned).cls, "complete");
+  assert.equal(verdict(turned).darkWedge, true);
+});
+
+test("verdict: a dark frame is harm on a tilted page too when the print shrank into it", () => {
+  // The engine levelling the lines it models uncovers the corners a rotation would.
+  const surface = verdict(rec({ outcome: acceptedOutcome, final: page(0.1, { borderDarkFrac: 0.2 }), clip: clean }));
+  assert.equal(surface.cls, "complete");
+  const shrunkSurface = verdict(
+    rec({ outcome: acceptedOutcome, final: page(0.1, { borderDarkFrac: 0.2 }), clip: { clipped: false, inkRatio: 0.85, shrunk: true } }),
+  );
+  assert.equal(shrunkSurface.cls, "harm");
+  assert.match(shrunkSurface.harmWhy.join(";"), /background framed in/);
+  // Print scaled down whole into a frame of table: not clipped, but harm.
+  const shrunk = verdict(
+    rec({ deskew: deskewed(4), final: page(0.1, { borderDarkFrac: 0.2 }), clip: { clipped: false, inkRatio: 0.8, shrunk: true } }),
+  );
+  assert.equal(shrunk.cls, "harm");
+  assert.match(shrunk.harmWhy.join(";"), /print shrunk/);
+});
+
+test("verdict: a finished page stretched off the flat page's proportions is harm", () => {
+  const stretched = verdict(rec({ deskew: deskewed(8), final: page(0.1), clip: clean, dims: { flat: [800, 1000], final: [828, 1000] } }));
+  assert.equal(stretched.cls, "harm");
+  assert.match(stretched.harmWhy.join(";"), /stretched 800×1000→828×1000/);
+  const kept = verdict(rec({ deskew: deskewed(8), final: page(0.1), clip: clean, dims: { flat: [800, 1000], final: [800, 1000] } }));
+  assert.equal(kept.cls, "complete");
+});
+
+test("verdict: a real still's 'complete' says its curl was not graded", () => {
+  const real = verdict(rec({ truth: { shouldAct: true, tiltDeg: 4, curl: "unknown" }, deskew: deskewed(4), final: page(0.05), clip: clean }));
+  assert.equal(real.cls, "complete");
+  assert.equal(real.curlGraded, false);
+  assert.equal(verdict(rec({ deskew: deskewed(4), final: page(0.05), clip: clean })).curlGraded, true);
 });
 
 test("verdict: a curl page straightened but still bowed is partial", () => {
@@ -185,9 +218,20 @@ test("cardOf: the card the page view would show, rebuilt from the record as the 
   assert.equal(cardOf(rec({ outcome: acceptedOutcome, deskew: level(false) })), "none", "no curl claimed over a page measured flat");
   assert.equal(cardOf(rec({ outcome: acceptedOutcome, deskew: level(true) })), "curl");
   assert.equal(cardOf(rec({ outcome: acceptedOutcome, deskew: { ...deskewed(3), act: false, planned: true } })), "both");
+  // The engine's surface left the print leaning: the tilt is not claimed.
+  assert.equal(cardOf(rec({ outcome: acceptedOutcome, deskew: { ...deskewed(3), act: false, planned: true, engineLevel: false } })), "curl");
+  assert.equal(cardOf(rec({ outcome: acceptedOutcome, deskew: { ...deskewed(3), act: false, planned: true, engineLevel: true } })), "both");
   assert.equal(cardOf(rec({ outcome: curlAbsent, deskew: deskewed(3) })), "tilt");
   assert.equal(cardOf(rec({ deskew: deskewed(3) })), "tilt-only");
+  // The curve could not be checked: the retry card.
+  assert.equal(cardOf(rec({ outcome: timeout, deskew: deskewed(3) })), "tilt-retry");
   assert.equal(cardOf(rec({ outcome: regression, deskew: level(false) })), "nothing");
+  // Too few lines to have looked for a bow: not "flat".
+  const unlooked = level(false);
+  unlooked.level.flat = false;
+  assert.equal(cardOf(rec({ outcome: regression, deskew: unlooked })), "declined");
+  // A straighten that could not finish: a retry, not the engine's final word.
+  assert.equal(cardOf(rec({ outcome: regression, deskew: { ...level(false), level: undefined, failed: true } })), "transient");
   assert.equal(cardOf(rec({ outcome: regression, deskew: level(true) })), "declined", "a curl on the level page is not 'flat'");
   assert.equal(cardOf(rec({ outcome: regression })), "declined");
   assert.equal(cardOf(rec({ outcome: timeout, deskew: level(false) })), "transient", "a retry is still the thing to say");

@@ -40,6 +40,8 @@ export const TOL = {
   wedgeDarkFrac: 0.03,
   /** A should-act page: |θ| at least this, or any curl. */
   shouldActDeg: 0.5,
+  /** The finished page's aspect off the flat page's by more than this share: stretched, harm. */
+  aspectDrift: 0.01,
 };
 
 /** The app's device budget for Endireitar (engine + deskew), ms. */
@@ -83,10 +85,25 @@ export function verdict(r) {
     else if (r.clip.clipped === true) harmWhy.push(`clipped (${r.clip.why})`);
     else if (r.clip.clipped === null) unverifiedWhy.push(`clipping unmeasured (${r.clip.why})`);
     darkWedge = val(page.borderDarkFrac) > val(flat.borderDarkFrac) + TOL.wedgeDarkFrac;
-    // Background brought into the frame is the price of straightening print
-    // skewed inside a correct outline; with no tilt to straighten it is harm.
-    if (darkWedge && truthTilt < TOL.shouldActDeg) {
-      harmWhy.push(`background framed in (${(flat.borderDarkFrac * 100).toFixed(0)}→${(page.borderDarkFrac * 100).toFixed(0)}% of border)`);
+    // Background brought into the frame is the price of turning print skewed
+    // inside a correct outline — by the deskew, or by the engine levelling
+    // the lines it models, which uncovers the same corners. Only there: with
+    // no tilt to straighten, or with the print shrunk into a frame of it
+    // (scaled, not turned), it is harm.
+    const shrunk = r.clip?.shrunk === true;
+    if (darkWedge && (truthTilt < TOL.shouldActDeg || shrunk)) {
+      harmWhy.push(
+        `background framed in (${(flat.borderDarkFrac * 100).toFixed(0)}→${(page.borderDarkFrac * 100).toFixed(0)}% of border${shrunk ? ", print shrunk" : ""})`,
+      );
+    }
+    // The page's proportions: a rotation composed with a perspective outline
+    // must not stretch it (records without dims predate the check).
+    const dims = r.dims;
+    if (dims?.flat && dims?.final) {
+      const drift = dims.final[0] / dims.final[1] / (dims.flat[0] / dims.flat[1]) - 1;
+      if (Math.abs(drift) > TOL.aspectDrift) {
+        harmWhy.push(`stretched ${dims.flat.join("×")}→${dims.final.join("×")} (${(drift * 100).toFixed(1)}% aspect)`);
+      }
     }
   }
   const harm = harmWhy.length > 0;
@@ -94,6 +111,8 @@ export function verdict(r) {
   const pageTilt = Math.abs(val(page.tiltDeg));
   const tiltOk = truthTilt < TOL.shouldActDeg || (finite(pageTilt) && pageTilt <= TOL.tiltFixedDeg);
   let curlOk = true;
+  // Real stills carry no curl truth: a "complete" there is the tilt alone.
+  const curlGraded = r.truth.curl !== "unknown";
   if (curled) {
     const fb = val(flat.bowFrac), ob = val(page.bowFrac);
     if (finite(ob) && finite(fb)) curlOk = ob <= TOL.bowFixedRel * fb;
@@ -115,7 +134,7 @@ export function verdict(r) {
   else cls = "acted-ok";
   return {
     cls, acted, accepted, deskewed, harm, harmWhy, unverified, unverifiedWhy: unverified ? unverifiedWhy : [],
-    tiltOk, curlOk,
+    tiltOk, curlOk, curlGraded,
     residualTilt: pageTilt,
     residualBow: val(page.bowFrac),
     darkWedge,
@@ -343,14 +362,24 @@ const FINAL_BUCKETS = new Set(["nothing", "declined", "unverified", "page"]);
 export function cardOf(r) {
   if (r.error || !r.outcome) return null;
   const d = r.deskew ?? null;
-  if (r.outcome.accepted) {
-    if (d?.planned) return "both";
-    // Accepted on a page measured level and flat: the app claims no curl.
-    return d?.level && d.level.evidence === false ? "none" : "curl";
-  }
-  if (d?.act) return r.outcome.reason === "curl-absent" ? "tilt" : "tilt-only";
+  // "Level and flat", as measured: an older record has no `flat` and falls
+  // back to the evidence alone, as its app did.
+  const levelFlat = !!d?.level && d.level.evidence === false && d.level.flat !== false;
   const bucket = r.outcome.bucket ?? "transient";
-  if (FINAL_BUCKETS.has(bucket) && d?.level && d.level.evidence === false) return "nothing";
+  if (r.outcome.accepted) {
+    // The tilt is claimed only when the engine's surface measured level.
+    if (d?.planned && d.engineLevel !== false) return "both";
+    // Accepted on a page measured level and flat: the app claims no curl.
+    return levelFlat ? "none" : "curl";
+  }
+  if (d?.act) {
+    if (r.outcome.reason === "curl-absent") return "tilt";
+    // The curve could not be checked (the engine failed rather than declined).
+    return FINAL_BUCKETS.has(bucket) || bucket === "better-flat" ? "tilt-only" : "tilt-retry";
+  }
+  // A straighten that could not finish is worth a retry, whatever the engine said.
+  if (d?.failed) return "transient";
+  if (FINAL_BUCKETS.has(bucket) && levelFlat) return "nothing";
   return bucket === "better-flat" ? "declined" : bucket;
 }
 

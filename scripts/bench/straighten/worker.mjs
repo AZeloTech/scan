@@ -74,6 +74,8 @@ async function scene(job, host, dk, spec) {
     timing: { stageMs: Math.round(r.ms), engineMs: Math.round(r.engineMs), gateMs: Math.round(r.gateMs), deskewMs: Math.round(deskewMs) },
     flat,
     final,
+    // The page's proportions: a rotation must not stretch it.
+    ...(acted ? { dims: { flat: [flatImg.width, flatImg.height], final: [fr.final.width, fr.final.height] } } : {}),
     clip: acted ? roundClip(clippingCheck(flat, final)) : null,
     paint: acted ? paintCheck(textureBlocks(flatImg), textureBlocks(fr.final)) : null,
     ...(paper ? { paper: { tiltDeg: measurePage(paper).tiltDeg } } : {}),

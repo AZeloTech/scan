@@ -1136,7 +1136,7 @@ same denominator:
 | class | the page the user sees |
 |---|---|
 | `noop` | the flat page: nothing acted |
-| `harm` | acted and got worse: \|tilt\| up by > 0.3°, bow up by > max(0.15 %, 25 %) (engine surfaces only — a rotation cannot bend lines), print lost, or table brought into a straight page |
+| `harm` | acted and got worse: \|tilt\| up by > 0.3°, bow up by > max(0.15 %, 25 %) (engine surfaces only — a rotation cannot bend lines), print lost, table brought into a straight page or around print shrunk into it, or the page's aspect off the flat page's by > 1 % (stretched) |
 | `unverified` | acted, no harm found, but a check it needed could not be measured (a NaN tilt or bow, too little print) — **never** a success |
 | `complete` | no harm, \|tilt\| ≤ 0.35°, bow ≤ 60 % of the flat page's |
 | `partial` | acted, measured, no harm, not complete |
@@ -1149,7 +1149,12 @@ of) — not on ink density over the visible sheet, which a kept wedge of table
 fools one way and a sheet that grew the other. Print that lost ink but shrank
 with its bounding box alike on both axes, touching no new border, was scaled
 down, not cut: it is reported as shrunk, not as print lost (a page shrunk into
-a frame of table is still harm, as background brought in). **Painted** pages carry fill
+a frame of table is still harm, as background brought in). Table newly in the border of a *tilted* page is the price of turning its
+print — by the deskew or by the engine levelling the lines it models, which
+uncovers the same corners — unless the print shrank with it (`shrunk`): a
+page scaled into a frame of table is harm whatever its tilt. A shrink too
+mild to lose 8 % of the ink is not detected; that is this check's blind spot.
+**Painted** pages carry fill
 without the photo's grain; a **seam** is a fill that steps more than 6 grey
 levels against the paper beside it; both are net of what the flat page
 itself shows, and **dark wedges** count table newly in the border band. The
@@ -1165,8 +1170,12 @@ would show after the tap (`straightenOutcome` in `scan-store.ts`, rebuilt from
 each record by `cardOf` in `straighten/score.mjs`: tilt, curl, both,
 tilt-only, nothing, or the decline's bucket) against each page's verdict.
 `nothing` ("already level and flat") comes from the deskew's own measurement
-of a page it found level (`deskew.level`); on a should-act page it is a false
-claim, and every such page is listed by name. `none` is a page the engine
+of a page it found level (`deskew.level`), and only when that measurement
+looked for a bow on enough lines (`level.flat`, `measuredFlat`); on a
+should-act page it is a false claim, and every such page is listed by name.
+`both` needs the engine's surface measured level (`deskew.engineLevel`,
+`measuredLevel`): otherwise the card is `curl`. `tilt-retry` is a turned page
+whose curve could not be checked (the engine failed rather than declined). `none` is a page the engine
 changed although the deskew measured it level and flat: the app shows no
 card there rather than claim a curl.
 
@@ -1193,6 +1202,12 @@ failure.
 sees) for each flagged scene — harms, unverified pages, seams, and with
 `--compare` lost fixes and newly acted pages — into the run's `sheets/`
 (for `straighten-real`, in the cache: real pixels never enter the repository).
+
+**Curl on real stills is not graded.** Their truth has no curl (`"unknown"`):
+a real page is `complete` on its tilt and on no harm alone, and a still's own
+base and `rot-quad` variants are "nothing to do" only in the tilt the suite
+added, not in whatever skew or curl the photo itself has. The real report
+says so above its headline.
 
 **Baseline** (engine 1e0548d, no deskew step, full profile, `--jobs 8`): of
 255 should-act synthetic pages 49 complete (19.2 %), 7 partial, 198 no-op
