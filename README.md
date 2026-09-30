@@ -189,7 +189,7 @@ each page render (the page region's
 pixel size and the final JPEG's size, bytes and quality), each page of a
 finished PDF (the embedded image's pixels, bytes, ladder rung and quality,
 and whether the size ladder resampled it), pages removed
-or retaken, the page hidden and shown and the time until the camera answers
+(and brought back by the editor's undo) or retaken, the page hidden and shown and the time until the camera answers
 again, stalls, the torch and the auto-capture toggle, and every `onEvent`
 event — rebuilt field by field from that event's own allowlisted fields
 before your `onEvent` is called, so whatever a host adds to the object it

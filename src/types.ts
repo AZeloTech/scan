@@ -466,8 +466,12 @@ export type ScanDiagnosticsPayload =
   | { type: "camera-resume"; ms: number }
   /** The live loop stopped answering (`start`, after `ms` without a pass) and came back (`end`, `ms` in all). */
   | { type: "stall"; phase: "start" | "end"; ms: number }
-  /** A page was removed, or replaced by a retake, after it was taken (1-based). */
-  | { type: "page"; action: "removed" | "retaken"; page: number }
+  /**
+   * A page was removed, brought back by the editor's undo, or replaced by a
+   * retake, after it was taken (1-based). A removal is reported when the bin
+   * is tapped; an `undone` for the same page means it never left.
+   */
+  | { type: "page"; action: "removed" | "undone" | "retaken"; page: number }
   | { type: "torch"; on: boolean }
   /** The MANUAL · AUTOMÁTICO toggle changed. */
   | { type: "auto-toggle"; on: boolean }
