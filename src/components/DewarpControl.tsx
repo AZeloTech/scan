@@ -253,7 +253,7 @@ export function DewarpTile({
       // about *which page this is for*, not an instruction, so it earns a
       // tooltip rather than a permanent line.
       title={dewarp.help}
-      icon={on ? <CheckIcon size={16} /> : <WaveIcon size={16} />}
+      icon={on ? <CheckIcon size={22} /> : <WaveIcon size={22} />}
       label={
         label ?? (on ? copy.tiles.straightenApplied : copy.tiles.straighten)
       }

@@ -4,23 +4,24 @@ import * as React from "react";
 import clsx from "clsx";
 
 /**
- * One of the page editor's four corrections: a 66 px block, icon over one
- * lowercase mono word, four to a line.
+ * One of the page editor's four tools: an icon over one short word, four to a
+ * row, no box of its own (the owner-approved "E3 · Deslizar + Editar" design).
  *
  * It lives in its own module because two components draw it — the editor's own
- * three tiles and {@link DewarpTile}, which is a `switch` rather than a button
+ * three tools and {@link DewarpTile}, which is a `switch` rather than a button
  * and therefore cannot simply be another instance rendered by the editor. Two
  * copies of these class strings is how the row ends up with two slightly
- * different boxes in it, which is exactly what the fixed-band redesign is for.
+ * different controls in it.
  *
- * **The applied state lives on the tile**, not on a chip floating over the
+ * **The applied state lives on the tool**, not on a chip floating over the
  * picture: a correction this page is wearing is a fact about the control that
- * applied it. **Disabled is shown, never hidden** — the row is always four
- * columns wide, so a page that cannot be straightened has the same shape as one
- * that can, and the reader learns the layout once.
+ * applied it, drawn as a tinted well behind it. **Disabled is shown, never
+ * hidden** — the row is always four columns wide, so a page that cannot be
+ * straightened has the same shape as one that can.
  *
- * The label is one word by contract: four equal columns at 375 px leave about
- * 68 px of mono text each (54 px at 320 px), and half a verb is not a control.
+ * The label is one word by contract: four equal columns at 320 px leave about
+ * 70 px of 12 px text each, and half a verb is not a control. 60 px tall and a
+ * quarter of the row wide, so the target clears 44 px both ways.
  */
 export type CorrectionTileState =
   /** Offered, and this page is not wearing it. */
@@ -35,20 +36,19 @@ export type CorrectionTileState =
   | "suggested";
 
 /**
- * Colour as a closed map, never a `className` override — two `border-*`
- * utilities in one class string are resolved by the generated stylesheet's
- * order, not the string's (the rule `ui.tsx` records on `META_TONE_CLASSES`).
+ * Colour as a closed map, never a `className` override — two `bg-*` utilities
+ * in one class string are resolved by the generated stylesheet's order, not
+ * the string's (the rule `ui.tsx` records on `META_TONE_CLASSES`).
  *
  * `mist` and `peach-soft` are fixed tokens, so their tints may carry an opacity
- * modifier; the border and the text take the **shell's** own accent and warn
- * values, which `lib/shell-theme.ts` guarantees against whatever surface colour
+ * modifier; the text takes the **shell's** own accent and warn values, which `lib/shell-theme.ts` guarantees against whatever surface colour
  * the user picked — a fixed `#a2a5a8` label would be legible on the design's
  * green and nowhere else on the ramp.
  */
 const TILE_STATE_CLASSES: Record<CorrectionTileState, string> = {
-  default: "border-shell-line text-shell-ink hover:border-shell-ink",
-  applied: "border-shell-accent bg-mist/[0.16] text-shell-accent",
-  suggested: "border-shell-warn bg-peach-soft/[0.14] text-shell-warn",
+  default: "text-shell-ink hover:bg-shell-sunken",
+  applied: "bg-mist/[0.16] text-shell-accent",
+  suggested: "bg-peach-soft/[0.14] text-shell-warn",
 };
 
 export function CorrectionTile({
@@ -63,7 +63,7 @@ export function CorrectionTile({
   title,
   onClick,
 }: {
-  /** The visible word: lowercase, mono, one word. */
+  /** The visible word: one word. */
   label: string;
   /** The full phrase — the visible word is an abbreviation of it. */
   ariaLabel: string;
@@ -90,15 +90,15 @@ export function CorrectionTile({
       disabled={disabled}
       onClick={onClick}
       className={clsx(
-        "flex h-[66px] flex-1 flex-col items-center justify-center gap-[5px]",
-        "overflow-hidden rounded-[14px] border-[1.5px] px-1",
+        "flex h-[60px] min-w-0 flex-col items-center justify-center gap-1.5",
+        "overflow-hidden rounded-[14px] px-1",
         "transition-colors duration-200",
         "disabled:cursor-not-allowed disabled:opacity-40",
         TILE_STATE_CLASSES[state],
       )}
     >
       {icon}
-      <span className="max-w-full truncate font-mono text-4xs leading-none">
+      <span className="max-w-full truncate text-xs font-semibold leading-none">
         {label}
       </span>
     </button>

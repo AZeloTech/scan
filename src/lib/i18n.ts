@@ -386,23 +386,23 @@ export interface AppCopy {
   preview: {
     dialogLabel: (n: number) => string;
     close: string;
-    /** The header's mono second line: "de 5 · exame". */
-    ofTotal: (total: number, document: string) => string;
-    /** What an unnamed document is called there — the name lands on step 3. */
-    documentWord: string;
-    /** The ⋯ button's accessible name. */
-    menu: string;
-    failedLine: string;
-    /** The full phrase behind the `cantos` tile's one lowercase word. */
-    adjustCorners: string;
+    /** The top-right bin's accessible name; it opens the delete confirmation. */
+    deletePage: string;
+    /** Under the page: "Página 2 de 3" — also the pager's live announcement. */
+    position: (n: number, total: number) => string;
+    /** The quiet line under the position, only when there is more than one page. */
+    swipeHint: string;
     /**
-     * The mono band label over the four tiles — the line where the page stops
-     * being looked at and starts being changed. Written lowercase and
-     * uppercased by `Meta caps`, like every other section marker.
+     * The picture's accessible name: what a tap (Enter) and a hold (Space) on
+     * it do. `full` — the page can be opened whole; `compare` — there is an
+     * un-improved version to hold for.
      */
-    correctLabel: string;
-    /** The four tiles' visible words. One lowercase word each, by contract:
-     *  four equal columns at 375 px leave ~68 px of mono text. */
+    surfaceLabel: (n: number, full: boolean, compare: boolean) => string;
+    failedLine: string;
+    /** The full phrase behind the `Cantos` tool's one word. */
+    adjustCorners: string;
+    /** The four tools' visible words. One word each, by contract: four equal
+     *  columns at 320 px leave ~70 px of 12 px text. */
     tiles: {
       rotate: string;
       corners: string;
@@ -412,8 +412,8 @@ export interface AppCopy {
       finish: string;
     };
     /**
-     * The 38 px status line — the ONE place on this screen that talks about
-     * state. Every sentence is composed at render from `rendered.*` and
+     * The short line under the page — the ONE place on this screen that talks
+     * about state, and silent on a page that is fine. Every sentence is composed at render from `rendered.*` and
      * {@link effectiveFinish}; none of them is ever stored.
      */
     status: {
@@ -441,20 +441,13 @@ export interface AppCopy {
       turning: (direction: string, degrees: number) => string;
     };
     /**
-     * The card between the sheet and the tiles — the band that is allowed to
-     * appear and disappear, because it only exists when one line is not enough.
+     * The pager's buttons, on a document of more than one page. Swiping is the
+     * gesture; these are its keyboard and screen-reader equivalents, shown
+     * when focused.
      */
-    cards: {
-      noCorners: string;
-      failed: string;
-    };
-    /** The pager, on a document of more than one page. */
     pager: {
       previous: string;
       next: string;
-      /** "3 / 5" */
-      count: (n: number, total: number) => string;
-      thumb: (n: number) => string;
     };
     /** Press-and-hold: the same page with the improvements left out. */
     compare: string;
@@ -497,8 +490,6 @@ export interface AppCopy {
      * PDF will carry, so the quality being judged is the quality that ships.
      */
     full: {
-      /** The `⤢ ver inteira` pill that opens it. */
-      open: string;
       label: (n: number) => string;
       /** The header's own screen title. */
       title: string;
@@ -621,15 +612,8 @@ export interface AppCopy {
     /** The primary while a render runs — inert, and saying why. */
     oneMoment: string;
     closeAction: string;
-    /** The ⋯ menu's three rows. */
-    menuItems: {
-      about: string;
-      /** `?debug=1` only. Dev-facing, and the sheet behind it is untranslated. */
-      diagnostics: string;
-      remove: string;
-    };
     /**
-     * The confirmation the ⋯ menu opens. It states the consequence — what the
+     * The confirmation the top-right bin opens. It states the consequence — what the
      * document is left with — rather than asking "are you sure?".
      */
     confirmDelete: {
@@ -1129,18 +1113,21 @@ const PT: AppCopy = {
   preview: {
     dialogLabel: (n) => `Página ${n} ampliada`,
     close: "Fechar a visualização",
-    ofTotal: (total, document) => `de ${total} · ${document}`,
-    documentWord: "documento",
-    menu: "Mais opções desta página",
+    deletePage: "Excluir página",
+    position: (n, total) => `Página ${n} de ${total}`,
+    swipeHint: "deslize para ver as outras",
+    surfaceLabel: (n, full, compare) =>
+      `Página ${n}.` +
+      (full ? " Toque para ver inteira." : "") +
+      (compare ? " Segure para ver sem as melhorias." : ""),
     failedLine: "Esta página falhou — tente de novo.",
     adjustCorners: "Ajustar cantos",
-    correctLabel: "corrigir",
     tiles: {
-      rotate: "girar",
-      corners: "cantos",
-      straighten: "endireitar",
-      straightenApplied: "endireitada",
-      finish: "acabamento",
+      rotate: "Girar",
+      corners: "Cantos",
+      straighten: "Endireitar",
+      straightenApplied: "Endireitada",
+      finish: "Acabamento",
     },
     status: {
       ready: (finish) =>
@@ -1157,17 +1144,9 @@ const PT: AppCopy = {
       turning: (direction, degrees) =>
         `Girando para a ${direction} — ${degrees}°.`,
     },
-    cards: {
-      noCorners:
-        "A folha ficou muito perto da borda da foto. Você pode marcar os cantos na mão ou usar a página como ela está.",
-      failed:
-        "Não conseguimos preparar esta página. Tente de novo ou refaça a foto.",
-    },
     pager: {
       previous: "Página anterior",
       next: "Próxima página",
-      count: (n, total) => `${n} / ${total}`,
-      thumb: (n) => `Ir para a página ${n}`,
     },
     // Deliberately not "original": what it shows is the photo without the
     // clareamento, and that photo is already the app's own JPEG of the frame —
@@ -1193,7 +1172,6 @@ const PT: AppCopy = {
       holdNote: "Segure a página para ver como ela estava antes das melhorias.",
     },
     full: {
-      open: "ver inteira",
       label: (n) => `Página ${n} em tamanho real`,
       title: "Folha inteira",
       close: "Voltar para a página",
@@ -1271,11 +1249,6 @@ const PT: AppCopy = {
     nextPage: "Próxima página",
     oneMoment: "Um instante…",
     closeAction: "Fechar",
-    menuItems: {
-      about: "Sobre as melhorias",
-      diagnostics: "Detalhes técnicos",
-      remove: "Apagar a página",
-    },
     confirmDelete: {
       title: (n) => `Apagar a página ${n}?`,
       body: (remaining) =>
@@ -1786,18 +1759,21 @@ const EN: AppCopy = {
   preview: {
     dialogLabel: (n) => `Page ${n} enlarged`,
     close: "Close the preview",
-    ofTotal: (total, document) => `of ${total} · ${document}`,
-    documentWord: "document",
-    menu: "More options for this page",
+    deletePage: "Delete page",
+    position: (n, total) => `Page ${n} of ${total}`,
+    swipeHint: "swipe to see the others",
+    surfaceLabel: (n, full, compare) =>
+      `Page ${n}.` +
+      (full ? " Tap to see it whole." : "") +
+      (compare ? " Hold to see it without the enhancements." : ""),
     failedLine: "This page failed — try again.",
     adjustCorners: "Adjust corners",
-    correctLabel: "fix",
     tiles: {
-      rotate: "rotate",
-      corners: "corners",
-      straighten: "straighten",
-      straightenApplied: "straightened",
-      finish: "finish",
+      rotate: "Rotate",
+      corners: "Corners",
+      straighten: "Straighten",
+      straightenApplied: "Straightened",
+      finish: "Finish",
     },
     status: {
       ready: (finish) =>
@@ -1813,17 +1789,9 @@ const EN: AppCopy = {
       elapsed: (seconds) => `${seconds} s`,
       turning: (direction, degrees) => `Turning ${direction} — ${degrees}°.`,
     },
-    cards: {
-      noCorners:
-        "The sheet ended up too close to the edge of the photo. You can mark the corners by hand, or use the page as it is.",
-      failed:
-        "We could not prepare this page. Try again, or retake the photo.",
-    },
     pager: {
       previous: "Previous page",
       next: "Next page",
-      count: (n, total) => `${n} / ${total}`,
-      thumb: (n) => `Go to page ${n}`,
     },
     compare: "No enhancements",
     compareHint: "Press and hold to see the photo without the enhancements.",
@@ -1848,7 +1816,6 @@ const EN: AppCopy = {
         "Hold the page to see how it looked before the improvements.",
     },
     full: {
-      open: "see it whole",
       label: (n) => `Page ${n} at actual size`,
       title: "The whole sheet",
       close: "Back to the page",
@@ -1926,11 +1893,6 @@ const EN: AppCopy = {
     nextPage: "Next page",
     oneMoment: "One moment…",
     closeAction: "Close",
-    menuItems: {
-      about: "About the improvements",
-      diagnostics: "Technical details",
-      remove: "Delete this page",
-    },
     confirmDelete: {
       title: (n) => `Delete page ${n}?`,
       body: (remaining) =>
