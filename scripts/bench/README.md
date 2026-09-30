@@ -21,8 +21,8 @@ npm run bench -- --suite session --session regression --seeds 5   # the adversar
 npm run bench -- --suite session --session guidance --seeds 5     # hints, the ready cue, auto-capture (Phase 4)
 npm run bench:webkit                                       # the flow end to end in WebKit, both lanes
 npm run bench -- --suite emulator --seeds 10               # the emulator's own GT check
-npm run bench -- --suite straighten --quick               # Endireitar, 83 scenes, ~2 min (Node, no browser)
-npm run bench -- --suite straighten                        # all 279 scenes, ~8 min at --jobs 8
+npm run bench -- --suite straighten --quick               # Endireitar, 83 scenes, ~1 min (Node, no browser)
+npm run bench -- --suite straighten                        # all 279 scenes, ~4 min at --jobs 8 (12 cores)
 npm run bench -- --suite straighten --compare .bench-out/latest-straighten/results.json
 npm run bench -- --suite straighten --engine-root ../other-worktree --sheets   # score another checkout's engine
 npm run bench:play                                         # the playground, in a Chromium window
@@ -1164,6 +1164,15 @@ failure.
 sees) for each flagged scene — harms, unverified pages, seams, and with
 `--compare` lost fixes and newly acted pages — into the run's `sheets/`
 (for `straighten-real`, in the cache: real pixels never enter the repository).
+
+**Baseline** (engine 1e0548d, no deskew step, full profile, `--jobs 8`): of
+255 should-act synthetic pages 49 complete (19.2 %), 7 partial, 198 no-op
+(77.6 %), 1 harm, 0 unverified; 3 harms over all 279 pages (a bowed
+full-frame form and two pages shrunk into a frame of table at 10° in-frame
+rotation); tilt-only pages 36/204 complete (tilted print in a correct outline
+9/64); curl 13/51; residual tilt p50/p90 3.0°/10.0°; 6 pages over the 12 s
+budget, no timeouts. Real stills (3 labelled): 4/30 complete, 26 no-op, no
+harm.
 
 ## Status
 
