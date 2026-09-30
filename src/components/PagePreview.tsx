@@ -9,7 +9,7 @@ import { usePageTurn } from "@/hooks/usePageTurn";
 import { usePageView } from "@/hooks/usePageView";
 import { useRotatedFit } from "@/hooks/useRotatedFit";
 import { overlayIn, overlayOut, prefersReducedMotion } from "@/lib/motion";
-import { dragOffset, HOLD_MS, pressIntent, swipeStep } from "@/lib/page-swipe";
+import { dragOffset, HOLD_MS, inEdgeZone, pressIntent, swipeStep } from "@/lib/page-swipe";
 import {
   DewarpPanel,
   DewarpTile,
@@ -149,7 +149,14 @@ export function PagePreview({
   const [fullView, setFullView] = React.useState(false);
   const [girar, setGirar] = React.useState(false);
   const [acabamento, setAcabamento] = React.useState(false);
-  const [confirmDelete, setConfirmDelete] = React.useState(false);
+  /**
+   * The page the delete sheet is about, fixed when it opens: the sheet's
+   * title, its count and the removal all name this page, whatever the pager
+   * does underneath. `null` while the sheet is closed.
+   */
+  const [confirmDelete, setConfirmDelete] = React.useState<{ pageId: string; humanNumber: number } | null>(null);
+  const confirmDeleteRef = React.useRef(confirmDelete);
+  confirmDeleteRef.current = confirmDelete;
   const [about, setAbout] = React.useState(false);
   /**
    * The turn the girar sheet last made — the direction that was tapped and the
@@ -285,8 +292,8 @@ export function PagePreview({
     ? () => setFullView(false)
     : about
         ? () => setAbout(false)
-        : confirmDelete
-          ? () => setConfirmDelete(false)
+        : confirmDelete !== null
+          ? () => setConfirmDelete(null)
           : girar
             ? closeGirar
             : acabamento
@@ -436,6 +443,8 @@ export function PagePreview({
   const headingRef = React.useRef<number | null>(null);
   const goTo = React.useCallback(
     (step: -1 | 1) => {
+      // No paging while the delete sheet is open: it names one page.
+      if (confirmDeleteRef.current !== null) return;
       const to = (headingRef.current ?? index) + step;
       const target = tiles[to];
       if (target === undefined) return;
@@ -487,6 +496,28 @@ export function PagePreview({
     return () => document.removeEventListener("keydown", onKey);
   }, [containerRef, multiPage]);
 
+  /**
+   * The bin. A slide still in flight is settled first, on the page it was
+   * heading for — the one about to be on screen — and the sheet is opened
+   * for that page by id, so a swipe and a quick tap on the bin can never
+   * delete a page other than the one the sheet names.
+   */
+  const openDelete = () => {
+    let target = current;
+    if (headingRef.current !== null) {
+      const heading = tiles[headingRef.current];
+      if (slideTimer.current !== null) window.clearTimeout(slideTimer.current);
+      slideTimer.current = null;
+      headingRef.current = null;
+      setSlide({ x: 0, animate: false });
+      if (heading !== undefined) {
+        target = heading;
+        setCursor(heading.pageId);
+      }
+    }
+    setConfirmDelete({ pageId: target.pageId, humanNumber: target.humanNumber });
+  };
+
   const advance = () => {
     if (!advances) {
       dismiss();
@@ -532,10 +563,10 @@ export function PagePreview({
             </RoundAction>
             <RoundAction
               label={copy.preview.deletePage}
-              tone={confirmDelete ? "danger" : "neutral"}
+              tone={confirmDelete !== null ? "danger" : "neutral"}
               disabled={dewarp.running}
-              expanded={confirmDelete}
-              onClick={() => setConfirmDelete(true)}
+              expanded={confirmDelete !== null}
+              onClick={openDelete}
             >
               <TrashIcon size={20} />
             </RoundAction>
@@ -578,6 +609,14 @@ export function PagePreview({
                   <ChevronRightIcon size={18} />
                 </PagerButton>
                   </>
+                )}
+                {canCompare && (
+                  <CompareToggle
+                    label={copy.preview.compareToggle(comparing)}
+                    pressed={comparing}
+                    disabled={processing}
+                    onClick={comparing ? releaseCompare : holdCompare}
+                  />
                 )}
                 {/* Said once per device, over the control it is about, and
                     gone four seconds later. Not a `role="status"`: the same
@@ -732,7 +771,9 @@ export function PagePreview({
           {/* ── 6. the four tools ────────────────────────────────────────── */}
           {/* Dimmed rather than removed while a render runs: a row that
               disappears is a row whose controls move under the thumb. */}
-          <div className="grid shrink-0 grid-cols-4 gap-1 px-4 pt-1">
+          {/* Four columns down to 340 px; narrower (a 200 % zoom on a phone is
+              ~210 px) two rows of two, so no word is cut. */}
+          <div className="grid shrink-0 grid-cols-4 gap-1 px-4 pt-1 max-[339px]:grid-cols-2">
             <CorrectionTile
               label={copy.preview.tiles.rotate}
               ariaLabel={copy.girar.title}
@@ -763,7 +804,8 @@ export function PagePreview({
           </div>
 
           {/* ── 7. the footer, which never grows and never moves ─────────── */}
-          <div className="flex shrink-0 items-center gap-2.5 px-4 pt-2.5">
+          {/* Side by side down to 340 px; narrower, stacked, the primary on top. */}
+          <div className="flex shrink-0 items-center gap-2.5 px-4 pt-2.5 max-[339px]:flex-col-reverse max-[339px]:items-stretch max-[339px]:gap-2">
             {processing ? (
               // "Cancelar" takes the same slot "Refazer" had. A dewarp is the
               // only render worth stopping — the others are a second or two of
@@ -792,7 +834,8 @@ export function PagePreview({
               disabled={processing}
               onClick={advance}
               className={clsx(
-                "inline-flex h-14 min-w-0 flex-1 items-center justify-center gap-2.5 rounded-full px-3",
+                "inline-flex h-14 min-w-0 flex-1 items-center justify-center gap-2.5 rounded-full px-3 text-center",
+                "max-[339px]:h-auto max-[339px]:min-h-14 max-[339px]:flex-none max-[339px]:py-2",
                 "bg-shell-ink text-[17px] font-bold leading-none text-shell-on",
                 "transition-colors duration-200",
                 // Hover is applied only when the button is live — a "cancel the
@@ -823,16 +866,16 @@ export function PagePreview({
       {acabamento && (
         <AcabamentoSheet tile={current} onClose={() => setAcabamento(false)} />
       )}
-      {confirmDelete && (
+      {confirmDelete !== null && (
         <DeletePageSheet
-          humanNumber={current.humanNumber}
+          humanNumber={confirmDelete.humanNumber}
           remaining={pageCount - 1}
           onConfirm={() => {
-            store.removePage(pageId);
-            diagnosticsSink?.emit({ type: "page", action: "removed", page: current.humanNumber });
+            store.removePage(confirmDelete.pageId);
+            diagnosticsSink?.emit({ type: "page", action: "removed", page: confirmDelete.humanNumber });
             onClose();
           }}
-          onClose={() => setConfirmDelete(false)}
+          onClose={() => setConfirmDelete(null)}
         />
       )}
       {about && <ImprovementsInfoSheet onClose={() => setAbout(false)} />}
@@ -916,8 +959,11 @@ type Gesture = {
  * whole. The arithmetic is `lib/page-swipe.ts`'s. The hold used to start on touch-down; it waits a beat now so a swipe
  * does not flash the un-improved page at its start.
  *
- * `touch-none` stops the browser claiming the press for a pan or a double-tap
- * zoom (nothing on this screen scrolls), `select-none` stops the long-press
+ * `touch-action: pinch-zoom` stops the browser claiming one finger for a pan
+ * or a double-tap zoom (nothing on this screen scrolls) while leaving it the
+ * two-finger pinch — a second finger abandons the page gesture, so zooming
+ * never turns the page. A touch starting in the edge zone
+ * ({@link inEdgeZone}) is left to the system's back gesture. `select-none` stops the long-press
  * selection halo, and `onContextMenu` stops Android's long-press menu and iOS's
  * "save image" sheet landing on top of the comparison.
  *
@@ -969,7 +1015,18 @@ function PageStage({
   React.useEffect(() => clear, [clear]);
   const swipeable = canPrev || canNext;
 
+  /** Drop the gesture in progress without acting on it. */
+  const abandon = () => {
+    const g = gesture.current;
+    if (g === null) return;
+    clear();
+    gestureAt.current = performance.now();
+    if (g.mode === "hold") onRelease();
+    else if (g.mode === "swipe") onSnapBack();
+  };
+
   const finish = (event: React.PointerEvent<HTMLDivElement>, cancelled: boolean) => {
+    if (!event.isPrimary) return;
     const g = gesture.current;
     if (g === null || g.id !== event.pointerId) return;
     clear();
@@ -999,11 +1056,24 @@ function PageStage({
   return (
     <div
       ref={stageRef}
-      className="relative flex min-h-0 flex-1 touch-none select-none items-center overflow-hidden pt-3"
+      className="relative flex min-h-0 flex-1 select-none items-center overflow-hidden pt-3 [touch-action:pinch-zoom]"
       onContextMenu={(event) => event.preventDefault()}
       onPointerDown={(event) => {
         if (event.pointerType === "mouse" && event.button !== 0) return;
         if (event.target instanceof Element && event.target.closest("[data-pager]") !== null) return;
+        // A second finger is a pinch, not a page gesture: whatever the first
+        // one started ends here (a hold lets go, a drag snaps back) and the
+        // browser has the pinch.
+        if (!event.isPrimary) {
+          abandon();
+          return;
+        }
+        // A touch that starts in the platform's edge-swipe zone is the
+        // system's back gesture, not a page turn.
+        if (event.pointerType === "touch" && inEdgeZone(event.clientX, window.innerWidth)) {
+          clear();
+          return;
+        }
         clear();
         const g: Gesture = {
           id: event.pointerId,
@@ -1231,6 +1301,43 @@ function PagerButton({
   );
 }
 
+/**
+ * The compare hold's equivalent for a screen reader, whose double-tap is a
+ * click and can never be a hold: a toggle, "Mostrar sem as melhorias" /
+ * "Mostrar com as melhorias". Out of sight until it takes keyboard focus
+ * (like the pager buttons); always in the accessibility tree.
+ */
+function CompareToggle({
+  label,
+  pressed,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  pressed: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      data-pager
+      data-compare-toggle
+      aria-pressed={pressed}
+      disabled={disabled}
+      onClick={onClick}
+      className={clsx(
+        "sr-only focus-visible:not-sr-only focus-visible:absolute focus-visible:bottom-2 focus-visible:z-10",
+        "focus-visible:inset-x-0 focus-visible:mx-auto focus-visible:w-fit",
+        "focus-visible:flex focus-visible:min-h-11 focus-visible:items-center focus-visible:rounded-full focus-visible:px-4",
+        "focus-visible:bg-shell-sunken focus-visible:text-[13px] focus-visible:font-semibold focus-visible:text-shell-ink",
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
 /** The status line's one action — "por quê?" or "tentar de novo" — hit at 44 px. */
 function InlineAction({
   onClick,
@@ -1277,6 +1384,7 @@ function FooterSecondary({
       onClick={onClick}
       className={clsx(
         "inline-flex h-14 w-[132px] shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-full",
+        "max-[339px]:h-auto max-[339px]:min-h-14 max-[339px]:w-full max-[339px]:whitespace-normal max-[339px]:py-2",
         "border border-shell-line text-base font-semibold text-shell-ink",
         "transition-colors duration-200 hover:border-shell-ink",
         "disabled:cursor-not-allowed disabled:opacity-40",

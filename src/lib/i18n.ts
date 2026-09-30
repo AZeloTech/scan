@@ -465,6 +465,8 @@ export interface AppCopy {
     /** Press-and-hold: the same page with the improvements left out. */
     compare: string;
     compareHint: string;
+    /** The compare hold as a toggle, for a screen reader (whose activation is a click, never a hold). */
+    compareToggle: (showingOriginal: boolean) => string;
     /**
      * The one-time hint under the compare chip, shown the first time a page has
      * something to compare against and never again (`lib/tips.ts`).
@@ -1169,6 +1171,8 @@ const PT: AppCopy = {
     // not the untouched thing the camera sensor saw.
     compare: "Sem melhorias",
     compareHint: "Segure para ver a foto sem as melhorias.",
+    compareToggle: (showingOriginal) =>
+      showingOriginal ? "Mostrar com as melhorias" : "Mostrar sem as melhorias",
     holdTip: "segure e solte para comparar",
     about: {
       title: "As melhorias desta página",
@@ -1814,6 +1818,8 @@ const EN: AppCopy = {
     },
     compare: "No enhancements",
     compareHint: "Press and hold to see the photo without the enhancements.",
+    compareToggle: (showingOriginal) =>
+      showingOriginal ? "Show with the enhancements" : "Show without the enhancements",
     holdTip: "press and hold to compare",
     about: {
       title: "This page's improvements",

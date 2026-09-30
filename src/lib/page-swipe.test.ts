@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { dragOffset, pressIntent, swipeStep, SWIPE_SLOP } from "./page-swipe.ts";
+import { dragOffset, EDGE_ZONE_PX, inEdgeZone, pressIntent, swipeStep, SWIPE_SLOP } from "./page-swipe.ts";
 import { APP_COPY } from "./i18n.ts";
 
 test("a press inside the slop is still a tap or a hold", () => {
@@ -52,4 +52,19 @@ test("the page editor says where it is, and only hints at swiping in words", () 
   assert.equal(APP_COPY.pt.preview.swipeHint, "deslize para ver as outras");
   assert.match(APP_COPY.pt.preview.surfaceLabel(1, true, true), /inteira.*melhorias/);
   assert.equal(APP_COPY.pt.preview.surfaceLabel(1, false, false), "Página 1.");
+});
+
+test("a touch in the platform's edge-swipe zone is left to the system's back gesture", () => {
+  assert.equal(inEdgeZone(0, 412), true);
+  assert.equal(inEdgeZone(EDGE_ZONE_PX - 1, 412), true);
+  assert.equal(inEdgeZone(412 - EDGE_ZONE_PX + 1, 412), true);
+  assert.equal(inEdgeZone(EDGE_ZONE_PX, 412), false);
+  assert.equal(inEdgeZone(206, 412), false);
+});
+
+test("a screen reader has a toggle for the compare hold, in both languages", () => {
+  assert.equal(APP_COPY.pt.preview.compareToggle(false), "Mostrar sem as melhorias");
+  assert.equal(APP_COPY.pt.preview.compareToggle(true), "Mostrar com as melhorias");
+  assert.equal(APP_COPY.en.preview.compareToggle(false), "Show without the enhancements");
+  assert.equal(APP_COPY.en.preview.compareToggle(true), "Show with the enhancements");
 });

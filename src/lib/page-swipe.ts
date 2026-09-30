@@ -14,6 +14,18 @@ export const SWIPE_SLOP = 10;
 /** A press held this long without moving is the compare hold. */
 export const HOLD_MS = 220;
 
+/**
+ * The strip along each side of the screen (px) where a touch belongs to the
+ * platform's edge-swipe back gesture (iOS Safari, Android gesture navigation)
+ * rather than to the page.
+ */
+export const EDGE_ZONE_PX = 16;
+
+/** Whether a touch at `x` starts inside the edge-swipe zone of a `viewportWidth` screen. */
+export function inEdgeZone(x: number, viewportWidth: number): boolean {
+  return x < EDGE_ZONE_PX || x > viewportWidth - EDGE_ZONE_PX;
+}
+
 /** How far past a closed end the page still follows the finger: a third, so it gives, then stops. */
 export const EDGE_RESISTANCE = 0.3;
 
