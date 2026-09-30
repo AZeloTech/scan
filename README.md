@@ -170,7 +170,7 @@ Full types ship with the package (`ScanFlowProps`). In short:
 for testing on real phones: the session's facts (layout, viewport, device
 pixel ratio, safe-area insets, vibration support), the camera coming up
 (stream size, time to a live preview, torch support), the detection lane and
-why, the live loop sampled at most twice a second (detection time and median,
+why, the live loop sampled at most twice in any second (detection time and median,
 cadence, frame age, found / locked / ready, and the HUD's `why:` reason),
 the visible region, hints shown and for how long, the ready cue on and off,
 auto-capture's countdown, cancellations (with the reason), fires (time from a
@@ -181,14 +181,19 @@ flag), each confirm-corners answer (kept, moved — the largest corner move as
 a percentage of the photo's diagonal —, retake or whole photo), pages removed
 or retaken, the page hidden and shown and the time until the camera answers
 again, stalls, the torch and the auto-capture toggle, and every `onEvent`
-event. Each event has `v` (schema version, now 1), `seq` and `t` (ms since the
+event — rebuilt field by field from that event's own allowlisted fields
+before your `onEvent` is called, so whatever a host adds to the object it
+receives stays its own. Each event has `v` (schema version, now 1), `seq` and `t` (ms since the
 flow mounted).
 
 **The privacy contract.** An event carries numbers, booleans, enums,
 library-made reason strings and corner-geometry fractions — never pixels,
 thumbnails, crops, image hashes or signatures, text read from a page, file
 names, or a user agent. That is enforced at run time as well as by the type:
-anything that is not a plain value is dropped before the callback is called.
+anything that is not a plain value is dropped before the callback is called,
+and nesting is cut off a few levels down (a cyclic object cannot stall the
+scanner). Anything *you* add to what you forward — a tester's note, a URL
+parameter — is outside this contract.
 **The library never sends, stores or buffers an event**; it only calls your
 function. Whether events leave the device, where they go and on what legal
 basis (LGPD, when a person is photographing a medical document) is the host's

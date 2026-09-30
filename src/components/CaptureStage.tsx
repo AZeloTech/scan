@@ -1156,7 +1156,10 @@ export function CaptureStage({
   }, [diagnosticsSink, shownHint]);
 
   const loopStateRef = React.useRef({ running: false, found: false });
-  loopStateRef.current = { running: mode === "live" && !paused && !disabled && !cameraLost, found: detect.hasQuad };
+  // Diagnostics-only state: nothing is built for it without a sink.
+  if (diagnosticsSink !== null) {
+    loopStateRef.current = { running: mode === "live" && !paused && !disabled && !cameraLost, found: detect.hasQuad };
+  }
   const readDiagnostics = detect.diagnostics;
   React.useEffect(() => {
     if (diagnosticsSink === null || mode !== "live") return;

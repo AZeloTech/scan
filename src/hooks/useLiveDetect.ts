@@ -1869,7 +1869,8 @@ export function useLiveDetect({
       const times = passTimesRef.current;
       times.push(outcome.detectMs);
       if (times.length > 31) times.shift();
-      passCountRef.current += 1;
+      // Counted only for the diagnostics stream's sampler, which reads deltas.
+      if (diagRef.current !== null) passCountRef.current += 1;
       frameAgeRef.current = performance.now() - outcome.frameAt;
       const keepGoing = adapt(outcome.costMs, outcome.detectMs, profile);
       reportPass(source, false, outcome.detection, outcome, elapsed, accepted, motionScore, false, holdBroken, rejected);

@@ -37,7 +37,7 @@ import { LangProvider } from "./components/I18n";
 import { createExitGate, type ExitGate } from "./lib/exit-gate";
 import { SHELL_ROOT_STYLE } from "./lib/shell-theme";
 import { autoCaptureOffered, pickCaptureLayout } from "./lib/capture-layout";
-import { diagnosticsSinkFor, type DiagnosticsSink } from "./lib/diagnostics-events";
+import { diagnosticsSinkFor, flowDiagnostic, type DiagnosticsSink } from "./lib/diagnostics-events";
 
 const DEFAULT_MAX_PAGES = 20;
 
@@ -92,8 +92,13 @@ export function ScanFlow(props: ScanFlowProps) {
   sinkRef.current = diagnosticsSink;
 
   const emit = useCallback((event: ScanEvent) => {
+    // The diagnostics copy is rebuilt from an allowlist *before* the host's
+    // onEvent can touch the object: whatever a host adds to its event stays
+    // its own.
+    const sink = sinkRef.current;
+    const flow = sink === null ? null : flowDiagnostic(event);
     handlers.current.onEvent?.(event);
-    sinkRef.current?.emit({ type: "flow", event });
+    if (flow !== null) sink?.emit({ type: "flow", event: flow });
   }, []);
 
   /**

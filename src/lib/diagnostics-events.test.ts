@@ -3,14 +3,17 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import type { ScanDiagnosticsEvent, ScanDiagnosticsPayload } from "@/types";
+import type { ScanDiagnosticsEvent, ScanDiagnosticsPayload, ScanEvent } from "@/types";
 import {
   cleanValue,
   createDiagnosticsSink,
   diagnosticsSinkFor,
+  flowDiagnostic,
   maxCornerMovePct,
+  MAX_DEPTH,
   MAX_STRING,
   PASS_SAMPLE_MS,
+  PASS_WINDOW_MS,
 } from "./diagnostics-events.ts";
 
 /** One of every event the library emits, as its call sites build them. */
@@ -181,6 +184,92 @@ test("a sampler on a half-second timer with jitter keeps its two samples a secon
   // Asked twice in the same slot: once.
   now += 10;
   assert.equal(sink.passDue(), false);
+});
+
+test("no rolling second ever holds a third pass sample, whatever the timer does", () => {
+  // The review's counterexample: asked at 0, 400 and 900 ms.
+  let now = 0;
+  const sink = createDiagnosticsSink(() => undefined, () => now);
+  const accepted: number[] = [];
+  for (now of [0, 400, 900]) if (sink.passDue()) accepted.push(now);
+  assert.ok(accepted.length <= 2, accepted.join(","));
+  // …and a jittery timer, asked at random: check every window.
+  let seed = 7;
+  const random = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const sink2 = createDiagnosticsSink(() => undefined, () => now);
+  const times: number[] = [];
+  for (now = 0; now < 60_000; now += 20 + random() * 400) if (sink2.passDue()) times.push(now);
+  for (let i = 2; i < times.length; i += 1) {
+    assert.ok(times[i] - times[i - 2] >= PASS_WINDOW_MS, `3 samples within ${times[i] - times[i - 2]} ms`);
+  }
+  assert.ok(times.length >= 60 * 1.5, `${times.length} samples in 60 s`);
+});
+
+test("a cyclic or deep payload is cut off, never recursed into, and the scanner never throws", () => {
+  const cyclic: Record<string, unknown> = { a: 1 };
+  cyclic.self = cyclic;
+  assert.doesNotThrow(() => cleanValue(cyclic));
+  let depth = 0;
+  let cut: unknown = cleanValue(cyclic);
+  while (cut !== null && typeof cut === "object" && "self" in cut) {
+    cut = (cut as { self: unknown }).self;
+    depth += 1;
+  }
+  assert.ok(depth < MAX_DEPTH, `${depth} levels`);
+  // Through the sink, with a host that is fine: the event still arrives.
+  const got: ScanDiagnosticsEvent[] = [];
+  const sink = createDiagnosticsSink((event) => got.push(event), () => 0);
+  const event = { name: "step", step: "review", extra: cyclic } as unknown as ScanEvent;
+  assert.doesNotThrow(() => sink.emit({ type: "flow", event }));
+  assert.equal(got.length, 1);
+  // A getter that throws while being read is swallowed too.
+  const hostile = Object.defineProperty({}, "boom", {
+    enumerable: true,
+    get() {
+      throw new Error("getter");
+    },
+  });
+  assert.doesNotThrow(() => sink.emit({ type: "flow", event: hostile as unknown as ScanEvent }));
+});
+
+test("a flow event is rebuilt from an allowlist: what a host adds to its own event never travels", () => {
+  const every: ScanEvent[] = [
+    { name: "step", step: "corners" },
+    { name: "capture", page: 1, source: "camera" },
+    { name: "retake", page: 2 },
+    { name: "remove", page: 3 },
+    { name: "reorder", from: 1, to: 2 },
+    { name: "dewarp", page: 1, outcome: "applied" },
+    { name: "quality", page: 1, verdict: "blurred" },
+    { name: "size_ladder", rung: 1, bytes: 1234 },
+    { name: "pdf_built", pages: 2, bytes: 4567, ms: 890 },
+    { name: "error", code: "camera_denied", recoverable: true },
+    { name: "cancel", reason: "user", pages: 0 },
+  ];
+  for (const event of every) {
+    assert.deepEqual(flowDiagnostic(event), event, event.name);
+    // The host decorates its event (a name, a note) and the copy stays clean.
+    const decorated = { ...event, patientName: "Fulana de Tal", note: "HIV+" } as unknown as ScanEvent;
+    const copy = flowDiagnostic(decorated);
+    assert.deepEqual(copy, event, event.name);
+    assert.doesNotMatch(JSON.stringify(copy), /Fulana|HIV/);
+  }
+  // Text where an enum belongs, or an unknown name: no event at all.
+  assert.equal(flowDiagnostic({ name: "step", step: "Fulana de Tal" } as unknown as ScanEvent), null);
+  assert.equal(flowDiagnostic({ name: "error", code: "HIV+", recoverable: true } as unknown as ScanEvent), null);
+  assert.equal(flowDiagnostic({ name: "remove", page: "Fulana" } as unknown as ScanEvent), null);
+  assert.equal(flowDiagnostic({ name: "patient", page: 1 } as unknown as ScanEvent), null);
+});
+
+test("ScanFlow builds the flow copy before the host's onEvent can touch the event", () => {
+  const source = readFileSync(path.join(process.cwd(), "src", "ScanFlow.tsx"), "utf8");
+  const start = source.indexOf("const emit = useCallback((event: ScanEvent)");
+  assert.ok(start > 0);
+  const body = source.slice(start, source.indexOf("}, []);", start));
+  const built = body.indexOf("flowDiagnostic(event)");
+  const handed = body.indexOf("onEvent?.(event)");
+  assert.ok(built > 0 && handed > built, "flowDiagnostic runs before onEvent");
+  assert.doesNotMatch(body, /emit\(\{ type: "flow", event \}\)/, "the raw event is never emitted");
 });
 
 test("a host that throws cannot break the scanner", () => {
