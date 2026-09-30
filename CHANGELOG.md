@@ -24,6 +24,10 @@ freezes at 1.0.
   down (the marks faded out and the framing marks came back) and runs no
   passes on the preview the still pipeline is disturbing; the overlay stays
   on the tapped quad.
+- **The corner marks sit on the page's corners under a full-bleed camera.**
+  The overlay was clamped to the stage's width by the scoped media reset
+  while the cover-fitted frame is wider, so the marks were drawn squeezed
+  towards the left, off the corners (worse on 4:3 streams).
 - **"Too small to be a page" is judged on the screen.** The detector's
   coverage floor was a share of the whole camera frame; on the full-bleed
   rail a stream wider than the screen shows only part of it, and a page
