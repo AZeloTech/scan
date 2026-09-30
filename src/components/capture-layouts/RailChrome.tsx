@@ -42,16 +42,20 @@ export const RAIL_FRAMING =
   "inset-x-6 top-[calc(max(env(safe-area-inset-top),12px)+7rem)] bottom-[calc(max(env(safe-area-inset-bottom),14px)+13.75rem)]";
 
 /**
- * How the rail fits the camera frame (`lib/visible-region.ts`, Phase 5a):
- * `contain` — the WHOLE frame, as large as fits the screen above the
- * controls, dark ground where it does not reach. Every part of the frame the
- * scanner judges (and the photo keeps) is on screen, so a page the person
- * sees framed is framed. Chosen on the bench over `cover` (the look before:
- * on a tall phone a well-framed page never became ready) and `maxcrop`
- * (≤ 12 % cropped a side: a larger picture, but on 3:4 streams the page's
- * sides fall in the crop) — see the README's "What the camera shows".
+ * How the rail fits the camera frame (`lib/visible-region.ts`): `cover` —
+ * full-bleed, the camera under the whole screen and the controls over a dark
+ * fade, as the design has it. What the person sees is the cover crop minus
+ * the controls, and that visible region — not the whole frame — is what the
+ * hints, the ready cue and auto-capture judge the page against, so a page
+ * framed on screen is framed; the photo keeps the whole frame around it.
+ *
+ * Phase 5a tried `contain`: it sizes the frame against the screen ABOVE the
+ * controls, so on a real phone (browser bars, gesture bar, larger text) a
+ * 9:16 stream is height-limited and shrinks on both axes — the camera filled
+ * about half the screen. Its bench advantage was an artefact of scripted
+ * holds framing the page in the whole sensor frame rather than on screen.
  */
-export const RAIL_FIT = "contain" as const;
+export const RAIL_FIT = "cover" as const;
 
 /**
  * The controls' band, for the live loop: from the safe area up to the top of
