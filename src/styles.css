@@ -129,6 +129,21 @@
     cursor: default;
   }
 
+  /*
+   * The confirm-corners screen's pucks (C5): round and filled. The button reset
+   * above (`border-radius: 0; background-color: transparent`) outranks
+   * scanic's own `.scanic-handle` rule, which is what drew them as hollow
+   * squares. Scoped to that screen: the desktop editor and the page editor's
+   * corner sheet keep the look they had. The held puck keeps scanic's accent.
+   */
+  .scan-root [data-scan-confirm-editor] .scan-corner-handle {
+    border-radius: 9999px;
+  }
+
+  .scan-root [data-scan-confirm-editor] .scan-corner-handle:not(.is-active) {
+    background-color: var(--scanic-handle-color);
+  }
+
   .scan-root img,
   .scan-root svg,
   .scan-root video,

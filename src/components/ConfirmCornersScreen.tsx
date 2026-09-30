@@ -21,8 +21,8 @@ import { useAssetUrls, useScanRuntime } from "@/hooks/useScanRuntime";
 import { useDialogChrome } from "@/hooks/useDialogChrome";
 import { useCopy } from "@/components/I18n";
 import { useShell } from "@/components/ShellTheme";
-import { CameraIcon, CheckIcon, SpinnerIcon } from "@/components/icons";
-import { Button, LiveRegion, Meta, Notice } from "@/components/ui";
+import { CameraIcon, CheckIcon, ExpandIcon, SpinnerIcon } from "@/components/icons";
+import { LiveRegion, Meta, Notice } from "@/components/ui";
 
 /**
  * Every capture stops here.
@@ -52,6 +52,21 @@ import { Button, LiveRegion, Meta, Notice } from "@/components/ui";
  *
  * It sits on the themeable shell like every other camera surface, so the
  * outline and the pucks stay legible from `carvão` through to `papel`.
+ *
+ * ## Layout: "C5 · Uma linha de ações" (owner-approved, 2026-09-29)
+ *
+ * The photo fills the screen edge to edge on the shell's deepest ground, and
+ * everything else floats over it: a pill at the top that says the one thing to
+ * do (or, when the photo's check or the detector has a reason, says that
+ * instead), a small "Página N · cantos" under it, and ONE bottom bar of three
+ * cells — Refazer, Confirmar (the filled primary), Foto inteira. The editor's
+ * own box stops short of the pill and the bar, so a handle can never sit under
+ * either of them; on a 3:4 photo that box is taller than the photo needs, and
+ * what shows around it is the same ground, so the page still reads full-bleed.
+ *
+ * The confirmed page flies into the Confirmar cell, which pulses as it lands:
+ * the screen has no gallery slot any more, and the cell the thumb just pressed
+ * is where the eye already is.
  */
 
 interface ConfirmCornersScreenProps {
@@ -75,12 +90,14 @@ export function ConfirmCornersScreen({
 }: ConfirmCornersScreenProps) {
   const hostRef = React.useRef<HTMLDivElement | null>(null);
   const stageRef = React.useRef<HTMLDivElement | null>(null);
-  const slotRef = React.useRef<HTMLDivElement | null>(null);
+  const slotRef = React.useRef<HTMLButtonElement | null>(null);
   const flyerRef = React.useRef<HTMLDivElement | null>(null);
   const editorRef = React.useRef<CornerEditor | null>(null);
 
   const [phase, setPhase] = React.useState<Phase>("loading");
   const [landed, setLanded] = React.useState(false);
+  /** False once the editor opened with no page outline to seed it (its own inset quad). */
+  const [found, setFound] = React.useState(true);
 
   const copy = useCopy();
   const urls = useAssetUrls();
@@ -233,11 +250,16 @@ export function ConfirmCornersScreen({
             borderColor: LOUPE_RING,
             crosshairColor: LOUPE_RING,
           },
+          // C5: a light outline and round light pucks over the photo — 28 px
+          // of visible disc, hit at 56 px (the 44 px floor, with room).
+          // No dimming outside the quad: the photo is the ground here, and a
+          // tint over the editor's box would draw that box on the screen.
           theme: {
             accent: theme.accent,
-            edgeColor: theme.accent,
-            edgeWidth: 1.5,
-            handleSize: 24,
+            mask: "rgba(0, 0, 0, 0)",
+            edgeColor: theme.handle,
+            edgeWidth: 2,
+            handleSize: 28,
             handleHit: 56,
             handleColor: theme.handle,
             handleRingColor: theme.accent,
@@ -249,6 +271,7 @@ export function ConfirmCornersScreen({
           },
         });
         editorRef.current = editor;
+        setFound(detected !== null);
         // scanic names its handles in English and offers no option for it.
         localizeCornerHandles(host, handleLabels);
         if (probing() || diagnosticsSink !== null) {
@@ -310,90 +333,71 @@ export function ConfirmCornersScreen({
 
   const busy = phase === "flying";
 
+  /**
+   * The pill's sentence. A reason — the photo's own check, or no outline to
+   * seed the editor with — replaces the instruction rather than stacking under
+   * it: one sentence over the photo, and it is the one that matters.
+   */
+  const reason =
+    capture.attention != null
+      ? copy.confirm.attention[capture.attention]
+      : phase === "ready" && !found
+        ? copy.confirm.notFound
+        : null;
+
   return (
     <div
       ref={containerRef}
       role="dialog"
       aria-modal="true"
       aria-label={copy.confirm.dialogLabel(pageNumber)}
-      className="fixed inset-0 z-50 flex justify-center overscroll-contain bg-shell"
+      className="fixed inset-0 z-50 overflow-hidden overscroll-contain bg-shell-sunken"
     >
-      <div className="flex h-full w-full max-w-[30rem] flex-col overflow-hidden">
-        <header className="flex shrink-0 flex-col gap-1 px-4 pb-2 pt-[max(env(safe-area-inset-top),14px)]">
-          <Meta caps onNight>
-            {copy.common.stepOfThree(1)} · {copy.common.page(pageNumber)}
-          </Meta>
-          <h1 className="font-display text-xl font-semibold text-shell-ink">
-            {copy.confirm.title}
-          </h1>
-          <p className="text-base leading-snug text-shell-ink2">
-            {copy.confirm.help}
-          </p>
-          {/* The photo's own check asked for a closer look (`lib/still-check.ts`):
-              said once, in words, before the handles — never a silent accept. */}
-          {capture.attention != null && (
-            <p role="status" data-scan-attention={capture.attention} className="flex items-start gap-2 text-base font-semibold leading-snug text-shell-ink">
-              <span aria-hidden="true" className="mt-[0.45em] h-2 w-2 shrink-0 rounded-full bg-peach" />
-              {copy.confirm.attention[capture.attention]}
-            </p>
-          )}
-        </header>
-
-        <div className="flex min-h-0 flex-1 flex-col gap-2 px-4 pb-2">
-          {phase === "unavailable" ? (
+      <div className="relative mx-auto h-full w-full max-w-[30rem]">
+        {/* ── the photo, under everything ───────────────────────────────
+            The box stops at the pill above and the bar below (see the
+            file's header): handles are never under a control. */}
+        {phase === "unavailable" ? (
+          <div className="absolute inset-x-4 top-1/2 -translate-y-1/2">
             <Notice tone="night" title={copy.confirm.unavailableTitle}>
               {copy.confirm.unavailableBody}
             </Notice>
-          ) : (
-            <div
-              ref={stageRef}
-              className="relative min-h-0 flex-1 overflow-hidden rounded-md bg-shell-sunken"
-            >
-              <div ref={hostRef} className="h-full w-full" />
-              {phase === "loading" && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-shell-sunken">
-                  <SpinnerIcon size={28} className="text-shell-accent" />
-                  <Meta onNight>{copy.common.openingPhoto}</Meta>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Where the page is going. Muted until it arrives, then sage.
-              The flying picture is the canonical rather than a warp of it: the
-              page is not rendered until it reaches the store, and encoding a
-              throwaway crop for a 42 px slot would be a lossy generation spent
-              on an animation. */}
-          <div className="flex shrink-0 items-center gap-3">
-            <div
-              ref={slotRef}
-              className={
-                "h-[54px] w-[42px] shrink-0 rounded-md border transition-colors duration-300 " +
-                (landed
-                  ? "border-shell-accent bg-shell-dim"
-                  : "border-shell-line bg-transparent")
-              }
-            >
-              {landed && previewUrl !== null && (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={previewUrl}
-                  alt=""
-                  className="h-full w-full rounded-md object-cover"
-                />
-              )}
-            </div>
-            {/* Two static lines: where the page is going, and the one thing
-                about this editor a user would otherwise never discover. Both
-                are always rendered, so nothing shifts when the page lands. */}
-            <div className="flex min-w-0 flex-col gap-0.5">
-              <Meta onNight>{copy.confirm.slotCaption}</Meta>
-              <Meta onNight>{copy.common.magnifyHint}</Meta>
-            </div>
           </div>
+        ) : (
+          <div
+            ref={stageRef}
+            className="absolute inset-x-0 bottom-[calc(max(env(safe-area-inset-bottom),12px)+100px)] top-[calc(max(env(safe-area-inset-top),12px)+80px)]"
+          >
+            <div ref={hostRef} data-scan-confirm-editor="" className="h-full w-full" />
+            {phase === "loading" && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
+                <SpinnerIcon size={28} className="text-shell-accent" />
+                <Meta onNight>{copy.common.openingPhoto}</Meta>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── the pill, and which page this is ──────────────────────────
+            Fixed colours rather than shell tokens: this floats over a
+            photograph, whatever shell the app wears. */}
+        <div className="pointer-events-none absolute inset-x-4 top-[calc(max(env(safe-area-inset-top),12px)+4px)] flex flex-col items-center gap-2">
+          <p
+            // Announced only when it carries a reason: the plain instruction
+            // is the live region's `announceReady` below, said once.
+            role={reason !== null ? "status" : undefined}
+            data-scan-attention={capture.attention ?? undefined}
+            className="max-w-full rounded-full bg-night-deep/[0.72] px-4 py-[9px] text-center text-[15px] font-semibold leading-snug text-warm"
+          >
+            {reason ?? copy.confirm.pill}
+          </p>
+          <p className="text-[13px] font-semibold leading-none text-warm/[0.85] [text-shadow:0_1px_3px_rgba(0,0,0,0.6)]">
+            {copy.confirm.pageCorners(pageNumber)}
+          </p>
         </div>
 
-        <div className="safe-bottom shrink-0 px-4 pt-2">
+        {/* ── one floating bar, three cells ─────────────────────────────── */}
+        <div className="absolute inset-x-4 bottom-[calc(max(env(safe-area-inset-bottom),12px)+8px)]">
           <LiveRegion
             message={
               landed
@@ -403,53 +407,49 @@ export function ConfirmCornersScreen({
                   : ""
             }
           />
-          <div className="flex flex-col gap-2">
-            <Button
-              fullWidth
-              onNight
-              icon={<CheckIcon size={20} />}
-              disabled={phase !== "ready"}
-              onClick={() => {
-                editorRef.current?.confirm();
-              }}
-            >
-              {busy ? copy.confirm.savingCta : copy.confirm.confirmCta}
-            </Button>
-            <Button
-              variant="secondary"
-              onNight
-              fullWidth
-              icon={<CameraIcon size={20} />}
+          <div className="grid h-[84px] grid-cols-3 items-center rounded-[24px] bg-night-deep/[0.82] text-warm">
+            <BarCell
+              label={copy.confirm.retakeLabel}
+              icon={<CameraIcon size={22} />}
               disabled={busy}
               onClick={retake}
             >
               {copy.confirm.retakeCta}
-            </Button>
-            {/* The third answer, and deliberately the quietest one: a photo
-                that is already cropped has no corners to find, and dragging
-                four handles onto the picture's own edges is work for nothing.
-                It takes the same path as confirming — same quad shape, same
-                gate reading, same flight into the slot — with the quad the
-                whole frame. 38 px of visible control hit at 44 px through the
-                `::after` box, because this band sits under a `flex-1` photo and
-                every pixel it grows by is a pixel off the thing the user is
-                dragging handles on. */}
+            </BarCell>
+            {/* The primary, and the flight's landing place. */}
             <button
+              ref={slotRef}
               type="button"
+              aria-label={busy ? copy.confirm.savingCta : copy.confirm.confirmLabel}
+              disabled={phase !== "ready"}
+              onClick={() => {
+                editorRef.current?.confirm();
+              }}
+              className={
+                "mx-1 flex h-16 flex-col items-center justify-center gap-1 rounded-[18px] " +
+                "bg-warm text-[15px] font-bold leading-none text-night-deep " +
+                "transition-opacity duration-200 disabled:cursor-not-allowed " +
+                (busy ? "" : "disabled:opacity-45")
+              }
+            >
+              {busy ? <SpinnerIcon size={22} /> : <CheckIcon size={22} strokeWidth={2.6} />}
+              {busy ? copy.confirm.savingCta : copy.confirm.confirmCta}
+            </button>
+            {/* The third answer: a photo that is already cropped has no
+                corners to find, and dragging four handles onto the picture's
+                own edges is work for nothing. It takes the same path as
+                confirming — same quad shape, same gate reading, same flight —
+                with the quad the whole frame. */}
+            <BarCell
+              label={copy.confirm.wholeLabel}
+              icon={<ExpandIcon size={22} />}
               disabled={phase !== "ready"}
               onClick={() => {
                 void land(FULL_FRAME_QUAD);
               }}
-              className={
-                "relative mx-auto inline-flex h-[38px] items-center justify-center px-3 " +
-                "text-sm leading-none text-shell-ink2 underline underline-offset-4 " +
-                "transition-colors duration-200 hover:text-shell-ink " +
-                "disabled:cursor-not-allowed disabled:no-underline disabled:opacity-40 " +
-                "after:absolute after:-inset-x-2 after:-inset-y-[3px] after:content-['']"
-              }
             >
               {copy.confirm.wholeCta}
-            </button>
+            </BarCell>
           </div>
         </div>
       </div>
@@ -465,10 +465,48 @@ export function ConfirmCornersScreen({
           <img
             src={previewUrl}
             alt=""
-            className="h-full w-full rounded-md object-cover shadow-2xl"
+            // `contain`: the flight starts from the editor's whole box, which
+            // is taller than a 3:4 photo — the picture must not be cropped
+            // to fill it on the way out.
+            className="h-full w-full object-contain"
           />
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * A side cell of the bottom bar: icon over one word, the full cell height as
+ * its target. The accessible name is the full phrase, which contains the word.
+ */
+function BarCell({
+  label,
+  icon,
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  disabled: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      className={
+        "flex h-full min-w-0 flex-col items-center justify-center gap-1.5 rounded-[24px] px-1 " +
+        "text-[13px] font-semibold leading-none text-warm transition-opacity duration-200 " +
+        "disabled:cursor-not-allowed disabled:opacity-40"
+      }
+    >
+      {icon}
+      <span className="max-w-full truncate">{children}</span>
+    </button>
   );
 }

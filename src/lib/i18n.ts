@@ -251,9 +251,17 @@ export interface AppCopy {
   };
 
   confirm: {
-    title: string;
-    help: string;
-    slotCaption: string;
+    /**
+     * The pill over the photo — the screen's one instruction. A reason from
+     * {@link AppCopy.confirm.attention} or {@link AppCopy.confirm.notFound}
+     * takes its place when there is one.
+     */
+    pill: string;
+    /** The small line under the pill: "Página 2 · cantos". */
+    pageCorners: (n: number) => string;
+    /** The pill when no page outline was found and the editor opened on its own inset quad. */
+    notFound: string;
+    /** The bottom bar's three cells: one short visible word each… */
     confirmCta: string;
     savingCta: string;
     retakeCta: string;
@@ -261,18 +269,23 @@ export interface AppCopy {
      * "Use the whole photo": the escape hatch for a picture that is already
      * cropped — a gallery pick of a scan someone else made, usually — where
      * there are no corners to find because the photo's own corners are the
-     * page's. Deliberately the quietest control on the screen: it is right
-     * sometimes, and confirming the corners is right the rest of the time.
+     * page's. The bar's third cell, beside the primary rather than above it:
+     * it is right sometimes, and confirming the corners is right the rest of
+     * the time.
      */
     wholeCta: string;
+    /** …and the full phrase each one is announced as (it contains the word). */
+    confirmLabel: string;
+    retakeLabel: string;
+    wholeLabel: string;
     dialogLabel: (n: number) => string;
     unavailableTitle: string;
     unavailableBody: string;
     announceReady: string;
     announceDone: (n: number) => string;
     /**
-     * The photo's own check (`lib/still-check.ts`), one short line over the
-     * editor when it asks for a closer look: a corner on the photo's edge, the
+     * The photo's own check (`lib/still-check.ts`), in the pill over the
+     * editor when it asks for a closer look — short, it replaces the pill: a corner on the photo's edge, the
      * page not where the viewfinder had it, no page found in the photo, an
      * automatic photo that could not be checked against the viewfinder.
      * Advisory: the screen and every control work the same either way.
@@ -990,13 +1003,16 @@ const PT: AppCopy = {
   },
 
   confirm: {
-    title: "Confirme os cantos",
-    help: "Arraste se algum canto estiver fora da folha.",
-    slotCaption: "a página confirmada entra na galeria",
-    confirmCta: "Confirmar cantos",
+    pill: "Arraste um canto se precisar",
+    pageCorners: (n) => `Página ${n} · cantos`,
+    notFound: "Não achei a folha — arraste os cantos ou refaça",
+    confirmCta: "Confirmar",
     savingCta: "Guardando…",
-    retakeCta: "Refazer foto",
-    wholeCta: "Usar a foto inteira",
+    retakeCta: "Refazer",
+    wholeCta: "Foto inteira",
+    confirmLabel: "Confirmar cantos",
+    retakeLabel: "Refazer foto",
+    wholeLabel: "Usar a foto inteira",
     dialogLabel: (n) => `Confirme os cantos da página ${n}`,
     unavailableTitle: "Não dá para conferir esta foto",
     unavailableBody:
@@ -1004,10 +1020,10 @@ const PT: AppCopy = {
     announceReady: "Confira os quatro cantos da folha.",
     announceDone: (n) => `Página ${n} confirmada.`,
     attention: {
-      "corner-outside": "Um canto pode ter ficado de fora da foto — confira.",
-      moved: "A foto saiu diferente do que a câmera mostrava — confira.",
-      "no-page": "Não achei a folha nesta foto — ajuste os cantos.",
-      unverified: "Não deu para conferir se a folha inteira saiu na foto — confira os cantos.",
+      "corner-outside": "Um canto pode ter ficado fora da foto — confira",
+      moved: "A foto saiu diferente da câmera — confira os cantos",
+      "no-page": "Não achei a folha — arraste os cantos ou refaça",
+      unverified: "Não deu para conferir a folha inteira — veja os cantos",
     },
   },
 
@@ -1638,13 +1654,16 @@ const EN: AppCopy = {
   },
 
   confirm: {
-    title: "Confirm the corners",
-    help: "Drag any corner that sits outside the sheet.",
-    slotCaption: "the confirmed page goes to the gallery",
-    confirmCta: "Confirm corners",
+    pill: "Drag a corner if you need to",
+    pageCorners: (n) => `Page ${n} · corners`,
+    notFound: "No sheet found — drag the corners or retake",
+    confirmCta: "Confirm",
     savingCta: "Saving…",
-    retakeCta: "Retake photo",
-    wholeCta: "Use the whole photo",
+    retakeCta: "Retake",
+    wholeCta: "Whole photo",
+    confirmLabel: "Confirm corners",
+    retakeLabel: "Retake photo",
+    wholeLabel: "Use the whole photo",
     dialogLabel: (n) => `Confirm the corners of page ${n}`,
     unavailableTitle: "This photo cannot be checked",
     unavailableBody:
@@ -1652,10 +1671,10 @@ const EN: AppCopy = {
     announceReady: "Check the four corners of the sheet.",
     announceDone: (n) => `Page ${n} confirmed.`,
     attention: {
-      "corner-outside": "A corner may be outside the photo — check it.",
-      moved: "The photo came out different from what the camera showed — check it.",
-      "no-page": "No sheet found in this photo — adjust the corners.",
-      unverified: "Could not check that the whole sheet made it into the photo — check the corners.",
+      "corner-outside": "A corner may be outside the photo — check it",
+      moved: "The photo differs from the camera — check the corners",
+      "no-page": "No sheet found — drag the corners or retake",
+      unverified: "Could not check the whole sheet — look at the corners",
     },
   },
 
