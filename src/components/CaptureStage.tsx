@@ -1155,6 +1155,11 @@ export function CaptureStage({
             aria-hidden="true"
             className="pointer-events-none absolute"
             style={{
+              // The scoped reset clamps media to their container
+              // (`.scan-root svg { max-width: 100% }`), and a full-bleed
+              // cover box is wider than the stage: clamped, the marks were
+              // drawn squeezed towards its left edge, off the page's corners.
+              maxWidth: "none",
               left: detect.frameBox.left,
               top: detect.frameBox.top,
               width: detect.frameBox.width,
