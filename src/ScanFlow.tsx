@@ -38,6 +38,7 @@ import { createExitGate, type ExitGate } from "./lib/exit-gate";
 import { SHELL_ROOT_STYLE } from "./lib/shell-theme";
 import { autoCaptureOffered, pickCaptureLayout } from "./lib/capture-layout";
 import { diagnosticsSinkFor, flowDiagnostic, type DiagnosticsSink } from "./lib/diagnostics-events";
+import type { QualityEvent } from "./lib/scan-store";
 
 const DEFAULT_MAX_PAGES = 20;
 
@@ -99,6 +100,37 @@ export function ScanFlow(props: ScanFlowProps) {
     const flow = sink === null ? null : flowDiagnostic(event);
     handlers.current.onEvent?.(event);
     if (flow !== null) sink?.emit({ type: "flow", event: flow });
+  }, []);
+
+  /**
+   * The store's per-page sizes (render, and each page embedded in the PDF)
+   * onto the diagnostics stream. Stable, and a no-op without a sink.
+   */
+  const reportQuality = useCallback((event: QualityEvent) => {
+    const sink = sinkRef.current;
+    if (sink === null) return;
+    if (event.kind === "render") {
+      sink.emit({
+        type: "render",
+        page: event.page,
+        warped: event.warped,
+        final: event.final,
+        flat: event.flat,
+        dewarped: event.dewarped,
+      });
+      return;
+    }
+    sink.emit({
+      type: "build",
+      page: event.page,
+      pages: event.pages,
+      width: event.width,
+      height: event.height,
+      bytes: event.bytes,
+      rung: event.rung,
+      quality: event.quality,
+      resampled: event.resampled,
+    });
   }, []);
 
   /**
@@ -234,6 +266,7 @@ export function ScanFlow(props: ScanFlowProps) {
       <LangProvider lang={lang === "en-US" ? "en" : "pt"}>
         <ScanRuntimeProvider value={runtime}>
           <ScanStoreProvider
+            onQuality={reportQuality}
             assets={urls}
             maxPages={maxPages}
             maxBytes={maxBytes ?? null}

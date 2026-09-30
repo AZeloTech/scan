@@ -693,8 +693,8 @@ export class SessionPlayer extends StreamPlayer {
   /**
    * Render, before the clock starts, the still each scripted tap will ask
    * for: exposed at the tap's scripted camera time plus the pipeline's
-   * exposure delay, at the size the app requests (the preview's shape, its
-   * long edge capped — computed with the app's own `pickPhotoSize`). A tap
+   * exposure delay, at the size the app requests (the sensor's full size —
+   * computed with the app's own `pickPhotoSize`). A tap
    * that lands close to its time gets it; one that does not (or a person
    * tapping in the playground) is rendered on demand.
    */

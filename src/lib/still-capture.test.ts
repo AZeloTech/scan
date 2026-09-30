@@ -17,6 +17,7 @@ import {
   STILL_FAILURE_LIMIT,
   stillAttemptsAllowed,
   stillCaptureFailures,
+  stillCropFor,
   takeStillPhoto,
 } from "./still-capture.ts";
 
@@ -133,7 +134,9 @@ test("measuring this frame outranks remembering another one", () => {
 
 test("no track means no attempt and no failure charged", async () => {
   resetStillCapturePolicy();
-  assert.equal(await takeStillPhoto(null, { longEdgeTarget: 3000 }), null);
+  const outcome = await takeStillPhoto(null);
+  assert.equal(outcome.bitmap, null);
+  assert.equal(outcome.reason, "no-track");
   assert.equal(stillCaptureFailures(), 0);
 });
 
@@ -166,140 +169,121 @@ test("capabilities are read defensively", () => {
   );
 });
 
-test("a 12 MP sensor is asked for the page grid, not for all of itself", () => {
-  const size = pickPhotoSize(
-    { min: 0, max: 4000, step: 0 },
-    { min: 0, max: 3000, step: 0 },
-    3000,
-  );
-  // Long edge lands on the target; the aspect ratio is kept.
-  assert.deepEqual(size, { imageWidth: 3000, imageHeight: 2250 });
-});
-
-test("a sensor smaller than the target is asked for everything it has", () => {
+test("the camera is asked for every pixel it has: the range maxima", () => {
+  // The S25 Ultra field case: 4000×3000 sensor. The old request (3000×1688,
+  // the preview's shape at a 3000 px cap) was answered by Chrome's
+  // closest-size match with a 3648×1704 photo of another shape.
   assert.deepEqual(
-    pickPhotoSize({ min: 0, max: 1920, step: 0 }, { min: 0, max: 1080, step: 0 }, 3000),
-    { imageWidth: 1920, imageHeight: 1080 },
+    pickPhotoSize({ min: 0, max: 4000, step: 0 }, { min: 0, max: 3000, step: 0 }),
+    { imageWidth: 4000, imageHeight: 3000 },
   );
-});
-
-test("portrait sensors scale on their own long edge", () => {
+  // 50 MP sensors are asked for 50 MP.
   assert.deepEqual(
-    pickPhotoSize({ min: 0, max: 3000, step: 0 }, { min: 0, max: 4000, step: 0 }, 2000),
-    { imageWidth: 1500, imageHeight: 2000 },
+    pickPhotoSize({ min: 640, max: 8160, step: 1 }, { min: 480, max: 6120, step: 1 }),
+    { imageWidth: 8160, imageHeight: 6120 },
   );
-});
-
-test("the request snaps down onto the driver's step grid", () => {
-  const size = pickPhotoSize(
-    { min: 0, max: 4000, step: 16 },
-    { min: 0, max: 3000, step: 16 },
-    3000,
-  );
-  assert.deepEqual(size, { imageWidth: 2992, imageHeight: 2240 });
-  assert.ok((size?.imageWidth ?? 0) <= 3000);
-});
-
-test("the grid is walked from min, not from zero", () => {
+  // Portrait-reporting drivers too.
   assert.deepEqual(
-    pickPhotoSize({ min: 5, max: 4000, step: 10 }, { min: 5, max: 4000, step: 10 }, 1000),
-    { imageWidth: 995, imageHeight: 995 },
+    pickPhotoSize({ min: 0, max: 3000, step: 0 }, { min: 0, max: 4000, step: 0 }),
+    { imageWidth: 3000, imageHeight: 4000 },
   );
 });
 
-test("a driver that only supports more than we want still gets a legal request", () => {
-  const size = pickPhotoSize(
-    { min: 3840, max: 3840, step: 0 },
-    { min: 2160, max: 2160, step: 0 },
-    1000,
+test("the maxima snap onto the driver's step grid, walked from min", () => {
+  assert.deepEqual(
+    pickPhotoSize({ min: 0, max: 4000, step: 16 }, { min: 0, max: 3000, step: 16 }),
+    { imageWidth: 4000, imageHeight: 2992 },
   );
-  // Clamped up to the minimum the driver accepts — asking below `min` would be
-  // rejected outright, and the canonical cap trims the extra afterwards.
-  assert.deepEqual(size, { imageWidth: 3840, imageHeight: 2160 });
-});
-
-test("a 4:3 sensor asked for a 16:9 preview's shape is cropped, then scaled", () => {
-  // The S25 Ultra field case: sensor 4000×3000, preview 3840×2160.
-  const size = pickPhotoSize(
-    { min: 0, max: 4000, step: 0 },
-    { min: 0, max: 3000, step: 0 },
-    3000,
-    3840 / 2160,
+  assert.deepEqual(
+    pickPhotoSize({ min: 5, max: 4000, step: 10 }, { min: 5, max: 4000, step: 10 }),
+    { imageWidth: 3995, imageHeight: 3995 },
   );
-  assert.deepEqual(size, { imageWidth: 3000, imageHeight: 1688 });
-  const aspect = (size?.imageWidth ?? 0) / (size?.imageHeight ?? 1);
-  assert.ok(Math.abs(aspect - 16 / 9) / (16 / 9) < 0.02);
-});
-
-test("a portrait preview asks for the same crop as its landscape twin", () => {
-  // The phone holds the sensor sideways: the driver's ranges stay landscape
-  // while the stream reports 2160×3840. Long-over-short means both spellings
-  // of 16:9 produce one request.
-  const landscape = pickPhotoSize(
-    { min: 0, max: 4000, step: 0 },
-    { min: 0, max: 3000, step: 0 },
-    3000,
-    3840 / 2160,
-  );
-  const portrait = pickPhotoSize(
-    { min: 0, max: 4000, step: 0 },
-    { min: 0, max: 3000, step: 0 },
-    3000,
-    2160 / 3840,
-  );
-  assert.deepEqual(portrait, landscape);
-});
-
-test("a preview narrower than the sensor crops the long edge instead", () => {
-  // A squarer preview than the sensor: the short edge is kept whole and the
-  // long edge gives way.
-  const size = pickPhotoSize(
-    { min: 0, max: 4000, step: 0 },
-    { min: 0, max: 3000, step: 0 },
-    4000,
-    1,
-  );
-  assert.deepEqual(size, { imageWidth: 3000, imageHeight: 3000 });
-});
-
-test("a sensor already the preview's shape is asked for what it always was", () => {
-  const size = pickPhotoSize(
-    { min: 0, max: 4000, step: 0 },
-    { min: 0, max: 3000, step: 0 },
-    3000,
-    4 / 3,
-  );
-  assert.deepEqual(size, { imageWidth: 3000, imageHeight: 2250 });
-});
-
-test("an unusable preview aspect falls back to the sensor's own shape", () => {
-  const plain = pickPhotoSize(
-    { min: 0, max: 4000, step: 0 },
-    { min: 0, max: 3000, step: 0 },
-    3000,
-  );
-  for (const aspect of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
-    assert.deepEqual(
-      pickPhotoSize(
-        { min: 0, max: 4000, step: 0 },
-        { min: 0, max: 3000, step: 0 },
-        3000,
-        aspect,
-      ),
-      plain,
-    );
-  }
 });
 
 test("unusable capabilities mean no settings rather than a bad guess", () => {
-  assert.equal(pickPhotoSize(null, { min: 0, max: 3000, step: 0 }, 3000), null);
-  assert.equal(pickPhotoSize({ min: 0, max: 4000, step: 0 }, null, 3000), null);
-  assert.equal(
-    pickPhotoSize({ min: 0, max: 4000, step: 0 }, { min: 0, max: 3000, step: 0 }, 0),
-    null,
-  );
-  assert.equal(
-    pickPhotoSize({ min: 0, max: 4000, step: 0 }, { min: 0, max: 3000, step: 0 }, Number.NaN),
-    null,
-  );
+  assert.equal(pickPhotoSize(null, { min: 0, max: 3000, step: 0 }), null);
+  assert.equal(pickPhotoSize({ min: 0, max: 4000, step: 0 }, null), null);
+});
+
+const S25_REQUEST = { imageWidth: 4000, imageHeight: 3000 };
+const PORTRAIT_16_9 = 2160 / 3840;
+
+test("a sensor-native still is cut to the preview's field of view without a resample", () => {
+  // 4000×3000 sensor, portrait 9:16 stream: the upright still is 3000×4000;
+  // the preview is its centre 2250×4000.
+  const fit = stillCropFor({ width: 3000, height: 4000 }, S25_REQUEST, PORTRAIT_16_9);
+  assert.ok("crop" in fit);
+  assert.equal(fit.basis, "sensor-crop");
+  assert.deepEqual(fit.crop, { x: 375, y: 0, width: 2250, height: 4000 });
+  // The kept region has the preview's shape and every pixel of the still's long edge.
+  assert.ok(quadTransfers(PORTRAIT_16_9, fit.crop.width / fit.crop.height));
+  // Landscape preview, landscape still: the short edge (height) gives way.
+  const landscape = stillCropFor({ width: 4000, height: 3000 }, S25_REQUEST, 3840 / 2160);
+  assert.ok("crop" in landscape);
+  assert.deepEqual(landscape.crop, { x: 0, y: 375, width: 4000, height: 2250 });
+  // 50 MP: 6120×8160 upright → 4590×8160.
+  const big = stillCropFor({ width: 6120, height: 8160 }, { imageWidth: 8160, imageHeight: 6120 }, PORTRAIT_16_9);
+  assert.ok("crop" in big);
+  assert.deepEqual(big.crop, { x: 765, y: 0, width: 4590, height: 8160 });
+});
+
+test("a still already the preview's shape is used whole", () => {
+  const fit = stillCropFor({ width: 2252, height: 4000 }, S25_REQUEST, PORTRAIT_16_9);
+  assert.ok("crop" in fit);
+  assert.equal(fit.basis, "whole");
+  assert.deepEqual(fit.crop, { x: 0, y: 0, width: 2252, height: 4000 });
+});
+
+test("the S25 field still — another size of another shape — is never guessed at", () => {
+  // 1704×3648 (2.14:1) answered a request it did not match: it has lost part
+  // of the preview's short edge, so no crop of it is the preview.
+  const fit = stillCropFor({ width: 1704, height: 3648 }, { imageWidth: 3000, imageHeight: 1688 }, PORTRAIT_16_9);
+  assert.deepEqual(fit, { reason: "aspect-mismatch" });
+  // Nor with the new request: it is not the size asked for either.
+  assert.deepEqual(stillCropFor({ width: 1704, height: 3648 }, S25_REQUEST, PORTRAIT_16_9), {
+    reason: "aspect-mismatch",
+  });
+  // And a still of an unknown request that is not the preview's shape.
+  assert.deepEqual(stillCropFor({ width: 3000, height: 4000 }, null, PORTRAIT_16_9), {
+    reason: "aspect-mismatch",
+  });
+});
+
+test("a still that came back turned a quarter is an orientation mismatch", () => {
+  assert.deepEqual(stillCropFor({ width: 4000, height: 3000 }, S25_REQUEST, PORTRAIT_16_9), {
+    reason: "orientation-mismatch",
+  });
+});
+
+test("a square preview keeps the still's short edge whole", () => {
+  const fit = stillCropFor({ width: 4000, height: 3000 }, S25_REQUEST, 1);
+  assert.ok("crop" in fit);
+  assert.deepEqual(fit.crop, { x: 500, y: 0, width: 3000, height: 3000 });
+});
+
+test("with no preview shape to match, the still is used whole", () => {
+  for (const aspect of [null, 0, -1, Number.NaN]) {
+    const fit = stillCropFor({ width: 3000, height: 4000 }, S25_REQUEST, aspect);
+    assert.ok("crop" in fit);
+    assert.equal(fit.basis, "whole");
+  }
+});
+
+test("the still pipeline is proven by a used photo and unproven by any failure", async () => {
+  const { noteStillSuccess, stillPipelineFailed, stillPipelineWorking } = await import("./still-capture.ts");
+  resetStillCapturePolicy();
+  assert.equal(stillPipelineWorking(), false);
+  assert.equal(stillPipelineFailed(), false);
+  noteStillSuccess();
+  assert.equal(stillPipelineWorking(), true);
+  noteStillFailure();
+  assert.equal(stillPipelineWorking(), false);
+  assert.equal(stillPipelineFailed(), true);
+  noteStillSuccess();
+  assert.equal(stillPipelineWorking(), true);
+  // Two strikes end it for the session, success or not.
+  noteStillFailure();
+  noteStillSuccess();
+  assert.equal(stillPipelineWorking(), false);
+  resetStillCapturePolicy();
 });

@@ -103,7 +103,7 @@ export interface SizeLadderRecord {
   rung: number;
   /** The JPEG quality that rung encodes at, 0–1. */
   quality: number;
-  /** The long-edge cap in pixels that rung resamples to. */
+  /** The long-edge cap in pixels that rung resamples to; infinite = every pixel kept. */
   longEdge: number;
 }
 
@@ -123,7 +123,7 @@ export function honestySubject(
   if (ladder !== null && ladder.rung > 0) {
     parts.push(
       `Size ladder: rung ${ladder.rung}, q${Math.round(ladder.quality * 100)}, ` +
-        `long edge ${ladder.longEdge}px.`,
+        (Number.isFinite(ladder.longEdge) ? `long edge ${ladder.longEdge}px.` : "full resolution."),
     );
   }
   return parts.join(" ");

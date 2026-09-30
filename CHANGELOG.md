@@ -7,6 +7,34 @@ freezes at 1.0.
 ## [Unreleased]
 
 ### Fixed
+- **The PDF gets the camera's full resolution.** Every camera frame and
+  picked photo used to be scaled to a 3000 px long edge before anything else
+  ran, and on Android the still photo was asked for at that size — which
+  Chrome answers with the *closest* size it supports, often of another shape
+  (a Galaxy S25 Ultra returned 3648×1704 for 3000×1688), so the photo was
+  discarded and the page was made of a downscaled preview frame. Now the still
+  is asked for at the camera's largest size and cut to the preview's field of
+  view without a resample; when there is no still (Safari, a timeout, a
+  mismatch) the preview frame is used at the stream's native size and the
+  reason is reported. Only a source larger than the browser can draw is fitted
+  (iOS/iPadOS WebKit: 16,777,216 px of area; elsewhere 268,435,456 px, 32,767
+  px a side), and that is reported too. The canonical is written at q95 and
+  the final at q92 (was q92/q85); the PDF embeds the final's own bytes at its
+  own pixels, and the size ladder (only with `maxBytes`) lowers quality before
+  it ever lowers resolution. `onDiagnostics` reports the size at every stage:
+  `capture` (still, request, stream, kept field of view, canonical bytes and
+  quality, fallback reason), `confirm`, and the new `render` and `build`
+  events.
+- **A cheaper viewfinder on Android, never a cheaper page.** Once a still has
+  become a page (Android Chrome's `ImageCapture` proven on the device), the
+  live preview is lowered to 1920 px on its long edge; the first page of a
+  session is always taken on the native stream, and nothing is capped on
+  iOS, without `ImageCapture`, or after a still fails. If a still fails on a
+  capped stream, the native stream is restored for that page; only if the
+  camera does not come back within 2 s is the capped frame used, and the page
+  is then flagged `low-resolution` on the confirm screen. `onDiagnostics`
+  reports it: the new `stream-cap` event (applied or not, and why) and
+  `streamCapped` / `restore` on `capture`.
 - **The rail's camera fills the whole screen again.** A Phase 5a build
   letterboxed it (`contain`, sized to the screen above the controls); with a
   browser's bars, a gesture bar or larger text a 9:16 stream then shrank on

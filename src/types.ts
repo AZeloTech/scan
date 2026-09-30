@@ -362,15 +362,44 @@ export type ScanDiagnosticsPayload =
       page: number;
       /** From the tap to the confirm screen's hand-off. */
       ms: number;
-      /** The camera's still photo, when one arrived. */
+      /** The camera's still photo as it arrived (upright, before any crop), when one arrived. */
       still: ScanDiagnosticsSize | null;
       /** What became the page: the still photo or the preview frame. */
       source: "still" | "preview";
+      /**
+       * Why the still did not become the page — `unsupported` (no
+       * ImageCapture: Safari, Firefox), `no-track`, `gave-up` (two failed
+       * stills this session), `busy`, `construct-failed`, `timeout`,
+       * `take-failed`, `decode-failed`, `alloc-failed`, `aspect-mismatch`,
+       * `orientation-mismatch` — or null when it did.
+       */
+      stillReason: string | null;
+      /** How long the still attempt took; null when none was made. */
+      stillMs: number | null;
+      /** What `takePhoto` was asked for (sensor orientation); null when it was not asked for a size. */
+      requested: ScanDiagnosticsSize | null;
+      /** The camera stream at the tap (the preview frame's size). */
+      stream: ScanDiagnosticsSize;
+      /** The live stream was capped (`stream-cap`) at the tap. */
+      streamCapped: boolean;
+      /**
+       * A still failed on a capped stream: whether the native stream came back
+       * for the page (`ok`) or the capped frame was used and the page flagged
+       * `low-resolution` (`timeout`, `failed`); null when nothing was restored.
+       */
+      restore: "ok" | "timeout" | "failed" | null;
+      /** The part of the still that is the preview's field of view (a pixel-exact cut), when the still became the page. */
+      fov: ScanDiagnosticsSize | null;
+      /** The canvas that became the page — the page's source pixels. */
       frame: ScanDiagnosticsSize;
+      /** True only when the browser's canvas limit made `frame` smaller than its source. */
+      capped: boolean;
+      /** The page's canonical JPEG: its pixels, bytes and quality. */
+      canonical: { width: number; height: number; bytes: number; quality: number };
       cornersFrom: "live" | "detected" | "fallback" | null;
       registration: { fovScale: number; shiftX: number; shiftY: number; score: number; overlap: number } | null;
       /** Why the photo's own check asked for a closer look, or null. */
-      flag: "no-page" | "corner-outside" | "moved" | "unverified" | null;
+      flag: "no-page" | "corner-outside" | "moved" | "unverified" | "low-resolution" | null;
     }
   /**
    * The confirm-corners screen was answered: kept as seeded (`accepted`),
@@ -385,8 +414,52 @@ export type ScanDiagnosticsPayload =
       /** From the screen opening to the answer. */
       ms: number;
       seededFrom: "capture" | "detected" | "editor-default" | null;
-      flag: "no-page" | "corner-outside" | "moved" | "unverified" | null;
+      flag: "no-page" | "corner-outside" | "moved" | "unverified" | "low-resolution" | null;
+      /** Where the page's pixels came from; null when unknown (a PDF import). */
+      source: "still" | "preview" | "file" | null;
+      /** The page's canonical JPEG being confirmed: pixels, bytes, quality. */
+      canonical: { width: number; height: number; bytes: number; quality: number } | null;
+      /** True only when the browser's canvas limit made the canonical smaller than its source. */
+      capped: boolean | null;
     }
+  /**
+   * A page's pixels were rendered from its canonical (after the capture, and
+   * after every edit — each edit re-renders from the canonical, never from an
+   * earlier render): the geometry's output and the final JPEG.
+   */
+  | {
+      type: "render";
+      page: number;
+      /** The page region at its true pixel size in the canonical (before the turn). */
+      warped: ScanDiagnosticsSize;
+      /** The final JPEG — what the review shows and the PDF embeds. */
+      final: { width: number; height: number; bytes: number; quality: number };
+      /** True when the corners could not be applied and the frame went in whole. */
+      flat: boolean;
+      dewarped: boolean;
+    }
+  /** One page of a finished PDF: the image embedded for it (one per page, after the build). */
+  | {
+      type: "build";
+      page: number;
+      pages: number;
+      width: number;
+      height: number;
+      bytes: number;
+      /** The size-ladder rung that shipped (0 = the reviewed bytes, embedded as they are). */
+      rung: number;
+      quality: number;
+      /** True only when the size ladder resampled the page below its reviewed size. */
+      resampled: boolean;
+    }
+  /**
+   * The live preview stream's cap (Android Chrome only, while the still
+   * pipeline is proven): whether it is capped now, and why or why not —
+   * `still-proven` (capped), `not-android`, `no-image-capture`,
+   * `still-unproven`, `still-failed`, `stream-small`, `constraints-failed`.
+   * Emitted when the camera comes up and whenever the cap changes.
+   */
+  | { type: "stream-cap"; applied: boolean; reason: string; stream: ScanDiagnosticsSize | null }
   /** The page was hidden or shown (locked phone, app switch). */
   | { type: "visibility"; state: "hidden" | "visible" }
   /** The first live pass after the page came back into view. */

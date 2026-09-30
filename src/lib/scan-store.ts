@@ -23,8 +23,8 @@
  *    passes racing each other on a cheap Android is how a capture screen starts
  *    dropping frames.
  *  * **One source, one derived artifact.** A page holds its `canonical`
- *    (the pre-warp frame, encoded once at q92) and, derived from it by a single
- *    render pass, `final` (q85). `final` is what the review screen shows AND
+ *    (the pre-warp frame at full camera resolution, encoded once at q95) and,
+ *    derived from it by a single render pass, `final` (q92). `final` is what the review screen shows AND
  *    what `embedJpg` copies into the PDF — the same bytes, so what the user
  *    approved is what ships. Every edit re-renders from the canonical rather
  *    than from the last output, so a page cannot accumulate generations.
@@ -32,7 +32,7 @@
  *    with the component. There is no IndexedDB mirror, no resume card and no
  *    session TTL — see below.
  *  * **INVARIANT — encoded bytes only.** A {@link ScanPage} holds three `Blob`s
- *    (the q92 canonical, the q85 `final`, a ~480 px `thumb`) and nothing else
+ *    (the q95 canonical, the q92 `final`, a ~480 px `thumb`) and nothing else
  *    that weighs anything: no `ImageBitmap`, no `HTMLCanvasElement`, no
  *    `ImageData`. Decoded full-resolution surfaces exist only *inside* one
  *    `pipeline.render` call — and the serial chain above means at most one of
@@ -86,6 +86,7 @@ import {
   releaseRenderLane,
 } from "@/lib/render-remote";
 import { ImagePrepError, type ImagePrepCode } from "@/lib/image";
+import { encodeQuality } from "@/lib/encode";
 import { currentLang, pdfFallbackName, type Lang } from "@/lib/i18n";
 import { pdfFileName } from "@/lib/naming";
 import { nextRotation, previousRotation, type PageRotation } from "@/lib/rotation";
@@ -207,7 +208,7 @@ export interface ScanPage {
   sourceRevision: number;
   status: PageStatus;
   /**
-   * The one source. EXIF honoured once, long edge capped once, JPEG q92 —
+   * The one source. EXIF honoured once, every camera pixel kept, JPEG q95 —
    * written at capture, retake or import and byte-immutable until the next one.
    * Every render, and the corner editor, start from these bytes.
    */
@@ -246,7 +247,7 @@ export interface ScanPage {
    */
   dewarpEngineMode: DewarpEngineMode;
   /**
-   * The one derived artifact: JPEG q85, geometry and finish and rotation all
+   * The one derived artifact: JPEG q92, geometry and finish and rotation all
    * applied. Shown on screen and embedded in the PDF, same bytes. Null until
    * the first render commits.
    */
@@ -367,7 +368,7 @@ export interface ScanState {
 export type CapturePath = "shutter" | "gallery" | "desktop" | "retake" | "adjust";
 
 export interface CaptureInput {
-  /** The pre-warp source, already encoded as the page's canonical (q92). */
+  /** The pre-warp source, already encoded as the page's canonical (q95). */
   canonical: Blob;
   /** The confirmed outline, normalized to the canonical. Null = no warp. */
   corners: NormalizedQuad | null;
@@ -386,8 +387,25 @@ export interface ScanPdfPage {
   transform: PageTransform;
 }
 
+/** One page as it went into the file: the embedded image's pixels and bytes. */
+export interface EmbeddedPage {
+  width: number;
+  height: number;
+  bytes: number;
+}
+
 export type ScanPdfResult =
-  | { ok: true; blob: Blob; pageCount: number; bytes: number; rung: number }
+  | {
+      ok: true;
+      blob: Blob;
+      pageCount: number;
+      bytes: number;
+      rung: number;
+      /** Per page, in order: what was embedded. Absent from writers that do not say. */
+      embedded?: EmbeddedPage[];
+      /** The JPEG quality of the rung that shipped (rung 0: the pages' own). */
+      quality?: number;
+    }
   | { ok: false; reason: "over_budget"; bytes: number; pageCount: number; removePages: number };
 
 export interface ScanPdfOptions {
@@ -705,6 +723,33 @@ function claimInstanceSlot(): void {
   liveStores += 1;
 }
 
+/** What {@link ScanStoreOptions.onQuality} hears. Pages are 1-based. */
+export type QualityEvent =
+  | {
+      kind: "render";
+      page: number;
+      /** The geometry's output (the page region, before the turn). */
+      warped: { width: number; height: number };
+      /** The final JPEG — what the review shows and the PDF embeds. */
+      final: { width: number; height: number; bytes: number; quality: number };
+      /** True when the corners could not be applied and the frame went in whole. */
+      flat: boolean;
+      dewarped: boolean;
+    }
+  | {
+      kind: "embed";
+      page: number;
+      pages: number;
+      /** The image embedded in the PDF for this page. */
+      width: number;
+      height: number;
+      bytes: number;
+      rung: number;
+      quality: number;
+      /** True when the size ladder resampled the page below its reviewed size. */
+      resampled: boolean;
+    };
+
 export interface ScanStoreOptions {
   /**
    * Where this library's WebAssembly lives on the host's origin.
@@ -733,6 +778,11 @@ export interface ScanStoreOptions {
   maxPages?: number;
   /** Fires once per ladder rung attempted. The flow turns it into an event. */
   onRung?: ((rung: number, bytes: number) => void) | null;
+  /**
+   * Sizes at each stage of a page's pixels, for the diagnostics stream —
+   * metadata only (pixels, bytes, quality), never a pixel.
+   */
+  onQuality?: ((event: QualityEvent) => void) | null;
   /**
    * The host's name for the finished file, used verbatim.
    *
@@ -803,6 +853,16 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
   const maxBytes: number | null = options.maxBytes ?? null;
   const maxPages: number = options.maxPages ?? MAX_PAGES;
   const onRung = options.onRung ?? null;
+  const onQuality = options.onQuality ?? null;
+  /** An instrument must never be able to break the thing it measures. */
+  const reportQuality = (event: QualityEvent): void => {
+    if (onQuality === null) return;
+    try {
+      onQuality(event);
+    } catch {
+      // Ignored.
+    }
+  };
   const hostFileName: string | null = options.fileName ?? null;
   /**
    * Inert from here on: every operation returns without touching anything, and
@@ -1125,6 +1185,22 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
           ...(reason === undefined ? {} : { dewarpRequested: false }),
           error: null,
         });
+        if (onQuality !== null) {
+          const order = findPage(pageId)?.order ?? 0;
+          reportQuality({
+            kind: "render",
+            page: order + 1,
+            warped: { width: rendered.warpedWidth, height: rendered.warpedHeight },
+            final: {
+              width: rendered.width,
+              height: rendered.height,
+              bytes: rendered.final.size,
+              quality: encodeQuality("final"),
+            },
+            flat: !rendered.warped,
+            dewarped: rendered.dewarped,
+          });
+        }
         // The store's own replay cache, independent of `page-processing.ts`'s
         // per-render memo: this is what a *later* toggle-off/toggle-on reads
         // (`replayFor`, above), not just a retry inside this one render.
@@ -1722,6 +1798,24 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
          * somebody this *after* they spent ten minutes photographing is bad
          * enough; telling them only "it failed" would be worse.
          */
+        if (result.ok && onQuality !== null && result.embedded !== undefined) {
+          for (const [index, embedded] of result.embedded.entries()) {
+            const reviewed = ordered[index];
+            reportQuality({
+              kind: "embed",
+              page: index + 1,
+              pages: result.embedded.length,
+              width: embedded.width,
+              height: embedded.height,
+              bytes: embedded.bytes,
+              rung: result.rung,
+              quality: result.quality ?? encodeQuality("final"),
+              resampled:
+                reviewed !== undefined &&
+                (embedded.width !== reviewed.width || embedded.height !== reviewed.height),
+            });
+          }
+        }
         if (!result.ok) {
           setState({
             build: {

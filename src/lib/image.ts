@@ -1,14 +1,16 @@
 "use client";
 
 /**
- * Decode and downscale — the byte-level plumbing every other module sits on.
+ * Decode, draw and encode — the byte-level plumbing every other module sits on.
  *
- * One number matters here. The 3000 px cap on the long edge is about the phone:
- * the warp, the illumination pass and the PDF embed all work on this grid, and
- * above ~3000 px a cheap Android starts failing canvas allocations rather than
- * getting slower. It is applied exactly once per page, when the camera frame or
- * the picked file becomes the page's **canonical** JPEG — never again, because
- * re-applying it to an already-capped image is a second resample for nothing.
+ * **No resolution cap.** The page's canonical is made at the size the camera
+ * (or the picked file) delivered, pixel for pixel. This file used to cap every
+ * source at a 3000 px long edge, which on a 2160×3840 stream threw away 39 %
+ * of the pixels before anything else ran, and on a 12 MP photo more than
+ * half. The only limit left is the browser's own: a canvas larger than
+ * {@link canvasLimit} is not "slower", it is blank or refused, so a source
+ * above it is drawn at the largest size that fits — and the caller is told
+ * (`capped`), so the downgrade is reported rather than silent.
  *
  * Writing a JPEG belongs to `lib/encode.ts`, which the render worker shares;
  * the encoder's names are re-exported here so this stays the one import every
@@ -29,8 +31,6 @@ import { currentLang, localeTag } from "@/lib/i18n";
 export { countEncode, encodeCounts, resetEncodeCounts, ImagePrepError };
 export type { EncodeRole, ImagePrepCode };
 
-export const MAX_LONG_EDGE = 3000;
-
 export const ACCEPTED_UPLOAD_TYPES = [
   "image/jpeg",
   "image/png",
@@ -39,13 +39,70 @@ export const ACCEPTED_UPLOAD_TYPES = [
 
 export const ACCEPT_ATTRIBUTE = ACCEPTED_UPLOAD_TYPES.join(",");
 
-function targetSize(width: number, height: number): { w: number; h: number } {
-  const longEdge = Math.max(width, height);
-  if (longEdge <= MAX_LONG_EDGE) return { w: width, h: height };
-  const scale = MAX_LONG_EDGE / longEdge;
+/** The largest canvas a browser will actually allocate and draw. */
+export interface CanvasLimit {
+  /** Width × height, in pixels. */
+  maxArea: number;
+  /** Either side, in pixels. */
+  maxSide: number;
+}
+
+/**
+ * iOS and iPadOS WebKit (every browser there): 16,777,216 px (4096 × 4096) of
+ * area. Above it the context comes back null or the canvas silently draws
+ * nothing — the documented WebKit limit on those devices, and the only limit a
+ * phone camera can realistically meet (a 48 MP photo picked from the library).
+ */
+export const WEBKIT_MOBILE_CANVAS_LIMIT: CanvasLimit = { maxArea: 16_777_216, maxSide: 32_767 };
+
+/**
+ * Chromium (Android and desktop), desktop Safari and Firefox: 268,435,456 px
+ * (16,384 × 16,384) of area — Chromium's and desktop WebKit's limit, and below
+ * Firefox's (472,907,776) — and 32,767 px per side (Firefox's side limit;
+ * Chromium allows 65,535). No camera sensor a phone ships reaches it.
+ */
+export const DEFAULT_CANVAS_LIMIT: CanvasLimit = { maxArea: 268_435_456, maxSide: 32_767 };
+
+/** Whether this is iOS/iPadOS WebKit (iPadOS reports itself as a Mac with touch). */
+function isWebKitMobile(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent ?? "";
+  if (/iPad|iPhone|iPod/.test(ua)) return true;
+  return /Macintosh/.test(ua) && (navigator.maxTouchPoints ?? 0) > 1;
+}
+
+/** The canvas limit of the browser this runs in. */
+export function canvasLimit(): CanvasLimit {
+  return isWebKitMobile() ? WEBKIT_MOBILE_CANVAS_LIMIT : DEFAULT_CANVAS_LIMIT;
+}
+
+/** A size that fits the canvas limit, and whether it had to shrink to. */
+export interface FittedSize {
+  width: number;
+  height: number;
+  /** True only when the source was larger than the browser can draw. */
+  capped: boolean;
+}
+
+/**
+ * `width × height` unchanged when the browser can draw it; otherwise the
+ * largest same-shape size that fits `limit`. Pure, for the tests.
+ */
+export function fitCanvasLimit(
+  width: number,
+  height: number,
+  limit: CanvasLimit = canvasLimit(),
+): FittedSize {
+  const w = Math.max(1, Math.round(width));
+  const h = Math.max(1, Math.round(height));
+  if (w * h <= limit.maxArea && w <= limit.maxSide && h <= limit.maxSide) {
+    return { width: w, height: h, capped: false };
+  }
+  const scale = Math.min(Math.sqrt(limit.maxArea / (w * h)), limit.maxSide / Math.max(w, h));
   return {
-    w: Math.max(1, Math.round(width * scale)),
-    h: Math.max(1, Math.round(height * scale)),
+    width: Math.max(1, Math.floor(w * scale)),
+    height: Math.max(1, Math.floor(h * scale)),
+    capped: true,
   };
 }
 
@@ -105,15 +162,37 @@ async function encodeSource(
   }
 }
 
-/** Fallback for browsers without `createImageBitmap` resize options. */
-function prepareWithImageElement(file: Blob): Promise<Blob> {
+/** What a picked file became: the canonical and the sizes it went through. */
+export interface PreparedCapture {
+  canonical: Blob;
+  /** The canonical's own pixels. */
+  width: number;
+  height: number;
+  /** The decoded file, upright, before anything else. */
+  sourceWidth: number;
+  sourceHeight: number;
+  /** True only when the file was larger than this browser can draw ({@link canvasLimit}). */
+  capped: boolean;
+}
+
+/** Fallback for browsers without `createImageBitmap`. */
+function prepareWithImageElement(file: Blob): Promise<PreparedCapture> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const image = new Image();
     image.onload = () => {
-      const { w, h } = targetSize(image.naturalWidth, image.naturalHeight);
-      encodeSource(image, w, h, "canonical")
-        .then(resolve)
+      const fitted = fitCanvasLimit(image.naturalWidth, image.naturalHeight);
+      encodeSource(image, fitted.width, fitted.height, "canonical")
+        .then((canonical) =>
+          resolve({
+            canonical,
+            width: fitted.width,
+            height: fitted.height,
+            sourceWidth: image.naturalWidth,
+            sourceHeight: image.naturalHeight,
+            capped: fitted.capped,
+          }),
+        )
         .catch(reject)
         .finally(() => URL.revokeObjectURL(url));
     };
@@ -127,11 +206,13 @@ function prepareWithImageElement(file: Blob): Promise<Blob> {
 
 /**
  * A picked file → the page's **canonical** JPEG: EXIF honoured exactly once,
- * long edge capped, encoded at q92.
+ * every pixel of the file kept (only a file larger than the browser can draw is
+ * fitted to {@link canvasLimit}, and says so), encoded once at the canonical
+ * quality.
  *
  * Rejects with `ImagePrepError` carrying the code the screen renders.
  */
-export async function prepareCapture(file: Blob): Promise<Blob> {
+export async function prepareCapture(file: Blob): Promise<PreparedCapture> {
   if (typeof createImageBitmap !== "function") {
     return prepareWithImageElement(file);
   }
@@ -144,120 +225,110 @@ export async function prepareCapture(file: Blob): Promise<Blob> {
   } catch {
     return prepareWithImageElement(file);
   }
+  const sourceWidth = bitmap.width;
+  const sourceHeight = bitmap.height;
+  const fitted = fitCanvasLimit(sourceWidth, sourceHeight);
   try {
-    const { w, h } = targetSize(bitmap.width, bitmap.height);
-    if (w === bitmap.width && h === bitmap.height) {
-      return await encodeSource(bitmap, w, h, "canonical");
-    }
-    // The resize happens during decode where the browser supports it — much
-    // cheaper than a full-resolution canvas on a low-end phone.
-    const resized = await createImageBitmap(file, {
-      imageOrientation: "from-image",
-      resizeWidth: w,
-      resizeHeight: h,
-      resizeQuality: "high",
-    });
-    try {
-      return await encodeSource(resized, resized.width, resized.height, "canonical");
-    } finally {
-      resized.close();
+    if (!fitted.capped) {
+      const canonical = await encodeSource(bitmap, sourceWidth, sourceHeight, "canonical");
+      return { canonical, width: sourceWidth, height: sourceHeight, sourceWidth, sourceHeight, capped: false };
     }
   } finally {
-    bitmap.close();
+    if (!fitted.capped) bitmap.close();
+  }
+  // Too large for this browser's canvas: one high-quality resample during the
+  // decode, straight to the largest size it can draw. The full-size bitmap is
+  // released first so the two never coexist.
+  bitmap.close();
+  const resized = await createImageBitmap(file, {
+    imageOrientation: "from-image",
+    resizeWidth: fitted.width,
+    resizeHeight: fitted.height,
+    resizeQuality: "high",
+  });
+  try {
+    const canonical = await encodeSource(resized, resized.width, resized.height, "canonical");
+    return { canonical, width: resized.width, height: resized.height, sourceWidth, sourceHeight, capped: true };
+  } finally {
+    resized.close();
   }
 }
 
+/** A capture canvas, and whether the browser's canvas limit shrank it. */
+export interface CaptureCanvas {
+  canvas: HTMLCanvasElement;
+  capped: boolean;
+}
+
 /**
- * Grabs the current live-preview frame into a canvas, capped at the long edge.
+ * Grabs the current live-preview frame into a canvas at the stream's **native
+ * size** — every pixel the camera is delivering, no intermediate downscale.
  *
  * A canvas rather than a JPEG because the frame has three consumers that must
  * agree on one pixel grid: the gate (measured pre-warp), the quad the
  * viewfinder was showing, and the canonical encode.
  */
-export function frameToCanvas(video: HTMLVideoElement): HTMLCanvasElement {
+export function frameToCanvas(video: HTMLVideoElement): CaptureCanvas {
   const width = video.videoWidth;
   const height = video.videoHeight;
   if (width === 0 || height === 0) {
     throw new ImagePrepError("camera_waking");
   }
-  const { w, h } = targetSize(width, height);
-  return drawToCanvas(video, w, h);
+  const fitted = fitCanvasLimit(width, height);
+  return { canvas: drawToCanvas(video, fitted.width, fitted.height), capped: fitted.capped };
 }
 
 /**
- * An already-decoded photo → a canvas on the very same grid `frameToCanvas`
- * produces, so the still and the preview frame are interchangeable downstream.
+ * An already-decoded photo → a canvas of `crop` (the whole photo by default)
+ * at the photo's own resolution: a crop is a copy of pixels, never a resample.
  *
  * The bitmap is the caller's to close: this only reads it. It arrives upright
  * (the still path decodes with `imageOrientation: "from-image"`), which is why
  * nothing here touches orientation.
  */
-export function bitmapToCanvas(bitmap: ImageBitmap): HTMLCanvasElement {
-  if (bitmap.width === 0 || bitmap.height === 0) {
+export function bitmapToCanvas(
+  bitmap: ImageBitmap,
+  crop: { x: number; y: number; width: number; height: number } = {
+    x: 0,
+    y: 0,
+    width: bitmap.width,
+    height: bitmap.height,
+  },
+): CaptureCanvas {
+  if (bitmap.width === 0 || bitmap.height === 0 || crop.width <= 0 || crop.height <= 0) {
     throw new ImagePrepError("prep");
   }
-  const { w, h } = targetSize(bitmap.width, bitmap.height);
-  return drawToCanvas(bitmap, w, h);
-}
-
-/**
- * Decodes any accepted image into a canvas, capped at the long edge.
- *
- * For images whose provenance we do not control — a picked file being measured
- * by the gate, a frame handed to the detector. The page's own canonical goes
- * through {@link decodeCanonical} instead, which neither caps nor re-orients.
- */
-export async function decodeToCanvas(file: Blob): Promise<HTMLCanvasElement> {
-  const draw = (
-    source: CanvasImageSource,
-    width: number,
-    height: number,
-  ): HTMLCanvasElement => {
-    const { w, h } = targetSize(width, height);
-    return drawToCanvas(source, w, h);
-  };
-
-  if (typeof createImageBitmap === "function") {
-    try {
-      const bitmap = await createImageBitmap(file, {
-        imageOrientation: "from-image",
-      });
-      try {
-        return draw(bitmap, bitmap.width, bitmap.height);
-      } finally {
-        bitmap.close();
-      }
-    } catch {
-      // Fall through to the <img> path below.
-    }
+  const fitted = fitCanvasLimit(crop.width, crop.height);
+  const canvas = document.createElement("canvas");
+  try {
+    canvas.width = fitted.width;
+    canvas.height = fitted.height;
+    const context = canvas.getContext("2d");
+    if (context === null) throw new ImagePrepError("prep");
+    context.drawImage(
+      bitmap,
+      crop.x,
+      crop.y,
+      crop.width,
+      crop.height,
+      0,
+      0,
+      fitted.width,
+      fitted.height,
+    );
+    return { canvas, capped: fitted.capped };
+  } catch (error) {
+    releaseCanvas(canvas);
+    throw error instanceof ImagePrepError ? error : new ImagePrepError("prep");
   }
-
-  return new Promise<HTMLCanvasElement>((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const image = new Image();
-    image.onload = () => {
-      try {
-        resolve(draw(image, image.naturalWidth, image.naturalHeight));
-      } catch (error) {
-        reject(error);
-      } finally {
-        URL.revokeObjectURL(url);
-      }
-    };
-    image.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new ImagePrepError("unsupported"));
-    };
-    image.src = url;
-  });
 }
 
 /**
  * Decodes a page's canonical JPEG at its own size.
  *
- * Deliberately **not** {@link decodeToCanvas}: the canonical is already capped
- * and already upright, so re-applying the cap would resample it a second time
- * and re-applying EXIF would re-orient an image that carries no orientation.
+ * The canonical is already upright and already at its final resolution, so
+ * this neither resamples nor re-orients — it is the page's pixels exactly as
+ * captured.
  * Every render of a page starts here.
  */
 export async function decodeCanonical(blob: Blob): Promise<HTMLCanvasElement> {

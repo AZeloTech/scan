@@ -32,7 +32,6 @@ import { ClipPlayer, clipScript } from "./clip-player.js";
 import { drawSheet } from "./sheets.js";
 import { installPerfWatch } from "./perf-watch.js";
 import { pickPhotoSize, readPhotoSizeRange } from "../../../src/lib/still-capture.ts";
-import { MAX_LONG_EDGE } from "../../../src/lib/image.ts";
 import { scoreCaptures, scoreSession } from "../session-score.mjs";
 import { scoreReplayCaptures } from "../real-score.mjs";
 
@@ -150,17 +149,14 @@ function installProbe() {
 
 /**
  * What the app will ask `takePhoto()` for on this session's camera: its own
- * `pickPhotoSize` over the fake sensor's capabilities (`fake-camera.js`), at
- * the preview's shape and the page grid's long edge — so a still rendered
- * ahead is the size the call asks for.
+ * `pickPhotoSize` over the fake sensor's capabilities (`fake-camera.js`) — the
+ * sensor's full size — so a still rendered ahead is the size the call asks for.
  */
 function requestFor(session) {
   const { width, height } = session.still.sensor;
   return pickPhotoSize(
     readPhotoSizeRange({ imageWidth: { min: 640, max: width, step: 1 } }, "imageWidth"),
     readPhotoSizeRange({ imageHeight: { min: 480, max: height, step: 1 } }, "imageHeight"),
-    MAX_LONG_EDGE,
-    session.frame.width / session.frame.height,
   );
 }
 

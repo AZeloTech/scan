@@ -290,7 +290,7 @@ export interface AppCopy {
      * automatic photo that could not be checked against the viewfinder.
      * Advisory: the screen and every control work the same either way.
      */
-    attention: Record<"no-page" | "corner-outside" | "moved" | "unverified", string>;
+    attention: Record<"no-page" | "corner-outside" | "moved" | "unverified" | "low-resolution", string>;
   };
 
   review: {
@@ -1026,6 +1026,7 @@ const PT: AppCopy = {
       moved: "A foto saiu diferente da câmera — confira os cantos",
       "no-page": "Não achei a folha — arraste os cantos ou refaça",
       unverified: "Não deu para conferir a folha inteira — veja os cantos",
+      "low-resolution": "Foto em resolução menor — refaça se o texto ficar ilegível",
     },
   },
 
@@ -1679,6 +1680,7 @@ const EN: AppCopy = {
       moved: "The photo differs from the camera — check the corners",
       "no-page": "No sheet found — drag the corners or retake",
       unverified: "Could not check the whole sheet — look at the corners",
+      "low-resolution": "Lower-resolution photo — retake if the text is hard to read",
     },
   },
 

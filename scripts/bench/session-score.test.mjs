@@ -713,3 +713,28 @@ test("visible region: a cue carried over from the sheet before is not the next h
   assert.ok(c.ready.blocked > 0);
   assert.equal(c.ready.onsetViolations, c.ready.onsets);
 });
+
+test("a still cut to the preview's field of view is scored in the crop's own frame", async () => {
+  const { cropStillTruth } = await import("./session-score.mjs");
+  // A 3000×4000 still, its centre 2250×4000 kept: a page spanning x 0.25–0.75
+  // of the still spans (750−375)/2250 … (2250−375)/2250 of the crop.
+  const still = {
+    width: 3000,
+    height: 4000,
+    quad: [[0.25, 0.1], [0.75, 0.1], [0.75, 0.9], [0.25, 0.9]],
+    corners: [[0.25, 0.1], [0.75, 0.1], [0.75, 0.9], [0.25, 0.9]],
+    whole: true,
+    content: [{ kind: "line", polygon: [[0.3, 0.2], [0.7, 0.2], [0.7, 0.25], [0.3, 0.25]] }],
+  };
+  const cropped = cropStillTruth(still, { x: 375, y: 0, width: 2250, height: 4000 });
+  const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, `${a} vs ${b}`);
+  near(cropped.corners[0][0], (750 - 375) / 2250);
+  near(cropped.corners[1][0], (2250 - 375) / 2250);
+  near(cropped.corners[0][1], 0.1);
+  near(cropped.content[0].polygon[0][0], (900 - 375) / 2250);
+  assert.equal(cropped.whole, true);
+  assert.deepEqual([cropped.width, cropped.height], [2250, 4000]);
+  // A page reaching past the crop is no longer whole in it.
+  const wide = cropStillTruth({ ...still, corners: [[0.05, 0.1], [0.75, 0.1], [0.75, 0.9], [0.05, 0.9]] }, { x: 375, y: 0, width: 2250, height: 4000 });
+  assert.equal(wide.whole, false);
+});

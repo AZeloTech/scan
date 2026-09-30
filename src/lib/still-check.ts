@@ -40,7 +40,12 @@ export interface StillMapping {
 }
 
 /** Why a photo is flagged on the confirm screen. */
-export type StillAttention = "no-page" | "corner-outside" | "moved" | "unverified";
+/**
+ * `low-resolution` is not this module's verdict: the capture path sets it when
+ * a still failed on a capped live stream and the native stream would not come
+ * back in time (`lib/stream-cap.ts`), so the page was made of the capped frame.
+ */
+export type StillAttention = "no-page" | "corner-outside" | "moved" | "unverified" | "low-resolution";
 
 /**
  * Turn a point of a `w`×`h` picture a quarter turn clockwise `turns` times,

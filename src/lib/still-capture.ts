@@ -10,8 +10,13 @@
  * phones means a sharper, better-exposed, higher-resolution image of the same
  * page. That is worth having, and it is worth having *optionally*: the API is
  * Chromium-only, drivers reject it, and some phones take seconds to answer. So
- * every path here converges on the same fallback answer — `null`, meaning "use
- * the preview frame, exactly as before".
+ * every path here converges on the same fallback answer — no bitmap and a
+ * named {@link StillFallbackReason}, meaning "use the preview frame, at the
+ * stream's native size" — and the reason is reported, never swallowed.
+ *
+ * The photo is asked for at the camera's **largest** size
+ * ({@link pickPhotoSize}) and matched to the viewfinder by a crop
+ * ({@link stillCropFor}), never by asking the driver for a smaller one.
  *
  * Three rules hold this together:
  *
@@ -110,6 +115,34 @@ export interface PhotoSizeChoice {
 
 /** Failures so far in this browsing session. Memory only, like everything here. */
 let failures = 0;
+
+/**
+ * How the most recent still attempt ended: `true` it became a photo the page
+ * could use, `false` it failed in any way, `null` none yet this page load.
+ */
+let lastStillOk: boolean | null = null;
+
+/**
+ * Whether the still pipeline is *proven* on this device right now: the last
+ * attempt produced a usable photo and the session has not given up on it.
+ *
+ * What the live stream's cap (`lib/stream-cap.ts`) is conditioned on: the
+ * preview may only be made cheaper while the photo — not the preview — is
+ * what becomes the page.
+ */
+export function stillPipelineWorking(): boolean {
+  return lastStillOk === true && failures < STILL_FAILURE_LIMIT;
+}
+
+/** Whether the most recent still failed, or the session gave up on stills. */
+export function stillPipelineFailed(): boolean {
+  return lastStillOk === false || failures >= STILL_FAILURE_LIMIT;
+}
+
+/** The caller turned the photo into the page's canvas: the pipeline is proven. */
+export function noteStillSuccess(): void {
+  lastStillOk = true;
+}
 
 /**
  * The driver call of an earlier attempt, alive until it actually answers.
@@ -231,89 +264,157 @@ function snapDown(value: number, range: PhotoSizeRange): number {
 }
 
 /**
- * The largest photo this camera supports that still fits the page grid —
- * and, when the caller says what shape the preview is, that still fits the
- * **preview's field of view**.
+ * The largest photo this camera supports — the sensor's own full field of
+ * view, at every pixel it has.
  *
- * Asking for the sensor's full 12 MP would hand a cheap phone a 4000×3000 JPEG
- * to decode and then immediately throw three quarters of away — the canonical
- * is capped at `MAX_LONG_EDGE` regardless. So the request is scaled down to the
- * target long edge when the sensor exceeds it, and left at the maximum when it
- * does not.
- *
- * `previewAspect` is the shape of the stream the user composed against.
- * A 4:3 still against a 16:9 preview is a *wider* photo than the one
- * the user framed: the page they filled the viewfinder with arrives small and
- * off in a scene they never saw, which is what broke both the corner transfer
- * and the coverage gate in the field. When the aspect is given, the sensor's
- * maximum is first cropped to that shape — orientation-agnostically, since the
- * driver speaks sensor orientation and the preview may be portrait — and the
- * scaling runs on the cropped rectangle. When it is not given, the behaviour
- * is exactly what it always was.
+ * This used to ask for less: the preview's shape at a 3000 px long edge. On
+ * Chrome for Android that request is not a request at all but a *hint* — the
+ * driver answers with the supported JPEG size **closest** to it (Chromium's
+ * Camera2 picks by summed width/height distance), and on a Galaxy S25 Ultra
+ * the closest size to 3000×1688 is 3648×1704, a 2.14:1 photo that matches no
+ * preview. The shape check then threw it away and the page was made of the
+ * preview frame. Asking for the range maxima hits a size that exists — the
+ * largest one, which on a phone is the sensor's native 4:3 — and the field of
+ * view is matched to the preview afterwards by a pure crop
+ * ({@link stillCropFor}), which costs no resample.
  *
  * Returns `null` when the capabilities say nothing usable; the caller then
- * takes the photo without settings, which is a photo all the same. The answer
- * is a *request*: drivers are free to return something else, which is exactly
- * why geometry measured before the photo may only be reused after it once
- * {@link quadTransfers} has checked the shape that came back — and why the
- * capture path discards a still whose shape does not match the preview at all.
+ * takes the photo without settings, which is a photo all the same.
  */
 export function pickPhotoSize(
   width: PhotoSizeRange | null,
   height: PhotoSizeRange | null,
-  longEdgeTarget: number,
-  previewAspect: number | null = null,
 ): PhotoSizeChoice | null {
   if (width === null || height === null) return null;
-  if (!Number.isFinite(longEdgeTarget) || longEdgeTarget <= 0) return null;
-  let maxWidth = width.max;
-  let maxHeight = height.max;
-  if (
-    previewAspect !== null &&
-    Number.isFinite(previewAspect) &&
-    previewAspect > 0 &&
-    maxWidth > 0 &&
-    maxHeight > 0
-  ) {
-    // Long-over-short, so a portrait preview asks for the same crop as its
-    // landscape twin — the sensor's axes, not the screen's, decide which
-    // dimension carries the long edge.
-    const ratio = Math.max(previewAspect, 1 / previewAspect);
-    const long = Math.max(maxWidth, maxHeight);
-    const short = Math.min(maxWidth, maxHeight);
-    let cropLong = long;
-    let cropShort = long / ratio;
-    if (cropShort > short) {
-      cropShort = short;
-      cropLong = short * ratio;
-    }
-    if (maxWidth >= maxHeight) {
-      maxWidth = cropLong;
-      maxHeight = cropShort;
-    } else {
-      maxWidth = cropShort;
-      maxHeight = cropLong;
-    }
-  }
-  const maxLongEdge = Math.max(maxWidth, maxHeight);
-  if (maxLongEdge <= 0) return null;
-  const scale = maxLongEdge <= longEdgeTarget ? 1 : longEdgeTarget / maxLongEdge;
-  const imageWidth = snapDown(Math.round(maxWidth * scale), width);
-  const imageHeight = snapDown(Math.round(maxHeight * scale), height);
+  const imageWidth = snapDown(width.max, width);
+  const imageHeight = snapDown(height.max, height);
   if (imageWidth <= 0 || imageHeight <= 0) return null;
   return { imageWidth, imageHeight };
 }
 
+/** A rectangle of the still, in its own (upright) pixels. */
+export interface StillCrop {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Why a still did not become the page, and the preview frame did.
+ *
+ * Every one of these is reported (the `capture` diagnostics event's
+ * `stillReason`), because "the page was made of the preview frame" is exactly
+ * the silent downgrade this module exists to prevent.
+ */
+export type StillFallbackReason =
+  /** No `ImageCapture` (Safari, Firefox) or no `createImageBitmap`. */
+  | "unsupported"
+  /** No live video track to photograph. */
+  | "no-track"
+  /** Two stills already failed this session ({@link STILL_FAILURE_LIMIT}). */
+  | "gave-up"
+  /** The previous attempt's driver call has not settled yet. */
+  | "busy"
+  /** `new ImageCapture(track)` threw. */
+  | "construct-failed"
+  /** No photo within {@link STILL_CAPTURE_BUDGET_MS}. */
+  | "timeout"
+  /** `takePhoto()` rejected, or answered something that is not a photo. */
+  | "take-failed"
+  /** The photo would not decode. */
+  | "decode-failed"
+  /** The photo decoded but its canvas could not be allocated. */
+  | "alloc-failed"
+  /** The photo cannot be cropped to the preview's field of view. */
+  | "aspect-mismatch"
+  /** The photo came back turned a quarter against the preview. */
+  | "orientation-mismatch";
+
+/** What {@link stillCropFor} decided: the part of the still that is the page's frame, or why none is. */
+export type StillFit =
+  | { crop: StillCrop; basis: "whole" | "sensor-crop" }
+  | { reason: "aspect-mismatch" | "orientation-mismatch" };
+
+function sameSize(a: number, b: number): boolean {
+  return a > 0 && b > 0 && Math.abs(a - b) / Math.max(a, b) <= ASPECT_TOLERANCE;
+}
+
+/**
+ * Which part of a still shows what the viewfinder showed — a pure crop, never
+ * a resample.
+ *
+ * Two cases are provably the preview's field of view:
+ *
+ *  * **The still already has the preview's shape** — the whole still.
+ *  * **The still is the sensor-native size we asked for** ({@link pickPhotoSize})
+ *    — the largest photo a camera has spans its whole active array, and a
+ *    phone's preview stream is the *centre crop* of that array at the stream's
+ *    own aspect (Camera2 crops every output stream that way; a 16:9 preview of
+ *    a 4:3 sensor keeps the full long edge and gives up the short one). So the
+ *    centre crop of the still at the preview's aspect *is* the preview's field
+ *    of view, at the still's resolution.
+ *
+ * Anything else — a driver that answered some other size of another shape — is
+ * a field of view nobody can vouch for (a 2.14:1 photo against a 16:9 preview
+ * has *lost* part of the short edge), and the preview frame is used instead.
+ * Stabilization can still make the preview a little tighter than the still;
+ * the still registration (`lib/still-register.ts`) measures that afterwards
+ * and the confirm screen asks for a closer look when it matters.
+ *
+ * `requested` is in the driver's (sensor) orientation; `still` is upright, so
+ * sizes are compared long edge to long edge.
+ */
+export function stillCropFor(
+  still: { width: number; height: number },
+  requested: PhotoSizeChoice | null,
+  previewAspect: number | null,
+): StillFit {
+  const { width, height } = still;
+  const whole: StillFit = { crop: { x: 0, y: 0, width, height }, basis: "whole" };
+  if (previewAspect === null || !Number.isFinite(previewAspect) || previewAspect <= 0) return whole;
+  const stillAspect = width / height;
+  if (quadTransfers(previewAspect, stillAspect)) return whole;
+  // Portrait against landscape (neither square): the EXIF turn was not honoured.
+  const squarePreview = sameSize(previewAspect, 1);
+  const squareStill = sameSize(stillAspect, 1);
+  if (!squarePreview && !squareStill && previewAspect < 1 !== stillAspect < 1) {
+    return { reason: "orientation-mismatch" };
+  }
+  const native =
+    requested !== null &&
+    sameSize(Math.max(width, height), Math.max(requested.imageWidth, requested.imageHeight)) &&
+    sameSize(Math.min(width, height), Math.min(requested.imageWidth, requested.imageHeight));
+  if (!native) return { reason: "aspect-mismatch" };
+  // The largest rectangle of the preview's shape, centred.
+  if (stillAspect > previewAspect) {
+    const cropWidth = Math.max(1, Math.round(height * previewAspect));
+    return {
+      crop: { x: Math.floor((width - cropWidth) / 2), y: 0, width: cropWidth, height },
+      basis: "sensor-crop",
+    };
+  }
+  const cropHeight = Math.max(1, Math.round(width / previewAspect));
+  return {
+    crop: { x: 0, y: Math.floor((height - cropHeight) / 2), width, height: cropHeight },
+    basis: "sensor-crop",
+  };
+}
+
 export interface StillPhotoOptions {
-  /** The long edge the canonical will be capped to anyway. */
-  longEdgeTarget: number;
-  /**
-   * The preview stream's `videoWidth / videoHeight` — the shape the user is
-   * composing against. Passed down to {@link pickPhotoSize} so the still is
-   * *requested* at the preview's field of view rather than the sensor's.
-   */
-  previewAspect?: number | null;
   budgetMs?: number;
+}
+
+/** One still attempt, whatever became of it. */
+export interface StillOutcome {
+  /** The photo, upright; the caller's to `close()`. Null when there is none. */
+  bitmap: ImageBitmap | null;
+  /** Why there is no photo; null when there is one. */
+  reason: StillFallbackReason | null;
+  /** What `takePhoto` was asked for (sensor orientation), when it was asked for a size. */
+  requested: PhotoSizeChoice | null;
+  /** From the call to the answer (or to giving up). */
+  ms: number;
 }
 
 /**
@@ -326,12 +427,14 @@ export interface StillPhotoOptions {
  */
 export function noteStillFailure(): void {
   failures = nextFailureCount(failures);
+  lastStillOk = false;
 }
 
 /** Test/dev hook: forget this session's failures. */
 export function resetStillCapturePolicy(): void {
   failures = 0;
   underlyingFlight = null;
+  lastStillOk = null;
 }
 
 /** How many stills have failed this session — for the debug panel and tests. */
@@ -366,64 +469,72 @@ function imageCaptureConstructor(): typeof ImageCapture | null {
   return typeof ImageCapture === "function" ? ImageCapture : null;
 }
 
+/** What one driver call came to, before the budget race. */
+interface StillAnswer {
+  bitmap: ImageBitmap | null;
+  reason: "take-failed" | "decode-failed" | null;
+  requested: PhotoSizeChoice | null;
+}
+
 /**
- * One attempt, end to end, resolving `null` for every kind of "no photo".
- * Never rejects: a rejection here would reach the shutter as an error the user
- * has no use for, when the preview frame is sitting right there.
+ * One attempt, end to end. Never rejects: a rejection here would reach the
+ * shutter as an error the user has no use for, when the preview frame is
+ * sitting right there. `onRequest` hears the size asked for the moment it is
+ * known, so a timed-out attempt can still report it.
  */
 async function decodeStill(
   capture: ImageCapture,
-  longEdgeTarget: number,
-  previewAspect: number | null,
-): Promise<ImageBitmap | null> {
+  onRequest: (requested: PhotoSizeChoice | null) => void,
+): Promise<StillAnswer> {
+  let settings: PhotoSizeChoice | null = null;
   try {
-    let settings: PhotoSizeChoice | undefined;
-    try {
-      // Typed as `PhotoCapabilities`, narrowed as `unknown`: every field of it
-      // is optional in the spec and drivers answer with less than that.
-      const capabilities: unknown = await capture.getPhotoCapabilities();
-      settings =
-        pickPhotoSize(
-          readPhotoSizeRange(capabilities, "imageWidth"),
-          readPhotoSizeRange(capabilities, "imageHeight"),
-          longEdgeTarget,
-          previewAspect,
-        ) ?? undefined;
-    } catch {
-      // Capabilities are a nicety; the default photo size is still a photo.
-      settings = undefined;
-    }
+    // Typed as `PhotoCapabilities`, narrowed as `unknown`: every field of it
+    // is optional in the spec and drivers answer with less than that.
+    const capabilities: unknown = await capture.getPhotoCapabilities();
+    settings = pickPhotoSize(
+      readPhotoSizeRange(capabilities, "imageWidth"),
+      readPhotoSizeRange(capabilities, "imageHeight"),
+    );
+  } catch {
+    // Capabilities are a nicety; the default photo size is still a photo.
+    settings = null;
+  }
+  onRequest(settings);
+  let photo: unknown;
+  try {
     if (probing()) {
       // Synchronously before the call: whatever answers it (the bench's fake
       // camera) learns which attempt it is answering.
       stillCalls += 1;
       probe({ type: "still-call", t: performance.now(), attempt: stillCalls });
     }
-    const photo: unknown =
-      settings === undefined
-        ? await capture.takePhoto()
-        : await capture.takePhoto(settings);
-    if (!(photo instanceof Blob) || photo.size === 0) return null;
+    photo = settings === null ? await capture.takePhoto() : await capture.takePhoto(settings);
+  } catch {
+    return { bitmap: null, reason: "take-failed", requested: settings };
+  }
+  if (!(photo instanceof Blob) || photo.size === 0) {
+    return { bitmap: null, reason: "take-failed", requested: settings };
+  }
+  try {
     // EXIF is baked in here, once, so the rest of the app can take the pixels
     // as they are — the same contract `prepareCapture` holds for picked files.
-    const bitmap = await createImageBitmap(photo, {
-      imageOrientation: "from-image",
-    });
+    // No resize: the photo is decoded at every pixel it has.
+    const bitmap = await createImageBitmap(photo, { imageOrientation: "from-image" });
     if (bitmap.width === 0 || bitmap.height === 0) {
       bitmap.close();
-      return null;
+      return { bitmap: null, reason: "decode-failed", requested: settings };
     }
-    return bitmap;
+    return { bitmap, reason: null, requested: settings };
   } catch {
-    return null;
+    return { bitmap: null, reason: "decode-failed", requested: settings };
   }
 }
 
 /** The budget race. A photo that arrives after the bell is closed, not kept. */
 async function withBudget(
-  work: Promise<ImageBitmap | null>,
+  work: Promise<StillAnswer>,
   budgetMs: number,
-): Promise<ImageBitmap | null> {
+): Promise<StillAnswer | null> {
   let timer = 0;
   const expiry = new Promise<null>((resolve) => {
     timer = window.setTimeout(() => resolve(null), budgetMs);
@@ -431,13 +542,15 @@ async function withBudget(
   const winner = await Promise.race([work, expiry]);
   window.clearTimeout(timer);
   if (winner === null) {
-    void work.then((late) => late?.close()).catch(() => undefined);
+    void work.then((late) => late.bitmap?.close()).catch(() => undefined);
   }
   return winner;
 }
 
 /**
- * A still photo of what the camera is pointing at, or `null` to use the frame.
+ * A still photo of what the camera is pointing at — at the camera's full
+ * photo resolution — or the reason there is none, in which case the caller
+ * uses the preview frame at the stream's native size.
  *
  * The returned bitmap belongs to the caller, who must `close()` it as soon as
  * it has been drawn — a full-resolution photo is tens of megabytes and this
@@ -445,11 +558,12 @@ async function withBudget(
  */
 export async function takeStillPhoto(
   track: MediaStreamTrack | null,
-  options: StillPhotoOptions,
-): Promise<ImageBitmap | null> {
+  options: StillPhotoOptions = {},
+): Promise<StillOutcome> {
   const started = performance.now();
   const callsBefore = stillCalls;
-  const bitmap = await attemptStill(track, options);
+  const answer = await attemptStill(track, options);
+  const outcome: StillOutcome = { ...answer, ms: performance.now() - started };
   if (probing()) {
     // Attempts never overlap (the flight latch), so a call counted while this
     // one was awaited is this one's.
@@ -457,50 +571,60 @@ export async function takeStillPhoto(
     probe({
       type: "still",
       t: started,
-      ms: performance.now() - started,
-      ok: bitmap !== null,
-      width: bitmap?.width ?? null,
-      height: bitmap?.height ?? null,
+      ms: outcome.ms,
+      ok: outcome.bitmap !== null,
+      width: outcome.bitmap?.width ?? null,
+      height: outcome.bitmap?.height ?? null,
       failures,
       attempt: lastAttempt,
     });
   }
-  return bitmap;
+  return outcome;
 }
 
 async function attemptStill(
   track: MediaStreamTrack | null,
-  {
-    longEdgeTarget,
-    previewAspect = null,
-    budgetMs = STILL_CAPTURE_BUDGET_MS,
-  }: StillPhotoOptions,
-): Promise<ImageBitmap | null> {
-  if (!stillAttemptsAllowed(failures, underlyingFlight !== null)) return null;
-  if (track === null || track.readyState !== "live") return null;
-  if (typeof createImageBitmap !== "function") return null;
+  { budgetMs = STILL_CAPTURE_BUDGET_MS }: StillPhotoOptions,
+): Promise<Omit<StillOutcome, "ms">> {
+  const none = (reason: StillFallbackReason): Omit<StillOutcome, "ms"> => ({
+    bitmap: null,
+    reason,
+    requested: null,
+  });
+  if (track === null || track.readyState !== "live") return none("no-track");
+  if (typeof createImageBitmap !== "function") return none("unsupported");
   const constructor = imageCaptureConstructor();
-  if (constructor === null) return null;
+  if (constructor === null) return none("unsupported");
+  if (underlyingFlight !== null) return none("busy");
+  if (!stillAttemptsAllowed(failures, false)) return none("gave-up");
 
   let capture: ImageCapture;
   try {
     capture = new constructor(track);
   } catch {
     // Some drivers throw at construction for a track they cannot photograph.
-    failures = nextFailureCount(failures);
-    return null;
+    noteStillFailure();
+    return none("construct-failed");
   }
 
   // `decodeStill` never rejects, so settlement is the only thing that clears
   // the latch — and it is cleared by identity, so a stale attempt cannot free a
   // slot a newer one is holding.
-  const work = decodeStill(capture, longEdgeTarget, previewAspect);
-  underlyingFlight = work;
-  void work.then(() => {
-    if (underlyingFlight === work) underlyingFlight = null;
+  let requested: PhotoSizeChoice | null = null;
+  const work = decodeStill(capture, (asked) => {
+    requested = asked;
+  });
+  const flight = work.then((answer) => answer.bitmap);
+  underlyingFlight = flight;
+  void flight.then(() => {
+    if (underlyingFlight === flight) underlyingFlight = null;
   });
 
-  const bitmap = await withBudget(work, budgetMs);
-  if (bitmap === null) failures = nextFailureCount(failures);
-  return bitmap;
+  const answer = await withBudget(work, budgetMs);
+  if (answer === null) {
+    noteStillFailure();
+    return { bitmap: null, reason: "timeout", requested };
+  }
+  if (answer.bitmap === null) noteStillFailure();
+  return answer;
 }

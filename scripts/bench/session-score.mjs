@@ -255,6 +255,32 @@ export function scorePasses(record, gtAt, frame) {
 }
 
 /**
+ * A still's truth (normalized to the whole still) re-expressed in a crop of it
+ * (`crop` in the still's pixels): corners, the page quad, the content
+ * polygons, and whether the page is still whole inside the crop.
+ */
+export function cropStillTruth(still, crop) {
+  const { width, height } = still;
+  if (!(width > 0 && height > 0 && crop.width > 0 && crop.height > 0)) return null;
+  const map = ([u, v]) => [(u * width - crop.x) / crop.width, (v * height - crop.y) / crop.height];
+  const quad = still.quad === null || still.quad === undefined ? still.quad : still.quad.map(map);
+  const corners = still.corners === null || still.corners === undefined ? still.corners : still.corners.map(map);
+  const inside = ([u, v]) => u >= 0 && u <= 1 && v >= 0 && v <= 1;
+  const content = Array.isArray(still.content)
+    ? still.content.map((box) => ({ ...box, polygon: box.polygon.map(map) }))
+    : (still.content ?? null);
+  return {
+    ...still,
+    width: crop.width,
+    height: crop.height,
+    quad,
+    corners,
+    whole: Array.isArray(corners) ? corners.every(inside) : still.whole,
+    content,
+  };
+}
+
+/**
  * The image a capture made its page of, by the ids it carried: the still the
  * fake camera rendered for its attempt, or the preview frame its grab was
  * stamped with. `known: false` when the ids name nothing — never a guess.
@@ -264,11 +290,18 @@ export function capturedImage(script, record, capture) {
     const attempt = capture.stillAttempt ?? null;
     const rendered = attempt === null ? null : ((record.stills ?? []).find((s) => s.attempt === attempt) ?? null);
     if (rendered === null) return { known: false, source: "still (unidentified)" };
+    // The app cuts a sensor-native still to the preview's field of view
+    // (`stillCropFor`): the page's frame is that crop, so the truth moves with it.
+    const crop = capture.stillCrop ?? null;
+    const cropped = crop === null ? null : cropStillTruth(rendered, crop);
     return {
       known: true,
-      truth: rendered,
-      content: rendered.content ?? null,
-      source: `still ${rendered.width}×${rendered.height}`,
+      truth: cropped ?? rendered,
+      content: cropped === null ? (rendered.content ?? null) : cropped.content,
+      source:
+        cropped === null
+          ? `still ${rendered.width}×${rendered.height}`
+          : `still ${rendered.width}×${rendered.height} → ${crop.width}×${crop.height}`,
       stillIndex: rendered.index ?? null,
       k: rendered.k ?? null,
     };
@@ -353,6 +386,8 @@ export function scoreCaptures(script, record) {
       stillMs: still?.ms ?? null,
       stillUsed: capture.stillUsed,
       stillSize: capture.stillW === null ? null : [capture.stillW, capture.stillH],
+      stillCrop: capture.stillCrop ?? null,
+      stillReason: capture.stillReason ?? null,
       previewSize: [capture.previewW, capture.previewH],
       frame: [frame.width, frame.height],
       imageSource: image.source,

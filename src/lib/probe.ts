@@ -163,6 +163,14 @@ export interface CaptureProbe {
   /** The still that arrived, whether or not it was used. */
   stillW: number | null;
   stillH: number | null;
+  /**
+   * The part of the still that became the page, in the still's own upright
+   * pixels (`lib/still-capture.ts` `stillCropFor`) — the preview's field of
+   * view cut out of a sensor-native photo. `null` when the still was not used.
+   */
+  stillCrop?: { x: number; y: number; width: number; height: number } | null;
+  /** Why the still did not become the page (`StillFallbackReason`), or null. */
+  stillReason?: string | null;
   previewW: number;
   previewH: number;
   /**
@@ -172,7 +180,7 @@ export interface CaptureProbe {
    */
   visible: { x: number; y: number; width: number; height: number } | null;
   /** The photo's check before the confirm screen (`lib/still-check.ts`): why it is flagged, or null. */
-  attention?: "no-page" | "corner-outside" | "moved" | "unverified" | null;
+  attention?: "no-page" | "corner-outside" | "moved" | "unverified" | "low-resolution" | null;
   /**
    * The photo registered against the viewfinder's picture at the tap
    * (`lib/still-register.ts`) — only when the still pipeline's photo became
@@ -335,7 +343,7 @@ export interface ConfirmOpenProbe {
   width: number;
   height: number;
   /** The flag the screen opened with (`Capture.attention`), or null. */
-  attention?: "no-page" | "corner-outside" | "moved" | "unverified" | null;
+  attention?: "no-page" | "corner-outside" | "moved" | "unverified" | "low-resolution" | null;
 }
 
 /** The user left the confirm screen with these corners. */

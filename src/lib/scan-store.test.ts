@@ -24,6 +24,7 @@ import {
   effectiveFinish,
   isRendered,
   pageGate,
+  type QualityEvent,
   type ScanPage,
   type ScanPdfPage,
   type ScanPdfResult,
@@ -106,6 +107,8 @@ class FakeCodec {
       thumb: tagged(`thumb(${stamp})`),
       width: 1240,
       height: 1754,
+      warpedWidth: 1240,
+      warpedHeight: 1754,
       finish,
       warped: request.corners !== null,
       dewarped,
@@ -179,6 +182,9 @@ class FakeCodec {
           pageCount: pages.length,
           bytes: 1024,
           rung: 0,
+          // The writer embeds each page's final as it is: its own pixels.
+          embedded: pages.map((page) => ({ width: 1240, height: 1754, bytes: page.jpeg.size })),
+          quality: 0.92,
         };
       },
     };
@@ -595,6 +601,54 @@ test("the subject line carries no date, in any locale", () => {
   }
 });
 
+test("the diagnostics hear every render's sizes and every page the PDF embeds", async () => {
+  const codec = new FakeCodec();
+  const heard: QualityEvent[] = [];
+  current?.dispose();
+  current = createScanStore({ pipeline: codec.pipeline(), onQuality: (event) => heard.push(event) });
+  current.start();
+  const canonical = codec.encodeCanonical("frame-1");
+  store().addCapture({ canonical, corners: QUAD, gate: reading("ok"), path: "shutter" });
+  await settle();
+  const pageId = onlyPage().id;
+  store().rotatePage(pageId, "cw");
+  await settle();
+  // Every edit is a fresh render from the canonical, reported with its sizes.
+  const renders = heard.filter((event) => event.kind === "render");
+  assert.equal(renders.length, 2);
+  for (const event of renders) {
+    assert.equal(event.page, 1);
+    assert.deepEqual(event.warped, { width: 1240, height: 1754 });
+    assert.equal(event.final.width, 1240);
+    assert.equal(event.final.quality, 0.92);
+    assert.ok(event.final.bytes > 0);
+  }
+  for (const request of codec.requests) assert.equal(request.canonical, canonical, "rendered from the canonical");
+
+  await store().buildPdf();
+  await settle();
+  const embeds = heard.filter((event) => event.kind === "embed");
+  assert.deepEqual(
+    embeds.map((event) => (event.kind === "embed" ? [event.page, event.pages, event.width, event.height, event.rung, event.resampled] : null)),
+    [[1, 1, 1240, 1754, 0, false]],
+  );
+});
+
+test("a throwing quality listener cannot break a render", async () => {
+  const codec = new FakeCodec();
+  current?.dispose();
+  current = createScanStore({
+    pipeline: codec.pipeline(),
+    onQuality: () => {
+      throw new Error("host bug");
+    },
+  });
+  current.start();
+  store().addCapture({ canonical: codec.encodeCanonical("frame-1"), corners: QUAD, gate: reading("ok"), path: "shutter" });
+  await settle();
+  assert.equal(onlyPage().status, "ready");
+});
+
 // ── the curved-page correction ───────────────────────────────────────────────
 //
 // The whole feature is a requested-vs-effective pair: a page asks for the
@@ -1004,6 +1058,8 @@ function renderedFor(finish: PageFinish, identity: boolean): RenderedPage {
     thumb: null,
     width: 1240,
     height: 1754,
+    warpedWidth: 1240,
+    warpedHeight: 1754,
     finish,
     warped: !identity,
     dewarped: false,

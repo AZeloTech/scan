@@ -128,9 +128,20 @@ export function ConfirmCornersScreen({
         ms: performance.now() - openedRef.current.at,
         seededFrom: openedRef.current.seededFrom,
         flag: capture.attention ?? null,
+        source: capture.sizes?.source ?? null,
+        canonical:
+          capture.sizes === undefined
+            ? null
+            : {
+                width: capture.sizes.width,
+                height: capture.sizes.height,
+                bytes: capture.sizes.bytes,
+                quality: capture.sizes.quality,
+              },
+        capped: capture.sizes?.capped ?? null,
       });
     },
-    [capture.attention, diagnosticsSink, pageNumber],
+    [capture.attention, capture.sizes, diagnosticsSink, pageNumber],
   );
   /**
    * Set synchronously by the first answer — Confirmar, Foto inteira, Refazer

@@ -4,7 +4,7 @@
  * Quad geometry, in ONE coordinate system.
  *
  * The live detector works on a ~640 px sample, the overlay is painted over a
- * CSS box that `object-cover` has cropped, and the warp happens on a ≤3000 px
+ * CSS box that `object-cover` has cropped, and the warp happens on a full-resolution
  * capture. Three different pixel grids for the same four corners — so nothing
  * outside this module ever carries corners in pixels for longer than one call:
  * everything in between speaks {@link NormalizedQuad}, fractions of the frame.

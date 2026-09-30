@@ -36,6 +36,8 @@ function page(overrides: Partial<RenderedPage> = {}): RenderedPage {
     thumb: null,
     width: 100,
     height: 200,
+    warpedWidth: 100,
+    warpedHeight: 200,
     finish: "clean",
     warped: true,
     dewarped: true,

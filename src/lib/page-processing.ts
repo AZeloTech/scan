@@ -137,13 +137,20 @@ export interface RenderRequest {
 
 /** What one render pass produced, and what it actually managed to apply. */
 export interface RenderedPage {
-  /** JPEG q85 — shown on screen AND embedded in the PDF, same bytes. */
+  /** The final JPEG — shown on screen AND embedded in the PDF, same bytes. */
   final: Blob;
   /** ~480 px JPEG for the rail and the review cards. Best effort. */
   thumb: Blob | null;
   /** Pixel dimensions of `final`; the PDF page is cut to them. */
   width: number;
   height: number;
+  /**
+   * The geometry stage's output, before the turn: the page region at its true
+   * pixel size in the canonical (the warp sizes it from the quad's own edges
+   * in canonical pixels). Diagnostics only.
+   */
+  warpedWidth: number;
+  warpedHeight: number;
   /** The finish that was really applied — not necessarily the one asked for. */
   finish: PageFinish;
   /** False when the warp could not be applied and the frame went in flat. */
@@ -456,6 +463,9 @@ async function renderOnce(
     rotation: request.rotation,
     thumbLongEdge: THUMB_LONG_EDGE,
   };
+  // Read before the hand-off: on the worker lane the canvas leaves this thread.
+  const warpedWidth = source.width;
+  const warpedHeight = source.height;
   // `renderPageTail` owns `source` from here — including freeing it — because
   // on the worker lane the pixels leave this thread and holding the canvas as
   // well would keep a second 48 MB copy of a 12 MP page alive for the pass.
@@ -474,6 +484,8 @@ async function renderOnce(
     thumb: pixels.thumb,
     width: pixels.width,
     height: pixels.height,
+    warpedWidth,
+    warpedHeight,
     finish,
     warped,
     dewarped,

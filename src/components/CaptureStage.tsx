@@ -8,17 +8,23 @@ import {
   encodeCanvas,
   frameToCanvas,
   ImagePrepError,
-  MAX_LONG_EDGE,
   releaseCanvas,
 } from "@/lib/image";
+import { encodeQuality } from "@/lib/encode";
 import {
   lastStillAttempt,
   liveQuadFreshAtTap,
   liveQuadSurvives,
   noteStillFailure,
-  quadTransfers,
+  noteStillSuccess,
   resolveCaptureCorners,
+  stillPipelineFailed,
+  stillPipelineWorking,
+  stillCropFor,
   takeStillPhoto,
+  type PhotoSizeChoice,
+  type StillCrop,
+  type StillFallbackReason,
 } from "@/lib/still-capture";
 import {
   detectInCanvas,
@@ -30,7 +36,7 @@ import {
 } from "@/lib/flatten";
 import { prefetchDewarpAssets } from "@/lib/dewarp/prefetch";
 import { connectionKind, shouldPrefetchHeavyAssets } from "@/lib/network";
-import { captureFromFile, type Capture, type CapturePath } from "@/lib/capture-intake";
+import { captureFromFile, type Capture, type CapturePath, type CaptureSizes } from "@/lib/capture-intake";
 import type { HintKey } from "@/lib/guidance";
 import { assessSource, type GateReading } from "@/lib/capture-gate";
 import { normalizedCoverage, type NormalizedQuad } from "@/lib/quad";
@@ -41,6 +47,16 @@ import { useLiveDetect } from "@/hooks/useLiveDetect";
 import { checkStill } from "@/lib/still-check";
 import { lumaThumb, registerStill, type LumaThumb, type StillRegistration } from "@/lib/still-register";
 import { resolveFit, type FitPolicy } from "@/lib/visible-region";
+import {
+  applyStreamSize,
+  CAPPED_STREAM,
+  hasImageCapture,
+  isAndroid,
+  NATIVE_STREAM,
+  STREAM_RESTORE_BUDGET_MS,
+  streamCapDecision,
+  waitForNativeFrame,
+} from "@/lib/stream-cap";
 import { DiagnosticsHud } from "@/components/DiagnosticsHud";
 import { PASS_SAMPLE_MS } from "@/lib/diagnostics-events";
 import { detectLaneReason } from "@/lib/detect-lane";
@@ -363,6 +379,86 @@ export function CaptureStage({
   const gateCanvasRef = React.useRef<HTMLCanvasElement | null>(null);
   /** The live video track, kept for the still-photo path only. */
   const trackRef = React.useRef<MediaStreamTrack | null>(null);
+  /** Whether the live stream is capped (`lib/stream-cap.ts`) — per camera, reset when it reopens. */
+  const streamCappedRef = React.useRef(false);
+  /** One cap change at a time. */
+  const streamCapBusyRef = React.useRef<Promise<void> | null>(null);
+
+  /**
+   * Cap or uncap the live stream as {@link streamCapDecision} says, and report
+   * it (`stream-cap`) when it changes — or, with `announce`, even when it does
+   * not (the camera just came up: the host hears the state and its reason).
+   */
+  const reconsiderStreamCap = React.useCallback(
+    async (announce: boolean) => {
+      if (streamCapBusyRef.current !== null) await streamCapBusyRef.current;
+      const track = trackRef.current;
+      const video = videoRef.current;
+      if (track === null || video === null || track.readyState !== "live") return;
+      const decision = streamCapDecision({
+        android: isAndroid(),
+        imageCapture: hasImageCapture(),
+        stillWorking: stillPipelineWorking(),
+        stillFailed: stillPipelineFailed(),
+        streamLongEdge: Math.max(video.videoWidth, video.videoHeight),
+        capped: streamCappedRef.current,
+      });
+      const report = (applied: boolean, reason: string) =>
+        diagnosticsSink?.emit({
+          type: "stream-cap",
+          applied,
+          reason,
+          stream: video.videoWidth > 0 ? { width: video.videoWidth, height: video.videoHeight } : null,
+        });
+      if (decision.cap === streamCappedRef.current) {
+        if (announce) report(streamCappedRef.current, decision.reason);
+        return;
+      }
+      const change = (async () => {
+        const ok = await applyStreamSize(track, decision.cap ? CAPPED_STREAM : NATIVE_STREAM);
+        if (trackRef.current !== track) return;
+        if (ok) streamCappedRef.current = decision.cap;
+        report(streamCappedRef.current, ok ? decision.reason : "constraints-failed");
+      })();
+      streamCapBusyRef.current = change;
+      try {
+        await change;
+      } finally {
+        if (streamCapBusyRef.current === change) streamCapBusyRef.current = null;
+      }
+    },
+    [diagnosticsSink],
+  );
+  /**
+   * Bring a capped live stream back to its native size for a page that is
+   * about to be made of the preview frame: `ok` when a native frame is on
+   * screen within {@link STREAM_RESTORE_BUDGET_MS}, `timeout` when the camera
+   * took the constraints but no native frame came in time, `failed` when it
+   * refused them. Either way the stream is not capped afterwards.
+   */
+  const restoreNativeStream = React.useCallback(
+    async (video: HTMLVideoElement): Promise<"ok" | "timeout" | "failed"> => {
+      if (streamCapBusyRef.current !== null) await streamCapBusyRef.current;
+      const track = trackRef.current;
+      if (track === null || track.readyState !== "live") return "failed";
+      if (!streamCappedRef.current) return "ok";
+      const applied = await applyStreamSize(track, NATIVE_STREAM);
+      if (!applied) {
+        diagnosticsSink?.emit({ type: "stream-cap", applied: true, reason: "constraints-failed", stream: { width: video.videoWidth, height: video.videoHeight } });
+        return "failed";
+      }
+      streamCappedRef.current = false;
+      const back = await waitForNativeFrame(video, STREAM_RESTORE_BUDGET_MS);
+      diagnosticsSink?.emit({
+        type: "stream-cap",
+        applied: false,
+        reason: "still-failed",
+        stream: video.videoWidth > 0 ? { width: video.videoWidth, height: video.videoHeight } : null,
+      });
+      return back ? "ok" : "timeout";
+    },
+    [diagnosticsSink],
+  );
   const flashRef = React.useRef<HTMLDivElement | null>(null);
   const shutterRef = React.useRef<HTMLButtonElement | null>(null);
   /** The re-entrancy guard, read synchronously: `busy` state lags a fast tap. */
@@ -501,6 +597,7 @@ export function CaptureStage({
           // Autoplay refusal still leaves a usable frame after user gesture.
         }
       }
+      streamCappedRef.current = false;
       if (diagnosticsSink !== null && !cancelled) {
         const settings = trackRef.current?.getSettings();
         const width = video?.videoWidth || settings?.width || 0;
@@ -515,6 +612,9 @@ export function CaptureStage({
         });
       }
       setMode("live");
+      // The live stream's cap (`lib/stream-cap.ts`): announced on every camera,
+      // applied only on Android Chrome once a still has proven itself.
+      if (!cancelled) void reconsiderStreamCap(true);
     }
 
     void start();
@@ -530,7 +630,7 @@ export function CaptureStage({
         }
       }
     };
-  }, [diagnosticsSink, intakeImages, reportError, useCamera]);
+  }, [diagnosticsSink, intakeImages, reconsiderStreamCap, reportError, useCamera]);
 
   /**
    * Auto-capture fires through the same path as a tap — set once the capture
@@ -705,6 +805,22 @@ export function CaptureStage({
         tappedAt: number;
         /** The still that arrived, whether or not it became the page. */
         still: { width: number; height: number } | null;
+        /** Why the still did not become the page, or null when it did. */
+        stillReason: StillFallbackReason | null;
+        /** How long the still attempt took, null when none was made. */
+        stillMs: number | null;
+        /** What `takePhoto` was asked for, when it was asked for a size. */
+        requested: PhotoSizeChoice | null;
+        /** The part of the still that is the page's frame (null: the preview frame became the page). */
+        crop: StillCrop | null;
+        /** The browser's canvas limit made the frame smaller than its source. */
+        capped: boolean;
+        /** The live stream was capped at the tap. */
+        streamCapped: boolean;
+        /** The live stream's size at the tap. */
+        streamAtTap: { width: number; height: number };
+        /** A still failed on a capped stream: how restoring the native stream went. */
+        restore: "ok" | "timeout" | "failed" | null;
       } | null = null,
     ) => {
       // Run only when it can change the answer: this is a ~3 s WASM detect and
@@ -743,7 +859,7 @@ export function CaptureStage({
         registration = stillThumb === null ? null : registerStill(check.previewThumb, stillThumb);
         registerMs = performance.now() - registerStarted;
       }
-      const attention =
+      const checked =
         check === null
           ? null
           : checkStill({
@@ -755,31 +871,11 @@ export function CaptureStage({
               stillUsed: check.stillUsed,
               registration,
             }).attention;
+      // A page made of the capped live stream (a failed still, and the native
+      // stream would not come back in time) is never handed over silently.
+      const attention =
+        checked ?? (check !== null && check.restore !== null && check.restore !== "ok" ? "low-resolution" : null);
       lastStillRef.current = { width: frame.width, height: frame.height, attention };
-      if (diagnosticsSink !== null && check !== null) {
-        diagnosticsSink.emit({
-          type: "capture",
-          trigger: check.trigger === "auto" ? "auto" : "manual",
-          tap: check.trigger === "auto" ? null : check.trigger,
-          page: pageNumber,
-          ms: performance.now() - check.tappedAt,
-          still: check.still,
-          source: check.stillUsed ? "still" : "preview",
-          frame: { width: frame.width, height: frame.height },
-          cornersFrom: live !== null ? "live" : detected !== null ? "detected" : fallback !== null ? "fallback" : null,
-          registration:
-            registration === null
-              ? null
-              : {
-                  fovScale: registration.fovScale,
-                  shiftX: registration.shiftX,
-                  shiftY: registration.shiftY,
-                  score: registration.score,
-                  overlap: registration.overlap,
-                },
-          flag: attention,
-        });
-      }
       if (trace !== null) {
         const cornersFrom: CornersFrom =
           live !== null
@@ -839,12 +935,64 @@ export function CaptureStage({
                 },
         });
       }
+      const canonical = await encodeCanvas(frame, "canonical");
+      const sizes: CaptureSizes | undefined =
+        check === null
+          ? undefined
+          : {
+              source: check.stillUsed ? "still" : "preview",
+              sourceWidth: check.stillUsed && check.still !== null ? check.still.width : check.preview.width,
+              sourceHeight: check.stillUsed && check.still !== null ? check.still.height : check.preview.height,
+              width: frame.width,
+              height: frame.height,
+              bytes: canonical.size,
+              quality: encodeQuality("canonical"),
+              capped: check.capped,
+              stillReason: check.stillReason,
+            };
+      if (diagnosticsSink !== null && check !== null && sizes !== undefined) {
+        diagnosticsSink.emit({
+          type: "capture",
+          trigger: check.trigger === "auto" ? "auto" : "manual",
+          tap: check.trigger === "auto" ? null : check.trigger,
+          page: pageNumber,
+          ms: performance.now() - check.tappedAt,
+          still: check.still,
+          source: check.stillUsed ? "still" : "preview",
+          stillReason: check.stillReason,
+          stillMs: check.stillMs,
+          requested:
+            check.requested === null
+              ? null
+              : { width: check.requested.imageWidth, height: check.requested.imageHeight },
+          stream: check.streamAtTap,
+          streamCapped: check.streamCapped,
+          restore: check.restore,
+          fov: check.crop === null ? null : { width: check.crop.width, height: check.crop.height },
+          frame: { width: frame.width, height: frame.height },
+          capped: check.capped,
+          canonical: { width: frame.width, height: frame.height, bytes: canonical.size, quality: sizes.quality },
+          cornersFrom: live !== null ? "live" : detected !== null ? "detected" : fallback !== null ? "fallback" : null,
+          registration:
+            registration === null
+              ? null
+              : {
+                  fovScale: registration.fovScale,
+                  shiftX: registration.shiftX,
+                  shiftY: registration.shiftY,
+                  score: registration.score,
+                  overlap: registration.overlap,
+                },
+          flag: attention,
+        });
+      }
       onCapture({
-        canonical: await encodeCanvas(frame, "canonical"),
+        canonical,
         corners,
         gate,
         path: path ?? taken,
         attention,
+        ...(sizes === undefined ? {} : { sizes }),
       });
     },
     [diagnosticsSink, onCapture, pageNumber, path, urls],
@@ -870,12 +1018,14 @@ export function CaptureStage({
    *
    * So the order is priority, not prohibition. The still path still re-detects
    * on the photo itself and that answer always wins when it lands; the buffered
-   * quad is the rescue underneath it. The still is *requested* at
-   * the preview's own shape ({@link takeStillPhoto} passes the aspect down to
-   * the size negotiation), and a photo that comes back a different shape
-   * anyway is discarded for the preview frame — a wider field of view is a
-   * scene the user did not compose, and it is what made pages arrive small,
-   * corners untransferable and the coverage gate wrong in the field. The
+   * quad is the rescue underneath it. The still is requested at the camera's
+   * largest photo size and cut to the preview's field of view by a pure crop
+   * ({@link stillCropFor}); a photo whose field of view cannot be matched
+   * that way is discarded for the preview frame — a wider or narrower scene
+   * than the user composed is what made pages arrive small, corners
+   * untransferable and the coverage gate wrong in the field — and the reason
+   * is reported (`stillReason`). Either way the page is made at the full
+   * resolution of whichever image it came from. The
    * buffered quad additionally has to have been fresh **at the tap**
    * ({@link liveQuadFreshAtTap}) and inside the capture grace window
    * ({@link liveQuadSurvives}, charged the buffer's own age *plus* everything
@@ -902,6 +1052,9 @@ export function CaptureStage({
       video.videoWidth > 0 && video.videoHeight > 0
         ? video.videoWidth / video.videoHeight
         : null;
+    const streamCappedAtTap = streamCappedRef.current;
+    const streamAtTap = { width: video.videoWidth, height: video.videoHeight };
+    let stillUsedForCap = false;
     detect.noteCapture();
     busyRef.current = true;
     setBusy(true);
@@ -915,47 +1068,52 @@ export function CaptureStage({
       flash(flashRef.current);
 
       const startedAt = Date.now();
-      const still = await takeStillPhoto(trackRef.current, {
-        longEdgeTarget: MAX_LONG_EDGE,
-        // The still is *requested* at the preview's shape: a wider
-        // photo than the one the user composed is a different scene — the page
-        // arrives small, the corner transfer dies, and the coverage gate
-        // rejects the detector's correct answer.
-        previewAspect,
-      });
+      // The camera's photo pipeline, at its largest photo size; matched to
+      // what the viewfinder showed by a pure crop (`stillCropFor`), never by
+      // asking the driver for a smaller photo it would answer with some other
+      // shape.
+      const still = await takeStillPhoto(trackRef.current);
       // null corners = "detect on the frame you are given", inside `emit`.
       let corners: NormalizedQuad | null = null;
       let fallbackCorners: NormalizedQuad | null = null;
-      const stillW = still?.width ?? null;
-      const stillH = still?.height ?? null;
-      if (still !== null) {
-        try {
-          frame = drawStill(still);
-        } catch {
-          // A canvas that could not be allocated at photo size may still be
-          // allocatable at preview size, and a photo is not worth an error
-          // message while the viewfinder is right there. It is still a failed
-          // still, though — it cost the budget and a full-resolution decode to
-          // reach this line — so the two-strike policy hears about it.
+      const stillW = still.bitmap?.width ?? null;
+      const stillH = still.bitmap?.height ?? null;
+      let stillReason: StillFallbackReason | null = still.reason;
+      let stillCrop: StillCrop | null = null;
+      let capped = false;
+      if (still.bitmap !== null) {
+        const fit = stillCropFor(
+          { width: still.bitmap.width, height: still.bitmap.height },
+          still.requested,
+          previewAspect,
+        );
+        if ("reason" in fit) {
+          // A field of view nobody can vouch for: the corner transfer, the
+          // coverage gate and the confirm screen are all built on the frame
+          // being what the viewfinder showed, and the preview frame is that.
+          // Charged as a strike: a driver that answers this will keep doing so.
+          still.bitmap.close();
           noteStillFailure();
-          frame = null;
+          stillReason = fit.reason;
+        } else {
+          try {
+            const drawn = drawStill(still.bitmap, fit.crop);
+            frame = drawn.canvas;
+            capped = drawn.capped;
+            stillCrop = fit.crop;
+            noteStillSuccess();
+            stillUsedForCap = true;
+          } catch {
+            // A canvas that could not be allocated at photo size may still be
+            // allocatable at preview size, and a photo is not worth an error
+            // message while the viewfinder is right there. It is still a failed
+            // still, though — it cost the budget and a full-resolution decode to
+            // reach this line — so the two-strike policy hears about it.
+            noteStillFailure();
+            stillReason = "alloc-failed";
+            frame = null;
+          }
         }
-      }
-      if (
-        frame !== null &&
-        previewAspect !== null &&
-        !quadTransfers(previewAspect, frame.width / frame.height)
-      ) {
-        // The driver ignored the requested shape: this photo is of a scene the
-        // user did not compose, and everything downstream — the corner
-        // transfer, the coverage gate, the confirm screen itself — is built on
-        // the frame being what the viewfinder showed. The preview frame is
-        // that, so it wins. Charged as a strike: a driver that answers the
-        // wrong shape will keep doing so, and the budget it costs per page
-        // buys nothing.
-        releaseCanvas(frame);
-        frame = null;
-        noteStillFailure();
       }
       // Fresh at the tap or not at all: a buffer the detector last confirmed
       // long before the tap points at where the page was. The grace
@@ -969,10 +1127,20 @@ export function CaptureStage({
       const stillUsed = frame !== null;
       let grab: number | null = null;
       let grabbedAt: number | null = null;
+      let restore: "ok" | "timeout" | "failed" | null = null;
+      if (frame === null && streamCappedRef.current) {
+        // The still failed on a capped live stream: the preview frame is about
+        // to become the page, so the stream goes back to its native size first
+        // (`lib/stream-cap.ts`) — a capped frame is never handed over silently.
+        restore = await restoreNativeStream(video);
+      }
       if (frame === null) {
         // The preview path: same surface the quad was measured on, so it is the
-        // capture's corners outright and no aspect check is owed.
-        frame = frameToCanvas(video);
+        // capture's corners outright and no aspect check is owed. At the
+        // stream's native size — every pixel the camera is sending.
+        const native = frameToCanvas(video);
+        frame = native.canvas;
+        capped = native.capped;
         if (probing()) {
           // Right after the draw, so the bench can name the frame it took.
           grabbedAt = performance.now();
@@ -980,7 +1148,10 @@ export function CaptureStage({
           grab = previewGrabs;
           probe({ type: "grab", t: grabbedAt, id: grab });
         }
-        corners = bufferedQuad;
+        // A frame taken after the stream was restored is not the frame the
+        // quad was measured on: its own detection first, the quad as rescue.
+        if (restore === null) corners = bufferedQuad;
+        else fallbackCorners = bufferedQuad;
       } else if (previewAspect !== null) {
         // The still path: its own detection gets first refusal inside `emit`;
         // this is only what happens when that detection finds nothing. The
@@ -1008,6 +1179,8 @@ export function CaptureStage({
             stillUsed,
             stillW,
             stillH,
+            stillCrop,
+            stillReason,
             previewW: video.videoWidth,
             previewH: video.videoHeight,
             visible: detect.frameBox === null ? null : { ...detect.visible },
@@ -1036,6 +1209,14 @@ export function CaptureStage({
           previewThumb,
           tappedAt,
           still: stillW !== null && stillH !== null ? { width: stillW, height: stillH } : null,
+          stillReason,
+          stillMs: still.reason === "unsupported" || still.reason === "no-track" ? null : still.ms,
+          requested: still.requested,
+          crop: stillCrop,
+          capped,
+          streamCapped: streamCappedAtTap,
+          streamAtTap,
+          restore,
         },
       );
       setAnnouncement(copy.capture.captured(pageNumber));
@@ -1053,8 +1234,12 @@ export function CaptureStage({
       busyRef.current = false;
       setBusy(false);
       detect.endCapture();
+      // A still just became the page: the live stream may now be capped
+      // (Android Chrome, still pipeline proven) — the confirm screen is over
+      // the viewfinder while the camera reconfigures.
+      if (stillUsedForCap) void reconsiderStreamCap(false);
     }
-  }, [copy, detect, disabled, emit, mode, pageNumber, paused]);
+  }, [copy, detect, disabled, emit, mode, pageNumber, paused, reconsiderStreamCap, restoreNativeStream]);
   autoFireRef.current = () => {
     void runCapture("auto");
   };
@@ -1752,9 +1937,9 @@ async function applyTorch(track: MediaStreamTrack, on: boolean): Promise<boolean
  * it has been drawn there is no reason for both it and the canvas to exist, and
  * on the phones this app is built for that pair is the allocation that fails.
  */
-function drawStill(still: ImageBitmap): HTMLCanvasElement {
+function drawStill(still: ImageBitmap, crop: StillCrop): { canvas: HTMLCanvasElement; capped: boolean } {
   try {
-    return bitmapToCanvas(still);
+    return bitmapToCanvas(still, crop);
   } finally {
     still.close();
   }

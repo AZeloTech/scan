@@ -174,11 +174,21 @@ why, the live loop sampled at most twice in any second (detection time and media
 cadence, frame age, found / locked / ready, and the HUD's `why:` reason),
 the visible region, hints shown and for how long, the ready cue on and off,
 auto-capture's countdown, cancellations (with the reason), fires (time from a
-steady page) and re-arming, each capture (manual or automatic, photo and
-frame sizes, whether the still or the preview became the page, where the
-corners came from, the still's registration numbers and the photo check's
-flag), each confirm-corners answer (kept, moved — the largest corner move as
-a percentage of the photo's diagonal —, retake or whole photo), pages removed
+steady page) and re-arming, each capture (manual or automatic, the photo as
+it arrived, the size it was asked for, the stream size, the part of the photo
+kept as the preview's field of view, whether the still or the preview became
+the page and — when it was the preview — why (`stillReason`), the page's
+canonical pixels, bytes and JPEG quality, whether a browser canvas limit had
+to shrink it, whether the live stream was capped at the tap and — when a
+still failed on a capped stream — whether the native stream came back for
+the page, where the corners came from, the still's registration numbers
+and the photo check's flag), each confirm-corners answer (kept, moved — the
+largest corner move as a percentage of the photo's diagonal —, retake or
+whole photo, with the canonical's sizes), the live stream's cap on Android (`stream-cap`: applied or not, and why),
+each page render (the page region's
+pixel size and the final JPEG's size, bytes and quality), each page of a
+finished PDF (the embedded image's pixels, bytes, ladder rung and quality,
+and whether the size ladder resampled it), pages removed
 or retaken, the page hidden and shown and the time until the camera answers
 again, stalls, the torch and the auto-capture toggle, and every `onEvent`
 event — rebuilt field by field from that event's own allowlisted fields
