@@ -144,6 +144,32 @@
     background-color: var(--scanic-handle-color);
   }
 
+  /*
+   * No halo at rest. scanic marks one corner "selected" from the start (the
+   * target of its keyboard nudges) and draws that with an accent bloom and a
+   * 1.12 scale, so the first puck wore a halo before anyone touched anything.
+   * Here the selection is only drawn for a keyboard user (the handle has
+   * `:focus-visible`) and while a puck is held (`.is-active`); a finger sees
+   * four identical pucks. Likewise the hover grow, which a phone leaves on
+   * the last puck it touched: only where there is a real hover.
+   */
+  .scan-root [data-scan-confirm-editor] .scan-corner-handle.is-selected:not(:focus-visible):not(.is-active) {
+    border-color: var(--scanic-handle-ring-color);
+    transform: translate(-50%, -50%);
+  }
+
+  .scan-root [data-scan-confirm-editor] .scan-corner-handle.is-selected:not(:focus-visible):not(.is-active)::before {
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+
+  @media (hover: none), (pointer: coarse) {
+    .scan-root [data-scan-confirm-editor] .scan-corner-handle:hover:not(:focus-visible):not(.is-active) {
+      transform: translate(-50%, -50%);
+    }
+  }
+
   .scan-root img,
   .scan-root svg,
   .scan-root video,

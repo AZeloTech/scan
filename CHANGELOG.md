@@ -63,6 +63,10 @@ freezes at 1.0.
   the visible region.
 - The diagnostics HUD says what holds the ready cue or auto-capture back
   (`why: …`).
+- **The confirm screen's first corner no longer wears a halo at rest.** The
+  corner that the arrow keys move is marked only for a keyboard user
+  (`:focus-visible`) and while a corner is held; a finger sees four identical
+  pucks.
 
 ### Added
 - **`onDiagnostics` (experimental): a field-test event stream.** Versioned,
