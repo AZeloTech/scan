@@ -132,7 +132,17 @@ export function cameraFromPose(pose, frame) {
   const d = pose.distance;
   const C = [tx - d * axis[0], ty - d * axis[1], -d * axis[2]];
   const K = [f, 0, cx, 0, f, cy, 0, 0, 1];
-  return { width, height, f, cx, cy, K, R, C };
+  const camera = { width, height, f, cx, cy, K, R, C };
+  // `frame.view`: the part of the frame the person sees on screen (frame
+  // fractions) — what a scripted user frames the page in ({@link inFrame},
+  // {@link projectedCoverage}). Rendering and ground truth ignore it.
+  if (frame.view) camera.view = viewBounds(frame.view, width, height);
+  return camera;
+}
+
+/** A `frame.view` (fractions) as pixel bounds. */
+export function viewBounds(view, width, height) {
+  return { l: view.x * width, t: view.y * height, r: (view.x + view.width) * width, b: (view.y + view.height) * height };
 }
 
 /** World point → pixel, with its depth along the optical axis (> 0 in front). */
@@ -281,7 +291,9 @@ export function projectRect(camera, rect) {
 export function projectedCoverage(camera, rect) {
   const corners = projectRect(camera, rect);
   if (corners.some((p) => p.depth <= 0)) return Infinity;
-  return polygonArea(corners.map((p) => [p.u, p.v])) / (camera.width * camera.height);
+  const v = camera.view;
+  const area = v === undefined ? camera.width * camera.height : (v.r - v.l) * (v.b - v.t);
+  return polygonArea(corners.map((p) => [p.u, p.v])) / area;
 }
 
 /**
@@ -303,11 +315,40 @@ export function distanceForCoverage(pose, frame, rect, coverage) {
 
 /** Whether a pixel lies inside the frame, with an optional margin in pixels. */
 export function inFrame(camera, point, margin = 0) {
-  return (
-    point.depth > 0 &&
-    point.u >= margin &&
-    point.v >= margin &&
-    point.u <= camera.width - margin &&
-    point.v <= camera.height - margin
-  );
+  const v = camera.view ?? { l: 0, t: 0, r: camera.width, b: camera.height };
+  return point.depth > 0 && point.u >= v.l + margin && point.v >= v.t + margin && point.u <= v.r - margin && point.v <= v.b - margin;
+}
+
+/**
+ * The pose, re-aimed (its `target` moved on the desk, nothing else) so that
+ * the world point `point` lands on pixel `[u, v]` — a few Newton steps on a
+ * finite-difference Jacobian; the projection is smooth and near-linear in the
+ * aim over a hand's reach.
+ */
+export function aimAt(pose, frame, point, [u, v]) {
+  let out = pose;
+  for (let step = 0; step < 6; step += 1) {
+    const at = project(cameraFromPose(out, frame), point);
+    const du = u - at.u;
+    const dv = v - at.v;
+    if (Math.hypot(du, dv) < 0.25) break;
+    const h = 1;
+    const px = project(cameraFromPose({ ...out, target: [out.target[0] + h, out.target[1]] }, frame), point);
+    const py = project(cameraFromPose({ ...out, target: [out.target[0], out.target[1] + h] }, frame), point);
+    const a = (px.u - at.u) / h;
+    const b = (py.u - at.u) / h;
+    const c = (px.v - at.v) / h;
+    const d = (py.v - at.v) / h;
+    const det = a * d - b * c;
+    if (Math.abs(det) < 1e-9) break;
+    out = { ...out, target: [out.target[0] + (d * du - b * dv) / det, out.target[1] + (-c * du + a * dv) / det] };
+  }
+  return out;
+}
+
+/** The centre of `frame.view` in pixels (the frame's own centre without one). */
+export function viewCenter(frame) {
+  const v = frame.view;
+  if (!v) return [frame.width / 2, frame.height / 2];
+  return [(v.x + v.width / 2) * frame.width, (v.y + v.height / 2) * frame.height];
 }

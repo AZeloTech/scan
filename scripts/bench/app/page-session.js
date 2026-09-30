@@ -176,7 +176,7 @@ async function prepare(id, seed, options = {}) {
   if (options.still) script.still = { ...script.still, ...options.still };
   knobs = options.knobs ?? {};
   const stills = options.stills ?? true;
-  player = new SessionPlayer(script, { stills });
+  player = new SessionPlayer(script, { stills, streamScale: options.streamScale ?? 1 });
   const info = await player.prerender(options.onProgress, { cache: options.cache ?? null });
   info.stillsMs = await player.prepareStills(requestFor);
   installFakeCamera({ player, permission: options.permission ?? script.permission, stills });
@@ -750,8 +750,22 @@ const style = document.createElement("style");
 style.textContent = "html, body { margin: 0; background: #111; } .app-h { height: 100svh; }";
 document.head.appendChild(style);
 
+/**
+ * What the layout shows of the frame, for the scripted user to frame pages
+ * in (`--frame-by screen`): the newest measured visible region (frame
+ * fractions) and every opaque control seen over it since the camera went
+ * live — or null before the first sample.
+ */
+function view() {
+  const last = regions[regions.length - 1];
+  if (last === undefined) return null;
+  const blocks = regions.flatMap((r) => r.blocks ?? []);
+  return { x: last.x, y: last.y, width: last.width, height: last.height, blocks, samples: regions.length };
+}
+
 window.__session = {
   prepare,
+  view,
   prepareClip,
   run,
   sheet,

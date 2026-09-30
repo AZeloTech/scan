@@ -39,8 +39,9 @@ test("every session script is deterministic and plain JSON", () => {
     assert.deepEqual(a, buildSession(id, 1), id);
     assert.deepEqual(JSON.parse(JSON.stringify(a)), a, id);
     assert.ok(a.duration > 5000, id);
-    // A session with auto-capture on may leave every capture to it.
-    assert.ok(a.autoCapture === true || a.actions.some((step) => step.tap !== undefined), `${id}: never taps the shutter`);
+    // A session with auto-capture on may leave every capture to it; the
+    // view probe (the runner's measuring stick) is no scan at all.
+    assert.ok(a.autoCapture === true || id === "view-probe" || a.actions.some((step) => step.tap !== undefined), `${id}: never taps the shutter`);
   }
   assert.notDeepEqual(buildSession("approach-hold", 1), buildSession("approach-hold", 2));
 });
@@ -267,3 +268,24 @@ test("a looped session plays its rendered frames forward and back, stills includ
   assert.equal(loopedTime(plain, 4321), 4321);
 });
 
+
+test("framed by the screen, a held page sits whole in the view, centred in it", async () => {
+  const { cameraFromPose, projectRect, viewBounds } = await import("./emulator/camera.js");
+  // The rail's cover crop of a 3:4 stream at 412×891, below the hint pill, above the controls.
+  const view = { x: 0.19, y: 0.12, width: 0.62, height: 0.65 };
+  for (const id of ["approach-hold", "partial-frame", "wider-still"]) {
+    for (let seed = 1; seed <= 4; seed += 1) {
+      const script = buildSession(id, seed, { size: "960x1280", view });
+      const hold = script.camera[script.camera.length - 1].pose;
+      const camera = cameraFromPose(hold, script.frame);
+      const b = viewBounds(view, script.frame.width, script.frame.height);
+      const layer = script.scene.layers.findLast((l) => l.document !== undefined);
+      const pts = projectRect(camera, layer);
+      for (const p of pts) assert.ok(p.u >= b.l && p.u <= b.r && p.v >= b.t && p.v <= b.b, `${id} #${seed}: corner ${p.u.toFixed(0)},${p.v.toFixed(0)} outside the view`);
+      const cx = pts.reduce((s, p) => s + p.u, 0) / 4 / script.frame.width;
+      assert.ok(cx > view.x && cx < view.x + view.width, `${id} #${seed}: page centre off the view`);
+    }
+  }
+  // Without a view, nothing changes: the script is the one framed in the whole frame.
+  assert.deepEqual(buildSession("approach-hold", 3, { size: "720x1280", view: null }), buildSession("approach-hold", 3, { size: "720x1280" }));
+});

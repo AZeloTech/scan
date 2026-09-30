@@ -10,7 +10,7 @@
  * Units: millimetres on the desk, degrees for angles, pixels in the image.
  */
 
-import { cameraFromPose, distanceForCoverage, inFrame, project, projectRect } from "./camera.js";
+import { aimAt, cameraFromPose, distanceForCoverage, inFrame, project, projectRect, rectCorners, viewCenter } from "./camera.js";
 import { documentSize, documentStock } from "./documents.js";
 
 /* ── surfaces ───────────────────────────────────────────────────────────── */
@@ -429,7 +429,7 @@ export function framingCamera(
   target,
   { coverage, tilt = [0, 20], roll = [-6, 6], aimSpread = 25, marginFraction = 0.02 },
 ) {
-  const turn = frame.width > frame.height ? 90 : 0;
+  const turn = landscapeView(frame) ? 90 : 0;
   const pose = {
     tilt: rng.range(tilt[0], tilt[1]),
     azimuth: rng.range(0, 360),
@@ -438,10 +438,13 @@ export function framingCamera(
   };
   const margin = marginFraction * Math.min(frame.width, frame.height);
   const offset = [rng.normal(0, 1), rng.normal(0, 1)];
+  // Framed by the screen (`frame.view`): the aim that puts the page's centre
+  // in the middle of what the person sees, not of the whole frame.
+  const centre = viewAim({ ...pose, target: [...target.center] }, frame, target, coverage);
   for (let shrink = 1; shrink >= 0; shrink -= 0.05) {
     const aim = [
-      target.center[0] + offset[0] * aimSpread * shrink,
-      target.center[1] + offset[1] * aimSpread * shrink,
+      centre[0] + offset[0] * aimSpread * shrink,
+      centre[1] + offset[1] * aimSpread * shrink,
     ];
     const candidate = { ...pose, target: aim };
     const distance = distanceForCoverage(candidate, frame, target, coverage);
@@ -451,7 +454,7 @@ export function framingCamera(
     }
   }
   // Too big to fit at this tilt with any aim: back off until it does.
-  const aim = [...target.center];
+  const aim = [...centre];
   let distance = distanceForCoverage({ ...pose, target: aim }, frame, target, coverage);
   for (let step = 0; step < 200; step += 1) {
     const camera = cameraFromPose({ ...pose, target: aim, distance }, frame);
@@ -459,6 +462,29 @@ export function framingCamera(
     distance *= 1.01;
   }
   return { ...pose, target: aim, distance };
+}
+
+/** Whether the part of the frame the person frames in (`frame.view`, else the frame) is wider than tall. */
+function landscapeView(frame) {
+  const v = frame.view;
+  return v ? v.width * frame.width > v.height * frame.height : frame.width > frame.height;
+}
+
+/** The desk point centre of a rect (its projected corners' mean in the world). */
+export function rectCentre(rect) {
+  const corners = rectCorners(rect);
+  return [0, 1, 2].map((i) => corners.reduce((sum, p) => sum + p[i], 0) / corners.length);
+}
+
+/**
+ * The aim (desk target) that puts `rect`'s centre on the centre of
+ * `frame.view` at the distance `coverage` asks for — the rect's own centre
+ * when there is no view (framed in the whole frame, as always).
+ */
+export function viewAim(pose, frame, rect, coverage) {
+  if (!frame.view) return [...rect.center];
+  const distance = distanceForCoverage(pose, frame, rect, coverage);
+  return aimAt({ ...pose, distance }, frame, rectCentre(rect), viewCenter(frame)).target;
 }
 
 /**

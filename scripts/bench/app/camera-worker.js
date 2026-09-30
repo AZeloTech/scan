@@ -33,6 +33,8 @@ let intervalMs = 1000 / 30;
 let loopFrames = null;
 let lastFrame = Infinity;
 let originAbs = 0;
+/** The stream's size when it is delivered scaled up (`streamScale`), else null (the frames' own). */
+let size = null;
 let running = false;
 let shown = -1;
 let skipped = 0;
@@ -66,6 +68,29 @@ function decode(n) {
   decoded.set(n, entry);
 }
 
+/**
+ * A camera busy with a photo (`disrupt`, from the still pipeline): until
+ * `untilAbs` it freezes (pushes nothing), or delivers at another size and a
+ * jumped exposure — what an Android `takePhoto()` does to the preview.
+ */
+let disrupt = null;
+
+/** The frame at the stream's size: itself, or drawn onto a reused canvas (scaled up, or disrupted). */
+let stage = null;
+function scaled(bitmap) {
+  const busy = disrupt !== null && nowAbs() < disrupt.untilAbs ? disrupt : null;
+  const want = busy?.size ?? size;
+  if (want === null && busy === null) return bitmap;
+  const width = want?.width ?? bitmap.width;
+  const height = want?.height ?? bitmap.height;
+  if (stage === null || stage.width !== width || stage.height !== height) stage = new OffscreenCanvas(width, height);
+  const ctx = stage.getContext("2d");
+  ctx.imageSmoothingQuality = "low";
+  ctx.filter = busy !== null && busy.gain !== 1 ? `brightness(${busy.gain})` : "none";
+  ctx.drawImage(bitmap, 0, 0, width, height);
+  return stage;
+}
+
 function drop(upTo) {
   for (const [n, entry] of decoded) {
     if (n > upTo) continue;
@@ -85,15 +110,28 @@ function tick() {
   timer = null;
   if (!running) return;
   const due = Math.min(lastFrame, Math.floor((nowAbs() - originAbs) / intervalMs));
-  if (due > shown) {
-    const entry = decoded.get(due);
+  const frozen = disrupt !== null && disrupt.freeze && nowAbs() < disrupt.untilAbs;
+  if (due > shown && !frozen) {
+    // The due frame, or — a scaled-up stream decoding slower than the clock
+    // (`size`) — the newest one decoded since the last push: a late frame,
+    // stamped with its own camera time, never a stall.
+    let n = due;
+    if (size !== null && !decoded.get(due)?.bitmap) {
+      for (let m = due - 1; m > shown; m -= 1) {
+        if (decoded.get(m)?.bitmap) {
+          n = m;
+          break;
+        }
+      }
+    }
+    const entry = decoded.get(n);
     if (entry?.bitmap && writer !== null) {
-      const frame = new VideoFrame(entry.bitmap, { timestamp: Math.round(due * intervalMs * 1000) });
+      const frame = new VideoFrame(scaled(entry.bitmap), { timestamp: Math.round(n * intervalMs * 1000) });
       writer.write(frame).catch(() => undefined);
-      pending.push({ n: due, k: frameOf(due), atAbs: nowAbs() });
-      if (shown >= 0) skipped += due - shown - 1;
-      drop(due);
-      shown = due;
+      pending.push({ n, k: frameOf(n), atAbs: nowAbs() });
+      if (shown >= 0) skipped += n - shown - 1;
+      drop(n);
+      shown = n;
     } else {
       decode(due);
     }
@@ -110,6 +148,7 @@ onmessage = (event) => {
     blobs = message.blobs;
     intervalMs = message.intervalMs;
     loopFrames = message.loopFrames ?? null;
+    size = message.size ?? null;
     lastFrame = message.lastFrame ?? Infinity;
     originAbs = message.originAbs;
     running = true;
@@ -117,6 +156,8 @@ onmessage = (event) => {
     for (let n = 0; n <= DECODE_AHEAD; n += 1) decode(n);
     reportTimer = setInterval(report, REPORT_EVERY_MS);
     tick();
+  } else if (message.type === "disrupt") {
+    disrupt = { untilAbs: message.untilAbs, size: message.size ?? null, gain: message.gain ?? 1, freeze: message.freeze === true };
   } else if (message.type === "reopen") {
     writer?.releaseLock?.();
     writer = message.writable.getWriter();

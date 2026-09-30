@@ -813,6 +813,33 @@ combine with a group: `--session default,guidance`).
     npm run bench -- --suite session --layout rail --viewport 412x891 --stream 960x1280 --seeds 5
     npm run bench -- --suite session --session approach-hold,wider-still --layout rail --viewport 440x956 --fit contain
 
+**The scripted user frames the page by the screen** (`--frame-by screen`,
+the default on every layout but `standard`). Before the sessions are built
+the runner opens the flow once on a page-less desk (`view-probe`) at the run's
+layout, viewport and stream, measures the visible region there (the same
+measurement the scorer uses) and trims off the opaque controls drawn over
+its top and bottom (the top row, the hint pill); every pose that frames a
+page — the families' cameras, `withMargin`, `partialCamera`, the placements —
+then fits the page in that part of the frame, centred in it, and a coverage
+("25–60 % of the frame") is a share of it. So on a full-bleed layout whose
+cover crop hides the frame's sides, a held page sits where a person holding
+the phone would put it — on the screen — and a cut-off one is cut off on the
+screen. `--frame-by sensor` frames in the whole frame, as every run before
+did (and `standard` keeps doing by default, so its numbers stay comparable).
+The view is logged and is part of the frame-cache key.
+
+`--stream-scale N` delivers every frame scaled up N× (`--stream 720x1280
+--stream-scale 3` is a 2160×3840 stream, what a 4K phone camera negotiates):
+the scene and its truth are the same; only the pixels the app grabs and
+resizes grow. Chromium's worker pump only.
+
+A still-pipeline fault can be scripted through a prepare's `still`
+(scratch drivers; not a CLI flag): `still.disrupt` (`{ freeze: true }`, or
+`{ size, gain }`, for `ms` or the still's latency) makes the preview freeze,
+change size or jump in exposure while a photo is taken, as Android does.
+The scorer's `captureFreeze` reports, for every capture, how far the overlay
+moved between the tap (or auto fire) and the confirm screen.
+
 ## WebKit (`npm run bench:webkit`)
 
 The flow end to end in Playwright's WebKit — primer, a live viewfinder that

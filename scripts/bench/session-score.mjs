@@ -535,10 +535,50 @@ export function scoreSession(script, record) {
   out.guidance = scoreGuidance(script, record, gtAt, out.captures);
   out.visibility = scoreVisibility(script, record, gtAt, out.captures);
   out.captureDetects = scoreCaptureDetects(record);
+  out.captureFreeze = scoreCaptureFreeze(record);
   out.perf = scorePerf(record);
   out.startup = scoreStartup(record, series, frame);
   if ((record.remounts ?? []).length > 0) out.remounts = scoreRemounts(record, series, frame);
   if (record.perfEnd) out.leaks = scoreLeaks(record);
+  return out;
+}
+
+/**
+ * How far the overlay moved between each capture's tap (or auto fire) and
+ * its confirm screen opening — it must hold still on the quad of the tap
+ * (`capturing`), whatever the camera does for the photo: the largest corner
+ * displacement (share of the frame) from the last quad drawn at the tap, over
+ * every overlay sample in between, and whether it faded or vanished there.
+ */
+export function scoreCaptureFreeze(record) {
+  const events = record.events ?? [];
+  const overlays = events.filter((e) => e.type === "overlay");
+  const out = [];
+  for (const capture of events.filter((e) => e.type === "capture")) {
+    const open = events.find((e) => e.type === "confirm-open" && e.t >= capture.t);
+    const to = open?.t ?? capture.doneAt ?? capture.t;
+    // The quad of the tap: the first frozen sample (the loop samples it as
+    // it freezes), else the last one drawn before the tap.
+    const frozen = overlays.find((o) => o.capturing === true && o.t >= capture.t - 1 && o.t < to) ?? null;
+    const before = frozen ?? overlays.filter((o) => o.t <= capture.t).at(-1) ?? null;
+    const base = before?.quad ?? null;
+    let move = 0;
+    let dropped = false;
+    let samples = 0;
+    for (const o of overlays) {
+      if (o === before || o.t < capture.t || o.t >= to) continue;
+      samples += 1;
+      if (base === null) continue;
+      if (o.quad === null || o.opacity < (before.opacity ?? 1) - 1e-6) {
+        dropped = true;
+        continue;
+      }
+      for (const key of ["topLeft", "topRight", "bottomRight", "bottomLeft"]) {
+        move = Math.max(move, Math.hypot(o.quad[key].x - base[key].x, o.quad[key].y - base[key].y));
+      }
+    }
+    out.push({ trigger: capture.trigger ?? null, from: capture.t, to, drawn: base !== null, samples, move, dropped });
+  }
   return out;
 }
 

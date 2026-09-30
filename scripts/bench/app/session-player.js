@@ -119,12 +119,17 @@ export async function thumbnailOf(source) {
  */
 export class StreamPlayer {
   /** @param {{ frame: { width: number, height: number } }} script */
-  constructor(script, frameIntervalMs = FRAME_INTERVAL_MS) {
+  constructor(script, frameIntervalMs = FRAME_INTERVAL_MS, { streamScale = 1 } = {}) {
     this.script = script;
     this.frameIntervalMs = frameIntervalMs;
+    // `streamScale`: the camera delivers every frame scaled up by this (a
+    // 720×1280 session played as a 2160×3840 stream, the size a 4K phone
+    // camera negotiates) — the scene and its truth are the same, in frame
+    // fractions; only the pixels the app has to grab and resize grow.
+    this.streamScale = streamScale;
     this.canvas = document.createElement("canvas");
-    this.canvas.width = script.frame.width;
-    this.canvas.height = script.frame.height;
+    this.canvas.width = Math.round(script.frame.width * streamScale);
+    this.canvas.height = Math.round(script.frame.height * streamScale);
     this.ctx = this.canvas.getContext("2d");
     this.stream = null;
     this.track = null;
@@ -365,7 +370,7 @@ export class StreamPlayer {
       if (due > shown) {
         const entry = this.decoded.get(due);
         if (entry?.bitmap) {
-          this.ctx.drawImage(entry.bitmap, 0, 0);
+          this.ctx.drawImage(entry.bitmap, 0, 0, this.canvas.width, this.canvas.height);
           if (this.track.readyState === "live") this.track.requestFrame?.();
           this.pushes.push({ k: this.frameOf(due), n: due, at: performance.now() });
           this.skipped += due - shown - 1;
@@ -421,6 +426,7 @@ export class StreamPlayer {
         blobs: this.blobs,
         intervalMs: this.frameIntervalMs,
         loopFrames: this.script.loop?.frames ?? null,
+        size: this.streamScale === 1 ? null : { width: this.canvas.width, height: this.canvas.height },
         lastFrame: this.lastFrame(),
         originAbs: performance.timeOrigin + this.startedAt,
       },
@@ -499,8 +505,8 @@ export class SessionPlayer extends StreamPlayer {
    *   still pipeline (Safari has no `ImageCapture`): nothing is ever rendered
    *   here, so a page with no WebGL can play frames another browser rendered.
    */
-  constructor(script, { stills = true } = {}) {
-    super(script, FRAME_INTERVAL_MS);
+  constructor(script, { stills = true, streamScale = 1 } = {}) {
+    super(script, FRAME_INTERVAL_MS, { streamScale });
     this.stillsEnabled = stills;
     this.renderer = stills ? new SessionRenderer() : null;
   }
@@ -564,7 +570,7 @@ export class SessionPlayer extends StreamPlayer {
   /** The stream opens on frame 0 (a bitmap drawn and let go). */
   async openOnFirstFrame() {
     const first = await createBitmap(this.blobs[0]);
-    this.ctx.drawImage(first, 0, 0);
+    this.ctx.drawImage(first, 0, 0, this.canvas.width, this.canvas.height);
     first.close();
   }
 
@@ -615,6 +621,18 @@ export class SessionPlayer extends StreamPlayer {
     const attempt = this.takeAttempt();
     const still = this.script.still;
     const calledAt = this.now();
+    // `still.disrupt`: the preview misbehaves while the photo is taken
+    // (frozen, resized, re-exposed), as Android's camera does for a still.
+    if (still.disrupt && this.pump !== null) {
+      const d = still.disrupt;
+      this.pump.postMessage({
+        type: "disrupt",
+        untilAbs: performance.timeOrigin + performance.now() + (d.ms ?? still.latencyMs),
+        size: d.size ?? null,
+        gain: d.gain ?? 1,
+        freeze: d.freeze === true,
+      });
+    }
     await sleep(still.exposeAtMs);
     // A looped session's still is a photo of the frame on screen: scene time, not camera time.
     const wanted = loopedTime(this.script, this.now());

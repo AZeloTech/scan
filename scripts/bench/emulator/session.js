@@ -24,8 +24,9 @@
 
 import { rngFor } from "./prng.js";
 import { buildScene, groundTruth } from "./scene.js";
-import { cameraFromPose, inFrame, project, projectRect } from "./camera.js";
-import { darkGranite, fabric, framingCamera, lightWood, page, paleTable, partialCamera } from "./kit.js";
+import { aimAt, cameraFromPose, inFrame, project, projectRect } from "./camera.js";
+import { darkGranite, fabric, framingCamera, lightWood, page, paleTable, partialCamera, rectCentre } from "./kit.js";
+import { frameSize } from "./scene.js";
 import { SKIN_TONES } from "./effects.js";
 import { clipPolygon, polygonArea } from "../metrics.mjs";
 
@@ -395,8 +396,12 @@ export function buildSession(id, seed, options = {}) {
     throw new Error(`unknown session "${id}" (known: ${sessionIds().join(", ")})`);
   }
   const rng = rngFor("session", id, seed);
+  // `view`: the part of the frame the layout under test shows (frame
+  // fractions) — the scripted user frames the page in it, as a person aims
+  // by the screen (`--frame-by screen`). Without it, the whole frame.
+  const size = options.view ? { ...frameSize(options.size ?? "portrait"), view: options.view } : (options.size ?? "portrait");
   // `family` overrides the scene family a session would pick (the playground's choice).
-  const built = session.build(rng, { seed, size: options.size ?? "portrait", family: options.family ?? null });
+  const built = session.build(rng, { seed, size, family: options.family ?? null });
   const script = {
     id,
     seed,
@@ -435,11 +440,16 @@ function farPose(rng, rest, { distance = [1.7, 2.3], lean = [8, 18], off = [60, 
  */
 function withMargin(pose, frame, layer, margin) {
   const px = margin * Math.min(frame.width, frame.height);
+  // Framed by the screen, backing off keeps the page where the person had it
+  // on screen (backing off along the axis would slide it to the frame's centre).
+  const centre = frame.view ? rectCentre(layer) : null;
+  const at = centre === null ? null : project(cameraFromPose(pose, frame), centre);
   let out = pose;
   for (let step = 0; step < 80; step += 1) {
     const camera = cameraFromPose(out, frame);
     if (projectRect(camera, layer).every((p) => inFrame(camera, p, px))) return out;
     out = { ...out, distance: out.distance * 1.02 };
+    if (at !== null) out = aimAt(out, frame, centre, [at.u, at.v]);
   }
   return out;
 }
@@ -769,6 +779,30 @@ registerSession({
       ],
       marks: { lockFrom: 0, holdFrom: 1000, holdTo: 19950, tapAt: 20000, sustainedFrom: 0, sustainedTo: 75000 },
       remounts: 3,
+    };
+  },
+});
+
+/**
+ * Not a scan: a still, page-less desk the bench opens the flow on to measure
+ * what the layout under test shows of the frame (`--frame-by screen`) before
+ * it builds the sessions that frame a page in it.
+ */
+registerSession({
+  id: "view-probe",
+  title: "measure the visible region",
+  inDefault: false,
+  describe: "an empty desk, held still for a moment: the runner reads the layout's visible region and the controls over it",
+  build(rng, { seed, size }) {
+    const scene = buildScene("F6", seed, { size });
+    return {
+      scene,
+      duration: 6000,
+      loop: { frames: 2 },
+      camera: [{ t: 0, pose: scene.camera }],
+      tremor: [{ t: 0, amplitude: 0 }],
+      actions: [],
+      marks: {},
     };
   },
 });
@@ -1681,9 +1715,10 @@ const VIEW_CROP = { x: 0, y: 0.075, width: 1, height: 0.85 };
 /** A layer as the viewfinder shows it from `pose`: its nearest corner's margin and its share of the view. */
 function inView(pose, frame, layer) {
   const camera = cameraFromPose(pose, frame);
+  const crop = frame.view ?? VIEW_CROP;
   const pts = projectRect(camera, layer).map((p) => [
-    (p.u / frame.width - VIEW_CROP.x) / VIEW_CROP.width,
-    (p.v / frame.height - VIEW_CROP.y) / VIEW_CROP.height,
+    (p.u / frame.width - crop.x) / crop.width,
+    (p.v / frame.height - crop.y) / crop.height,
   ]);
   const margin = Math.min(...pts.map(([x, y]) => Math.min(x, 1 - x, y, 1 - y)));
   const inside = clipPolygon(pts, [

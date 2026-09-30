@@ -58,14 +58,14 @@ export const DEFAULT_STREAM = "720x1280";
  * build. Any change to any of them is another key, so a stale frame is never
  * replayed — and editing one session's script re-renders that session only.
  */
-export function frameCacheKey(id, seed, stream, browserVersion) {
+export function frameCacheKey(id, seed, stream, browserVersion, view = null) {
   const hash = createHash("sha256");
   const dir = join(BENCH_DIR, "emulator");
   for (const name of readdirSync(dir).filter((n) => n.endsWith(".js")).sort()) {
     const source = readFileSync(join(dir, name), "utf8");
     hash.update(name).update(name === "session.js" ? source.slice(0, source.indexOf("registerSession({")) : source);
   }
-  hash.update(JSON.stringify(buildSession(id, seed, { size: stream })));
+  hash.update(JSON.stringify(buildSession(id, seed, { size: stream, view })));
   hash.update(FRAME_CACHE_VERSION).update(browserVersion);
   return `${id}-${seed}-${stream}-${hash.digest("hex").slice(0, 16)}`;
 }
@@ -510,15 +510,22 @@ export async function runSessionSuite({ page, throttle: _unused, options, outDir
   }
   const knobs = sessionKnobs(options);
   const browserVersion = browser.version();
+  // `--frame-by screen`: frame every page in what this layout shows at this
+  // viewport and stream, measured once, before the sessions are built.
+  const view = options.frameBy === "screen" ? await measureFramingView(browser, origin, options) : null;
+  if (view !== null) {
+    log(`session: framing by the screen — view x ${pctView(view.x)} y ${pctView(view.y)} w ${pctView(view.width)} h ${pctView(view.height)} % of the frame`);
+  }
   for (const id of ids) {
     for (let seed = 1; seed <= options.sessionSeeds; seed += 1) {
       const started = Date.now();
       const { context, page: phone, errors } = await openSessionPage(browser, origin, options.layout, options.viewport);
       try {
-        const cache = options.frameCache === false ? null : frameCacheKey(id, seed, options.stream, browserVersion);
+        const cache = options.frameCache === false ? null : frameCacheKey(id, seed, options.stream, browserVersion, view);
         const prepared = await phone.evaluate(
-          ([name, s, size, key, settings]) => window.__session.prepare(name, s, { size, cache: key, knobs: settings }),
-          [id, seed, options.stream, cache, knobs],
+          ([name, s, size, key, settings, v, scale]) =>
+            window.__session.prepare(name, s, { size, cache: key, knobs: settings, view: v, streamScale: scale }),
+          [id, seed, options.stream, cache, knobs, view, options.streamScale ?? 1],
         );
         const throttle = await cpuThrottle(phone);
         await throttle.set(options.cpu);
@@ -586,6 +593,47 @@ export async function runSessionSuite({ page, throttle: _unused, options, outDir
     summary,
     render: (results) => render({ ...results, config: { ...results.config, stream: options.stream } }),
   };
+}
+
+const pctView = (v) => (v * 100).toFixed(1);
+
+/**
+ * The part of the frame a person frames a page in on this layout, viewport
+ * and stream: the visible region the bench measures on the page itself (the
+ * video under its fit, clipped by the screen, minus the opaque bands) with
+ * the opaque controls drawn over its top or bottom (the top row, the hint
+ * pill) cut off too — a person keeps the page out from under them. Frame
+ * fractions, rounded (a stable frame-cache key).
+ */
+export async function measureFramingView(browser, origin, options) {
+  const { context, page } = await openSessionPage(browser, origin, options.layout, options.viewport);
+  try {
+    await page.evaluate(
+      ([size, scale, settings]) => window.__session.prepare("view-probe", 1, { size, streamScale: scale, knobs: settings }),
+      [options.stream, options.streamScale ?? 1, sessionKnobs(options)],
+    );
+    await page.evaluate(() => window.__session.run({ scripted: false }));
+    await page.waitForFunction(() => (window.__session.view()?.samples ?? 0) >= 15, null, { timeout: 30_000 });
+    return framingView(await page.evaluate(() => window.__session.view()));
+  } finally {
+    await context.close();
+  }
+}
+
+/** {@link measureFramingView}'s arithmetic: the region, trimmed by the controls over its top and bottom. */
+export function framingView(region) {
+  let top = region.y;
+  let bottom = region.y + region.height;
+  const left = region.x;
+  const right = region.x + region.width;
+  const middle = (top + bottom) / 2;
+  for (const b of region.blocks ?? []) {
+    if (b.x + b.width <= left || b.x >= right || b.y + b.height <= top || b.y >= bottom) continue;
+    if (b.y + b.height / 2 < middle) top = Math.max(top, b.y + b.height);
+    else bottom = Math.min(bottom, b.y);
+  }
+  const round = (v) => Math.round(v * 1e4) / 1e4;
+  return { x: round(left), y: round(top), width: round(right - left), height: round(Math.max(0, bottom - top)) };
 }
 
 /**

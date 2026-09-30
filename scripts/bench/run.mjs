@@ -52,6 +52,7 @@ const USAGE = `usage: npm run bench -- [--suite detector|session|real-stills|rea
        [--family F1,F2,…] [--setting name,…] [--seeds N] [--variants ml,classical,production,refined,ml+refine,ml+live]
        [--session approach-hold,…] [--stream WxH] [--skip-replay] [--lane main|worker] [--no-frame-cache]
        [--layout rail|standard|classic|filmstrip|onehand|collapse] [--viewport WxH] [--fit cover|contain|maxcrop]
+       [--frame-by screen|sensor] [--stream-scale N]
        [--cpu 1|4|6] [--size portrait|landscape|WxH] [--compare results.json]
        [--out dir] [--headed]
 real-stills / real-video need SCAN_REAL_MEDIA=<dir>; their output goes to the cache, never the repo.`;
@@ -67,6 +68,28 @@ const DEFAULT_VARIANTS = ["ml", "classical", "production", "refined", "ml+refine
 
 function log(line) {
   console.log(line);
+}
+
+/**
+ * How the scripted user frames the page (`--frame-by`): `screen` — in what
+ * the layout under test actually shows (its visible region, measured once
+ * per layout × viewport × stream, minus the controls drawn over the top of
+ * it), as a person aims by the screen; `sensor` — in the camera's whole
+ * frame, as every session did before. Default: `screen`, except on
+ * `standard`, whose sessions stay comparable with the earlier phases.
+ */
+function parseFrameBy(value, layout) {
+  if (value === undefined) return layout === "standard" ? "sensor" : "screen";
+  if (value !== "screen" && value !== "sensor") throw new Error(`--frame-by ${value}: expected screen or sensor`);
+  return value;
+}
+
+/** `--stream-scale N`: the fake camera delivers each frame scaled up N× (a 4K stream from 720×1280 frames). */
+function parseStreamScale(value) {
+  if (value === undefined) return 1;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1 || n > 4) throw new Error(`--stream-scale ${value}: expected 1 to 4`);
+  return n;
 }
 
 function parse() {
@@ -90,6 +113,8 @@ function parse() {
       layout: { type: "string" },
       viewport: { type: "string" },
       fit: { type: "string" },
+      "frame-by": { type: "string" },
+      "stream-scale": { type: "string" },
       help: { type: "boolean", default: false },
     },
     strict: true,
@@ -132,6 +157,8 @@ function parse() {
     layout: parseLayout(values.layout),
     viewport: parseViewport(values.viewport),
     fit: parseFit(values.fit),
+    frameBy: parseFrameBy(values["frame-by"], values.layout),
+    streamScale: parseStreamScale(values["stream-scale"]),
   };
 }
 
@@ -374,6 +401,8 @@ async function main() {
                   layout: options.layout ?? "rail",
                   viewport: options.viewport === null ? null : `${options.viewport.width}x${options.viewport.height}`,
                   fit: options.fit,
+                  frameBy: options.frameBy,
+                  streamScale: options.streamScale,
                 }
               : {}),
           }
