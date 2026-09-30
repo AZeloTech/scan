@@ -134,8 +134,10 @@ freezes at 1.0.
   form's columns line glyphs up vertically too. The turned page is then checked against the flat
   page it came from — more level, lines no less straight, no print pushed
   out of the frame — or the turn is dropped. The corners the turn uncovers
-  are filled with the paper right beside them, shading included, and nothing
-  of the photo's own edge is smeared in where the turn reaches past it. The
+  are filled with the paper right beside them, shading included. Where the
+  turn reaches past the photo, the photo's edge is not smeared into the page,
+  except along an edge where the frame already showed the table: there the
+  table carries on past the photo instead of a patch of paper landing in it. The
   curved-page engine runs only when the level page still shows a curl, on
   the confirmed outline as before, and the turn is what the page keeps when
   the engine declines. On the synthetic bench, pages fixed go from 81 to 225

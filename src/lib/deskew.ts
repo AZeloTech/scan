@@ -1187,12 +1187,21 @@ export interface DeskewPlan {
    * pixels stay.
    */
   paint: [boolean, boolean, boolean, boolean];
+  /**
+   * Per wedge, in {@link paint}'s order: kept because the frame already showed
+   * the table along that edge (a loose outline). Past the photo such a wedge
+   * is left as scanic renders it — the photo's edge clamped outward, which is
+   * that same table — instead of painted paper: a paper patch inside a strip
+   * of table is the seam the fill exists to avoid. Absent: all false.
+   */
+  tableBeyondPhoto?: [boolean, boolean, boolean, boolean];
   /** Fill bleed as a fraction of the output's long edge ({@link DESKEW_FILL_BLEED_FRACTION}). */
   bleedFraction: number;
   /**
    * The photo's own frame as seen in the output (fractions), when Q′ reaches
-   * past it: everything outside has no pixels and is always painted. Null
-   * when Q′ lies inside the photo.
+   * past it: everything outside has no pixels of its own (scanic clamps to the
+   * photo's edge) and is painted, unless it lies in a wedge kept as table
+   * ({@link tableBeyondPhoto}). Null when Q′ lies inside the photo.
    */
   photoInOutput: DeskewPoint[] | null;
   /** Whether the engine should still be asked about a curl, and why. */
@@ -1317,6 +1326,7 @@ interface WedgeLayout {
   /** The photo, pulled in by one pixel (the clamped edge row): outside it is always fill. */
   photo: DeskewPoint[] | null;
   paint: [boolean, boolean, boolean, boolean];
+  tableBeyond: [boolean, boolean, boolean, boolean];
   /** Along each edge of `page`: inward unit normal. */
   normals: DeskewPoint[];
   /**
@@ -1347,12 +1357,13 @@ function wedgeLayout(plan: DeskewPlan, width: number, height: number): WedgeLayo
     return { x: nx, y: ny };
   });
   const band = Math.max(4, FILL_BAND_FRACTION * Math.max(width, height));
-  return { width, height, page, photo, paint: plan.paint, normals, inner: shrinkPolygon(page, band, band) };
+  const tableBeyond = plan.tableBeyondPhoto ?? [false, false, false, false];
+  return { width, height, page, photo, paint: plan.paint, tableBeyond, normals, inner: shrinkPolygon(page, band, band) };
 }
 
 function paintsAt(layout: WedgeLayout, x: number, y: number): boolean {
-  if (layout.photo !== null && !insidePolygon(layout.photo, x, y)) return true;
   const edge = outsideEdge(layout.page, x, y);
+  if (layout.photo !== null && !insidePolygon(layout.photo, x, y)) return edge < 0 || !layout.tableBeyond[edge];
   return edge >= 0 && layout.paint[edge];
 }
 
@@ -1862,9 +1873,10 @@ export function fillDeskewWedges(image: DeskewImage, plan: DeskewPlan): number {
 /** Share of paper-like pixels in a wedge above which the page continues into it. */
 const WEDGE_PAGE_CONTINUES = 0.6;
 /**
- * A wedge whose median is at least this share of the page border's own is the
- * page continuing (shaded paper, print on paper), however little of it passes
- * as bright paper.
+ * A wedge whose median is at least this share of the page border's own is
+ * whatever that border shows, continuing: the page (shaded paper, print on
+ * paper) however little of it passes as bright paper, or — when the border
+ * was table — the table.
  */
 const WEDGE_LOOKS_LIKE_PAGE = 0.85;
 /** Share of paper-like pixels in the confirmed page's border that says the outline was the sheet. */
@@ -1882,10 +1894,16 @@ const BORDER_WAS_PAPER = 0.7;
  *  * wedge background, and the confirmed page's own border along that edge
  *    was paper → the outline was the sheet, this background is new → paint;
  *  * wedge background, and the confirmed page's border there was already
- *    background → a loose outline; the table simply continues → keep.
+ *    background → a loose outline; the table simply continues → keep, and
+ *    past the photo too ({@link DeskewPlan.tableBeyondPhoto});
+ *  * no wedge pixels inside the photo to judge (the outline was the photo's
+ *    own frame) → the border alone decides: paper → paint; table → keep, as
+ *    table past the photo.
  */
 export function decideWedgePaint(plan: DeskewPlan, flat: DeskewImage, deskewed: DeskewImage): DeskewPlan {
-  if (plan.mode !== "paper") return { ...plan, paint: [false, false, false, false] };
+  if (plan.mode !== "paper") {
+    return { ...plan, paint: [false, false, false, false], tableBeyondPhoto: [false, false, false, false] };
+  }
   const lumAt = (img: DeskewImage, x: number, y: number): number => lumOf(img.data, (y * img.width + x) * 4);
   const sample: number[] = [];
   const step = Math.max(1, Math.floor(Math.max(flat.width, flat.height) / 300));
@@ -1930,15 +1948,23 @@ export function decideWedgePaint(plan: DeskewPlan, flat: DeskewImage, deskewed: 
       });
     }
   }
-  const paint = [0, 1, 2, 3].map((k) => {
+  type Decision = "paint" | "page" | "table";
+  const decisions = [0, 1, 2, 3].map((k): Decision => {
+    const borderWasPaper = border[k].length > 0 && borderPaper[k] / border[k].length >= BORDER_WAS_PAPER;
     const total = wedge[k].length;
-    if (total < 10) return true;
-    if (wedgePaper[k] / total >= WEDGE_PAGE_CONTINUES) return false;
+    if (total < 10) return borderWasPaper || border[k].length === 0 ? "paint" : "table";
+    if (wedgePaper[k] / total >= WEDGE_PAGE_CONTINUES) return "page";
     const borderMedian = medianOf(border[k]);
-    if (border[k].length > 0 && medianOf(wedge[k]) >= WEDGE_LOOKS_LIKE_PAGE * borderMedian) return false;
-    return border[k].length > 0 && borderPaper[k] / border[k].length >= BORDER_WAS_PAPER;
-  }) as [boolean, boolean, boolean, boolean];
-  return { ...plan, paint };
+    // As bright as the border beside it: whatever the border is continues —
+    // the page when the border was paper, the table when it was not.
+    if (border[k].length > 0 && medianOf(wedge[k]) >= WEDGE_LOOKS_LIKE_PAGE * borderMedian) {
+      return borderWasPaper ? "page" : "table";
+    }
+    return borderWasPaper ? "paint" : "table";
+  });
+  const paint = decisions.map((d) => d === "paint") as [boolean, boolean, boolean, boolean];
+  const tableBeyondPhoto = decisions.map((d) => d === "table") as [boolean, boolean, boolean, boolean];
+  return { ...plan, paint, tableBeyondPhoto };
 }
 
 /* ── The judge: the rotated page against the original flat page ───────── */

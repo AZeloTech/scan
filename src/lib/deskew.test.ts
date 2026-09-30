@@ -25,6 +25,7 @@ import {
   homographyFrom,
   inscribedScale,
   judgeDeskew,
+  outsideEdge,
   paintWedgeWindow,
   planStraighten,
   wedgeFillFrom,
@@ -597,8 +598,19 @@ test("the fill carries the paper beside it across the seam, shading and all", ()
 });
 
 test("painting box by box (the canvas path) gives the very pixels of the whole-image fill", () => {
-  for (const deg of [6, -3.5, 11]) {
-    const plan = planFor(geometry300(deg), deg, { bleedFraction: 0.004, paint: [true, false, true, true] });
+  const plans = [6, -3.5, 11].map((deg) => planFor(geometry300(deg), deg, { bleedFraction: 0.004, paint: [true, false, true, true] }));
+  // Q′ past the photo, one wedge kept as table and one as page.
+  for (const deg of [5, -9]) {
+    plans.push(
+      planFor(geometryFull(deg), deg, {
+        bleedFraction: 0.004,
+        paint: [true, false, false, true],
+        tableBeyondPhoto: [false, true, false, false],
+      }),
+    );
+  }
+  for (const plan of plans) {
+    const deg = plan.deg;
     const whole = wedged(plan, 300, 400, 60, 40);
     const boxed = { width: 300, height: 400, data: new Uint8ClampedArray(whole.data) };
     fillDeskewWedges(whole, plan);
@@ -626,26 +638,35 @@ test("painting box by box (the canvas path) gives the very pixels of the whole-i
 });
 
 test("the paint boxes hold every pixel the fill paints", () => {
-  const plan = planFor(geometry300(8), 8, { bleedFraction: 0.004 });
-  const image = wedged(plan, 300, 400, 60);
-  const reference = { width: 300, height: 400, data: new Uint8ClampedArray(image.data) };
-  // Every pixel, no boxes: the predicate alone.
-  const fill = wedgeFillFrom([{ x: 0, y: 0, image: reference }], plan, 300, 400);
-  const everywhere = paintWedgeWindow({ x: 0, y: 0, image: reference }, plan, fill, 300, 400);
-  assert.equal(fillDeskewWedges(image, plan), everywhere);
-  assert.deepEqual(image.data, reference.data);
+  const plans = [
+    planFor(geometry300(8), 8, { bleedFraction: 0.004 }),
+    planFor(geometryFull(-9), -9, { bleedFraction: 0.004, paint: [true, false, false, true], tableBeyondPhoto: [false, true, false, false] }),
+  ];
+  for (const plan of plans) {
+    const image = wedged(plan, 300, 400, 60);
+    const reference = { width: 300, height: 400, data: new Uint8ClampedArray(image.data) };
+    // Every pixel, no boxes: the predicate alone.
+    const fill = wedgeFillFrom([{ x: 0, y: 0, image: reference }], plan, 300, 400);
+    const everywhere = paintWedgeWindow({ x: 0, y: 0, image: reference }, plan, fill, 300, 400);
+    assert.equal(fillDeskewWedges(image, plan), everywhere);
+    assert.deepEqual(image.data, reference.data);
+  }
 });
 
 test("wedges of new table (outline was the sheet) are painted", () => {
   const plan = planFor(geometry300(6), 6);
   const decided = decideWedgePaint(plan, wedged(planFor(geometry300(0), 0), 300, 400, 225), wedged(plan, 300, 400, 60));
   assert.deepEqual(decided.paint, [true, true, true, true]);
+  assert.deepEqual(decided.tableBeyondPhoto, [false, false, false, false]);
 });
 
 test("wedges where the page continues (outline inside the sheet) are kept", () => {
   const plan = planFor(geometry300(6), 6);
   const flat = wedged(planFor(geometry300(0), 0), 300, 400, 225);
-  assert.deepEqual(decideWedgePaint(plan, flat, wedged(plan, 300, 400, 225)).paint, [false, false, false, false]);
+  const decided = decideWedgePaint(plan, flat, wedged(plan, 300, 400, 225));
+  assert.deepEqual(decided.paint, [false, false, false, false]);
+  // The page, not the table: past the photo it is still painted paper.
+  assert.deepEqual(decided.tableBeyondPhoto, [false, false, false, false]);
   // Shaded page with print in the corner: darker than bright paper, still the page.
   assert.deepEqual(decideWedgePaint(plan, flat, wedged(plan, 300, 400, 200)).paint, [false, false, false, false]);
 });
@@ -659,7 +680,58 @@ test("wedges of a table already in the frame (loose outline) are kept", () => {
       if (x < 12 || y < 12 || x >= 288 || y >= 388) loose.data.set([60, 60, 60, 255], (y * 300 + x) * 4);
     }
   }
-  assert.deepEqual(decideWedgePaint(plan, loose, wedged(plan, 300, 400, 60)).paint, [false, false, false, false]);
+  const decided = decideWedgePaint(plan, loose, wedged(plan, 300, 400, 60));
+  assert.deepEqual(decided.paint, [false, false, false, false]);
+  // Kept as table: past the photo, scanic's clamp (that same table) stays.
+  assert.deepEqual(decided.tableBeyondPhoto, [true, true, true, true]);
+});
+
+/** A 300 × 400 photo that is all outline: Q′ reaches past it at any rotation. */
+function geometryFull(deg: number) {
+  return deskewQuad({
+    quad: { topLeft: { x: 0, y: 0 }, topRight: { x: 299, y: 0 }, bottomRight: { x: 299, y: 399 }, bottomLeft: { x: 0, y: 399 } },
+    outputWidth: 300,
+    outputHeight: 400,
+    canonicalWidth: 300,
+    canonicalHeight: 400,
+    deg,
+    mode: "paper",
+  });
+}
+
+test("past the photo, a wedge kept as table is left alone and every other one is painted", () => {
+  for (const deg of [5, -9]) {
+    const geometry = geometryFull(deg);
+    assert.ok(geometry.photoInOutput !== null);
+    // Top painted, right kept as table, bottom kept as page, left painted.
+    const plan = planFor(geometry, deg, {
+      bleedFraction: 0.004,
+      paint: [true, false, false, true],
+      tableBeyondPhoto: [false, true, false, false],
+    });
+    const image = wedged(plan, 300, 400, 60, 30);
+    const before = new Uint8ClampedArray(image.data);
+    fillDeskewWedges(image, plan);
+    const photo = plan.photoInOutput ?? [];
+    const seen = [0, 0, 0, 0];
+    for (let y = 0; y < 400; y += 1) {
+      for (let x = 0; x < 300; x += 1) {
+        const u = x / 299;
+        const v = y / 399;
+        // Well past the photo's edge, not on it.
+        if (outsideEdge(photo, u, v) < 0) continue;
+        const inset = photo.map((p) => ({ x: 0.5 + (p.x - 0.5) * 1.02, y: 0.5 + (p.y - 0.5) * 1.02 }));
+        if (outsideEdge(inset, u, v) < 0) continue;
+        const edge = outsideEdge(plan.pageInOutput, u, v);
+        if (edge < 0) continue;
+        seen[edge] += 1;
+        const o = (y * 300 + x) * 4;
+        const kept = before[o] === image.data[o] && before[o + 1] === image.data[o + 1] && before[o + 2] === image.data[o + 2];
+        assert.equal(kept, edge === 1, `${deg}°: edge ${edge} at ${x},${y} ${kept ? "kept" : "painted"}`);
+      }
+    }
+    assert.ok(seen.filter((n) => n > 20).length >= 2, `${deg}°: past-the-photo pixels by edge ${seen}`);
+  }
 });
 
 /* ── The judge ────────────────────────────────────────────────────────── */

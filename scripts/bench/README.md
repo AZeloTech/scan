@@ -1213,6 +1213,20 @@ real pages' abstains. Compared by peak sharpness instead, real stills go to
 run is unchanged scene for scene (its 9 sideways abstains become
 low-confidence ones).
 
+The two real pages whose fill stepped far from the paper beside it
+(145810 `interior` at 6° and 8°, `fillStep` p90 146 and 173 grey levels)
+were one case: a wedge kept because the frame already showed the table
+there, running past the photo, where everything was painted paper — a paper
+patch inside a strip of table. Past the photo, such a wedge now keeps
+scanic's clamp (the photo's edge, which is that table), and a wedge with
+nothing inside the photo to judge follows the border it lies beyond. Every
+deskewed real page's `fillStep` p90 is now within 2 grey levels; the
+synthetic fill is unchanged pixel for pixel (no synthetic scene has such a
+wedge). `seamCount` on the real stills stays at 18: on these photos the
+flat page's own paper blocks within two blocks of each other already differ
+by 18–22 grey levels at p90 (43–58 at p99), against the 6 the seam flag
+allows, so there it counts the light more than the fill.
+
 ## Status
 
 Phase 3 (the live loop) added the sustained session, remounts and leak

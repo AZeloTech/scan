@@ -6,8 +6,12 @@
  * outline Q′ reaches past the photo. What scanic does there is decided here,
  * not assumed: it clamps each sample to the photo, so the region beyond is the
  * photo's edge row smeared outward — never an error, never transparent. The
- * plan marks that region (`photoInOutput`) and the fill always paints it, so
- * no smear survives into the page the user sees.
+ * plan marks that region (`photoInOutput`). Where the wedge beyond it is paper
+ * (painted, or the page continuing) the fill paints it, so no smeared edge row
+ * survives into the page the user sees. Where the wedge was kept because the
+ * frame already showed the table there (a loose outline), the smear IS that
+ * table continuing, and it is left: paper painted there would be a light patch
+ * inside a strip of table.
  */
 
 import assert from "node:assert/strict";
@@ -17,6 +21,7 @@ import {
   DESKEW_POLICY_VERSION,
   applyHomography,
   curlEvidence,
+  decideWedgePaint,
   deskewQuad,
   fillDeskewWedges,
   flatPageDims,
@@ -161,6 +166,94 @@ test("scanic clamps a rotated outline that leaves the photo, and the fill paints
         const o = (y * w + x) * 4;
         const [r, g, b] = [page.data[o], page.data[o + 1], page.data[o + 2]];
         assert.ok(Math.abs(r - g) < 30 && Math.abs(b - g) < 30, `${deg}°: smear left at ${x},${y}: ${r},${g},${b}`);
+      }
+    }
+    assert.ok(beyond > 100, `${deg}°: ${beyond} px beyond the photo checked`);
+  }
+});
+
+/** A photo framed loosely: paper with a band of dark table all round it. */
+function looseFramePhoto(width: number, height: number, band: number): DeskewImage {
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const table = x < band || y < band || x >= width - band || y >= height - band;
+      data.set([...(table ? [58, 52, 46] : [228, 226, 220]), 255], (y * width + x) * 4);
+    }
+  }
+  return { width, height, data };
+}
+
+test("a loose outline past the photo: the table the frame already showed continues, not a paper patch", async () => {
+  const width = 300;
+  const height = 400;
+  // The outline is the whole photo; the sheet stops 10 px short of it.
+  const photo = looseFramePhoto(width, height, 10);
+  const quad: DeskewQuad = {
+    topLeft: { x: 0, y: 0 },
+    topRight: { x: width - 1, y: 0 },
+    bottomRight: { x: width - 1, y: height - 1 },
+    bottomLeft: { x: 0, y: height - 1 },
+  };
+  const dims = flatPageDims(quad);
+  const flat = await extractDocument(photo, quad, { output: "imagedata" });
+  assert.ok(flat.success && flat.output !== null, flat.message);
+  for (const deg of [5, -9]) {
+    const geometry = deskewQuad({
+      quad,
+      outputWidth: dims.width,
+      outputHeight: dims.height,
+      canonicalWidth: width,
+      canonicalHeight: height,
+      deg,
+      mode: "paper",
+    });
+    assert.ok(geometry.photoInOutput !== null);
+    const result = await extractDocument(photo, geometry.quad, { output: "imagedata" });
+    assert.ok(result.success && result.output !== null, result.message);
+    const out = result.output;
+    const base: DeskewPlan = {
+      policyVersion: DESKEW_POLICY_VERSION,
+      deg,
+      quad: geometry.quad,
+      scale: 1,
+      mode: "paper",
+      pageInOutput: geometry.pageInOutput,
+      cornerColors: [
+        [228, 226, 220],
+        [228, 226, 220],
+        [228, 226, 220],
+        [228, 226, 220],
+      ],
+      paint: [true, true, true, true],
+      bleedFraction: 0.004,
+      photoInOutput: geometry.photoInOutput,
+      curl: curlEvidence({ deg, halves: [deg, deg] } as SkewEstimate, null),
+    };
+    const plan = decideWedgePaint(base, flat.output, out);
+    assert.deepEqual(plan.paint, [false, false, false, false], `${deg}°: the table was already in the frame`);
+    assert.deepEqual(plan.tableBeyondPhoto, [true, true, true, true]);
+    const page = { width: out.width, height: out.height, data: new Uint8ClampedArray(out.data) };
+    fillDeskewWedges(page, plan);
+    const w = out.width;
+    const h = out.height;
+    const toCanonical = homographyFrom(
+      [
+        { x: 0, y: 0 },
+        { x: w - 1, y: 0 },
+        { x: w - 1, y: h - 1 },
+        { x: 0, y: h - 1 },
+      ],
+      [geometry.quad.topLeft, geometry.quad.topRight, geometry.quad.bottomRight, geometry.quad.bottomLeft],
+    );
+    let beyond = 0;
+    for (let y = 0; y < h; y += 1) {
+      for (let x = 0; x < w; x += 1) {
+        const p = applyHomography(toCanonical, { x, y });
+        if (p.x > -2 && p.y > -2 && p.x < width + 1 && p.y < height + 1) continue;
+        beyond += 1;
+        const o = (y * w + x) * 4;
+        assert.ok(page.data[o] < 120, `${deg}°: paper painted into the table at ${x},${y}: ${page.data[o]}`);
       }
     }
     assert.ok(beyond > 100, `${deg}°: ${beyond} px beyond the photo checked`);
