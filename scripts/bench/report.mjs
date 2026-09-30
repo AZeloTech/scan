@@ -18,6 +18,7 @@ import {
   WRONG_CROP_MAX_CORNER_ERROR,
   WRONG_CROP_MIN_IOU,
 } from "./metrics.mjs";
+import { sceneRegressionLines } from "./straighten/score.mjs";
 
 /**
  * The shape of `results.json`. Bumped whenever a number's meaning or a
@@ -68,6 +69,22 @@ export const REGRESSION_TOLERANCE = {
   undetectedRate: 0.02,
   jitterP50: 0.002,
   offShare: 0.05,
+  // Endireitar (straighten): the page the user sees. Rates are over the
+  // should-act pages; harms, unverified pages and seams are absolute counts
+  // and may not grow at all (the per-scene gate also names each new harm and
+  // each lost fix); the residual tilt is in degrees. Timeouts and pages over
+  // the device budget depend on the machine's load, so they only compare at
+  // the same --jobs and get a little slack.
+  unfixedRate: 0.02,
+  noopRate: 0.02,
+  curlUnfixedRate: 0.03,
+  harmCount: 0,
+  flatHarms: 0,
+  unverifiedCount: 0,
+  residTiltP90: 0.1,
+  seamCount: 0,
+  timeouts: 1,
+  overBudget: 5,
 };
 
 /**
@@ -83,6 +100,9 @@ export const ABSOLUTE_LIMITS = {
   session: { missingCaptures: 0, confirmNeverOpened: 0, confirmOffImage: 0, unscoredCaptures: 0, contentUnknownCaptures: 0, missingData: 0 },
   "real-stills": {},
   "real-video": { unidentifiedCaptures: 0 },
+  // A scene the engine or the scorer crashed on is never within limits.
+  straighten: { errors: 0 },
+  "straighten-real": { errors: 0 },
 };
 
 /** Headline numbers where a larger value is worse, in report order: the detector's, then a session's. */
@@ -101,6 +121,19 @@ const HEADLINES = {
   // Real media: the labelled verdicts where labels exist ("–" where not), then the GT-free ones.
   "real-stills": ["wrongRate", "missRate", "falsePositiveRate", "cornerErrorP50", "undetectedRate"],
   "real-video": ["wrongRate", "missRate", "cornerErrorP50", "undetectedRate", "jitterP50", "offShare"],
+  // Endireitar: larger is worse throughout (`unfixedRate` = 1 − complete fixes).
+  straighten: ["unfixedRate", "noopRate", "harmCount", "flatHarms", "unverifiedCount", "curlUnfixedRate", "residTiltP90", "seamCount", "timeouts", "overBudget"],
+  "straighten-real": ["unfixedRate", "noopRate", "harmCount", "flatHarms", "unverifiedCount", "residTiltP90", "seamCount", "timeouts", "overBudget"],
+};
+
+/**
+ * Suites gated scene by scene as well: `(previous, current) → regression
+ * lines`. For Endireitar, every scene that was a complete fix and no longer
+ * is, and every scene harmed now that was not, whatever the totals say.
+ */
+const SCENE_GATES = {
+  straighten: sceneRegressionLines,
+  "straighten-real": sceneRegressionLines,
 };
 
 /** One variant over a group of scored rows (`{ det, score }`): the detector table's numbers. */
@@ -390,6 +423,10 @@ const MUST_MATCH = {
   session: ["seeds", "stream", "cpu", "viewport"],
   "real-stills": ["media", "cpu"],
   "real-video": ["media", "cpu", "skipReplay"],
+  // The engine root and its deskew step are what a straighten comparison is
+  // about; the scenes, their rendering, the job count and the timeout are not.
+  straighten: ["profile", "only", "sceneHash", "scene", "jobs", "timeoutCapMs"],
+  "straighten-real": ["profile", "only", "sceneHash", "media", "jobs", "timeoutCapMs"],
 };
 
 /**
@@ -402,6 +439,8 @@ const MAY_NARROW = {
   session: ["sessions", "variants"],
   "real-stills": ["variants"],
   "real-video": ["variants"],
+  straighten: [],
+  "straighten-real": [],
 };
 
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
@@ -490,6 +529,7 @@ export function compareSummaries(previous, current, tolerance = REGRESSION_TOLER
     }
   }
   regressions.push(...absoluteViolations(current));
+  regressions.push(...(SCENE_GATES[current.suite]?.(previous, current) ?? []));
   return { table: [...notes, ...(notes.length > 0 ? [""] : []), ...lines].join("\n"), regressions, notes };
 }
 

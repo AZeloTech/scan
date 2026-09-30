@@ -21,6 +21,10 @@ npm run bench -- --suite session --session regression --seeds 5   # the adversar
 npm run bench -- --suite session --session guidance --seeds 5     # hints, the ready cue, auto-capture (Phase 4)
 npm run bench:webkit                                       # the flow end to end in WebKit, both lanes
 npm run bench -- --suite emulator --seeds 10               # the emulator's own GT check
+npm run bench -- --suite straighten --quick               # Endireitar, 83 scenes, ~2 min (Node, no browser)
+npm run bench -- --suite straighten                        # all 279 scenes, ~8 min at --jobs 8
+npm run bench -- --suite straighten --compare .bench-out/latest-straighten/results.json
+npm run bench -- --suite straighten --engine-root ../other-worktree --sheets   # score another checkout's engine
 npm run bench:play                                         # the playground, in a Chromium window
 npm run bench:play -- --no-browser                         # …or serve it and open the URL yourself
 node scripts/bench/server.mjs                              # serve the bench pages, print the URL
@@ -29,6 +33,8 @@ node scripts/bench/server.mjs                              # serve the bench pag
 export SCAN_REAL_MEDIA=/path/to/real/photos-and-clips
 npm run bench -- --suite real-stills                       # ~10 s
 npm run bench -- --suite real-video                        # ~2 min, incl. replay through the app
+SCAN_BENCH_LABELS=~/.cache/scan-bench/labels/scan-bench-labels.json \
+  npm run bench -- --suite straighten-real                  # Endireitar on the labelled stills, ~1 min
 npm run bench:label                                        # label pages by hand, print the URL
 node scripts/bench/real.mjs                                # extract clip frames, list what was found
 ```
@@ -447,6 +453,8 @@ several seeds.
 
 ~/.cache/scan-bench/frames/<clip>/{replay,sparse}/   real clips' frames (ffmpeg, once)
 ~/.cache/scan-bench/runs/real-{stills,video}-<stamp>/ real reports, results, sheets — never in the repo
+.bench-out/straighten-<stamp>/{report.md,results.json,sheets/*.png}   Endireitar, synthetic
+~/.cache/scan-bench/runs/straighten-real-<stamp>/       Endireitar on real stills — never in the repo
 ~/.cache/scan-bench/labels/scan-bench-labels.json    labels, when next to the media is not allowed
 ```
 
@@ -1066,6 +1074,94 @@ receives a `structuredClone` of each event: nothing it keeps or mutates can
 reach a quad the scanner is using. Nothing is buffered or sent; events are
 numbers and normalized corners, never pixels.
 
+## Endireitar: the straighten suites (`--suite straighten`, `--suite straighten-real`)
+
+The detector suites ask "would the crop have been right?"; these ask the same
+of the **Endireitar** tap: *is the page the user now sees straighter than the
+flat page of the outline they confirmed, and did anything get worse?*
+
+**What runs.** The real engine — the checkout's `src/lib/dewarp/*.ts` and the
+dewarp wasm named by its own `wasm-manifest.json` — driven the way
+`dewarp-stage.ts` drives it: a 896 px baseline, the padded crop, the output
+size, the engine's A/B verdict and its guards (`straighten/engine-host.mjs`).
+The app's worker is replaced by an in-thread stand-in that makes exactly the
+worker's calls. When the engine root has a text-deskew module
+(`src/lib/deskew.ts`), the step runs first and the page the user sees is the
+engine's surface or the flat page of the rotated outline with its wedges
+painted (`straighten/deskew-step.mjs`, `--deskew auto|off|paper|crop`;
+`auto` = `paper` when the module exists).
+
+**Why Node, not the bench page.** The engine has no DOM in its path, a page
+takes seconds of single-threaded wasm, and a run is 279 of them: the suite
+shards its scenes over `--jobs` Node processes (`straighten/worker.mjs`,
+default 8), which one Chromium page cannot do, and it can load the engine from
+**any** checkout (`--engine-root dir`, or `ENGINE_ROOT`) so a prototype
+worktree is scored with this bench's metrics. A command that runs only
+straighten suites builds no bench page and launches no browser.
+
+**Scenes.** `straighten/scenes.mjs` renders a photo and its confirmed outline
+from a physical chain with the truth known exactly: print tilted θ on the
+sheet, a cylinder curl seen by a pinhole camera, the sheet turned φ in the
+frame, sensor noise, uneven light and a camera blur. The full profile is 279
+scenes — tilt × layout (paragraphs, block, two columns, form) × outline
+(correct, full-frame, jittered), in-frame rotation, curl × tilt × outline,
+rotation × curl — of which 255 should act (|θ| ≥ 0.5° or any curl). `--quick`
+is an 83-scene screen of the same (every layout, family and outline mode).
+`--only regex` narrows either by scene id. `straighten-real` puts the same θ
+into every labelled real still (`straighten/real-scenes.mjs`): the print
+rotated inside a right outline (`interior`, the common case), the whole photo
+rotated with its outline (`rot-quad`, nothing to do) or without it
+(`rot-origquad`), plus the still itself — 16 scenes a still, 7 in `--quick`.
+
+**Verdicts** (`straighten/score.mjs`, unit-tested in `straighten-*.test.mjs`).
+Every finished page is judged against **the original flat page of the
+confirmed outline** — never against itself, and never against a rotated
+outline. A should-act page lands in exactly one of five classes, all over the
+same denominator:
+
+| class | the page the user sees |
+|---|---|
+| `noop` | the flat page: nothing acted |
+| `harm` | acted and got worse: \|tilt\| up by > 0.3°, bow up by > max(0.15 %, 25 %) (engine surfaces only — a rotation cannot bend lines), print lost, or table brought into a straight page |
+| `unverified` | acted, no harm found, but a check it needed could not be measured (a NaN tilt or bow, too little print) — **never** a success |
+| `complete` | no harm, \|tilt\| ≤ 0.35°, bow ≤ 60 % of the flat page's |
+| `partial` | acted, measured, no harm, not complete |
+
+A page with nothing to do is `left-alone`, `harm`, `unverified` or `acted-ok`.
+**Print lost** is judged on absolute ink (the ink over the whole page area,
+< 92 % of the flat page's), on the ink in each border band and on the ink's
+bounding box (print pushed into a border the flat page's print kept clear
+of) — not on ink density over the visible sheet, which a kept wedge of table
+fools one way and a sheet that grew the other. **Painted** pages carry fill
+without the photo's grain; a **seam** is a fill that steps more than 6 grey
+levels against the paper beside it; both are net of what the flat page
+itself shows, and **dark wedges** count table newly in the border band.
+Counts sit beside every rate in the report.
+
+**Provenance and runtime.** `config.engine` records the engine root, its HEAD
+and — when it has uncommitted changes — a sha256 over its diff and untracked
+files, so "the same dirty worktree" is provably the same code or not. The
+engine's hard timeout is the app's own, capped at 30 s: a slower page is the
+timeout the app would show, counted as such. Timeouts and pages over the 12 s
+device budget (engine + deskew) depend on load, so they only compare between
+runs at the same `--jobs`.
+
+**`--compare`.** Only runs over the same scenes (profile, `--only`, scene
+hash, rendering), `--jobs` and timeout compare; the engine root and deskew
+mode are what is being compared. The gated headlines (larger is worse) are
+`unfixedRate` (1 − complete), `noopRate`, `harmCount`, `flatHarms`,
+`unverifiedCount`, `curlUnfixedRate`, `residTiltP90`, `seamCount`, `timeouts`
+and `overBudget`, per group (`ALL`, each family, `tilt/correct`; per variant
+for real media). On top, **every scene** that was a complete fix and no longer
+is (a lost fix), and every scene harmed now that was not (a new harm), fails
+the run by name, whatever the totals say. A scene that crashed is an absolute
+failure.
+
+**Sheets.** `--sheets` writes a before/after PNG (flat page | page the user
+sees) for each flagged scene — harms, unverified pages, seams, and with
+`--compare` lost fixes and newly acted pages — into the run's `sheets/`
+(for `straighten-real`, in the cache: real pixels never enter the repository).
+
 ## Status
 
 Phase 3 (the live loop) added the sustained session, remounts and leak
@@ -1092,7 +1188,7 @@ fire and no fire in a tremor window either, latency p50 2.3 s (the ready cue
 waits for five readings of a still page).
 
 Implemented: probe, server, bench page, the `detector`, `session`,
-`real-stills`, `real-video` and `emulator` suites, metrics, report,
+`real-stills`, `real-video`, `emulator`, `straighten` and `straighten-real` suites, metrics, report,
 `--compare`, families F1–F7, the session emulator and fake camera, real-media
 extraction, the labelling page (`bench:label`) and the playground
 (`bench:play`); Phase 2's edge refinement with its `refined` / `ml+refine`

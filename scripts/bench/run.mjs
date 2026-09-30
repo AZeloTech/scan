@@ -12,9 +12,14 @@
  *                    [--viewport 390x844] [--fit cover|contain|maxcrop]
  *   SCAN_REAL_MEDIA=<dir> npm run bench -- --suite real-stills|real-video
  *                    [--variants …] [--cpu 4] [--skip-replay]
+ *   npm run bench -- --suite straighten [--quick] [--jobs 8] [--engine-root dir]
+ *                    [--deskew auto|off|paper|crop] [--only regex] [--sheets]
+ *   SCAN_REAL_MEDIA=<dir> SCAN_BENCH_LABELS=<labels.json> npm run bench -- --suite straighten-real [same flags]
  *
  * Builds the bench page from the working tree, serves it on 127.0.0.1, drives
  * it in Chromium and writes `report.md`, `results.json` and contact sheets.
+ * The straighten suites (Endireitar) need no page: they run the engine in
+ * Node processes, and a command that runs only them launches no browser.
  * Synthetic suites write into the git-ignored `.bench-out/`; real-media suites
  * only ever into the cache outside the repository (`paths.mjs`).
  *
@@ -35,7 +40,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpus } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { buildBenchApp, ensureRuntimeAssets } from "./build-app.mjs";
@@ -47,15 +53,18 @@ import { startServer } from "./server.mjs";
 import { SUITES } from "./suites/index.mjs";
 import { buildScene, frameSize } from "./emulator/index.js";
 import { DEFAULT_STREAM } from "./suites/session.mjs";
+import { DEFAULT_JOBS } from "./straighten/suite.mjs";
 
-const USAGE = `usage: npm run bench -- [--suite detector|session|real-stills|real-video|all|emulator]
+const USAGE = `usage: npm run bench -- [--suite detector|session|real-stills|real-video|all|emulator|straighten|straighten-real]
        [--family F1,F2,…] [--setting name,…] [--seeds N] [--variants ml,classical,production,refined,ml+refine,ml+live]
        [--session approach-hold,…] [--stream WxH] [--skip-replay] [--lane main|worker] [--no-frame-cache]
        [--layout rail|standard|classic|filmstrip|onehand|collapse] [--viewport WxH] [--fit cover|contain|maxcrop]
        [--frame-by screen|sensor] [--stream-scale N]
        [--cpu 1|4|6] [--size portrait|landscape|WxH] [--compare results.json]
        [--out dir] [--headed]
-real-stills / real-video need SCAN_REAL_MEDIA=<dir>; their output goes to the cache, never the repo.`;
+       straighten, straighten-real: [--quick] [--jobs N] [--engine-root dir] [--deskew auto|off|paper|crop]
+       [--only regex] [--sheets]
+real-stills / real-video / straighten-real need SCAN_REAL_MEDIA=<dir>; their output goes to the cache, never the repo.`;
 
 const DEFAULT_SEEDS = 40;
 
@@ -115,6 +124,12 @@ function parse() {
       fit: { type: "string" },
       "frame-by": { type: "string" },
       "stream-scale": { type: "string" },
+      quick: { type: "boolean", default: false },
+      jobs: { type: "string" },
+      "engine-root": { type: "string" },
+      deskew: { type: "string" },
+      only: { type: "string" },
+      sheets: { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
     strict: true,
@@ -135,6 +150,12 @@ function parse() {
       : values.suite.split(",");
   for (const suite of suites) {
     if (!(suite in SUITES)) throw new Error(`unknown suite "${suite}"\n${USAGE}`);
+  }
+  const straightenFlags = ["quick", "jobs", "engine-root", "deskew", "only", "sheets"].filter(
+    (flag) => values[flag] !== undefined && values[flag] !== false,
+  );
+  if (straightenFlags.length > 0 && !suites.every((name) => name.startsWith("straighten"))) {
+    throw new Error(`only the straighten suites take --${straightenFlags.join(", --")}`);
   }
   return {
     suites,
@@ -159,7 +180,50 @@ function parse() {
     fit: parseFit(values.fit),
     frameBy: parseFrameBy(values["frame-by"], values.layout),
     streamScale: parseStreamScale(values["stream-scale"]),
+    profile: values.quick ? "quick" : "full",
+    jobs: parseJobs(values.jobs),
+    engineRoot: parseEngineRoot(values["engine-root"]),
+    deskew: values.deskew ?? "auto",
+    only: parseOnly(values.only),
+    sheets: values.sheets,
   };
+}
+
+/**
+ * `--jobs N`: the straighten suites' parallel engine processes (default
+ * {@link DEFAULT_JOBS}). Recorded in the run's config: runtime counts
+ * (timeouts, pages over the device budget) compare only between runs at the
+ * same `--jobs`.
+ */
+function parseJobs(value) {
+  if (value === undefined) return DEFAULT_JOBS;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 64) throw new Error(`--jobs ${value}: expected an integer from 1 to 64`);
+  return n;
+}
+
+/**
+ * `--engine-root dir` (or `ENGINE_ROOT`): the checkout whose Endireitar
+ * engine the straighten suites run — this one by default, or another
+ * worktree to score a prototype with this bench's metrics.
+ */
+function parseEngineRoot(value) {
+  const root = resolve(value ?? process.env.ENGINE_ROOT ?? ROOT);
+  if (!existsSync(join(root, "src/lib/dewarp/index.ts"))) {
+    throw new Error(`--engine-root ${root}: no src/lib/dewarp/index.ts there — not a checkout of this library`);
+  }
+  return root;
+}
+
+/** `--only regex`: narrow a straighten run to the scene ids it matches (a different sample: never compared with a full one). */
+function parseOnly(value) {
+  if (value === undefined) return null;
+  try {
+    new RegExp(value);
+  } catch (error) {
+    throw new Error(`--only ${value}: not a regular expression (${error?.message ?? error})`);
+  }
+  return value;
 }
 
 /**
@@ -321,31 +385,45 @@ async function main() {
     );
   }
   const git = gitState();
-  log(`bench: building the bench page from the working tree (${git.commit}${git.dirty ? ", dirty" : ""})`);
-  // The session and real-video suites drive the real <ScanFlow>, whose layout
-  // (and so the probe's visible crop) needs the library's stylesheet.
-  ensureRuntimeAssets({ log, styles: true });
-  await buildBenchApp();
-  const server = await startServer({ log });
-  const { browser, executable } = await launchChromium({ headed: options.headed });
-  log(`bench: ${server.url} · chromium ${executable}`);
+  // A command that runs only Node suites (straighten) builds and launches nothing.
+  const needsBrowser = options.suites.some((name) => SUITES[name].runtime !== "node");
+  let server = null;
+  let browser = null;
+  let executable = null;
+  if (needsBrowser) {
+    log(`bench: building the bench page from the working tree (${git.commit}${git.dirty ? ", dirty" : ""})`);
+    // The session and real-video suites drive the real <ScanFlow>, whose layout
+    // (and so the probe's visible crop) needs the library's stylesheet.
+    ensureRuntimeAssets({ log, styles: true });
+    await buildBenchApp();
+    server = await startServer({ log });
+    ({ browser, executable } = await launchChromium({ headed: options.headed }));
+    log(`bench: ${server.url} · chromium ${executable}`);
+  } else {
+    log(`bench: Node suites only (${git.commit}${git.dirty ? ", dirty" : ""}) — no bench page, no browser`);
+  }
   let exitCode = 0;
   try {
-    const page = await browser.newPage();
+    let page = null;
+    let throttle = null;
+    let init = null;
     const pageErrors = [];
-    page.on("pageerror", (error) => pageErrors.push(String(error)));
-    page.on("console", (message) => {
-      if (message.type() === "error") log(`[page] ${message.text().slice(0, 400)}`);
-    });
-    await page.goto(`${server.url}/bench.html`);
-    await page.waitForFunction(() => window.__benchReady === true, null, { timeout: 60_000 });
-    const init = await page.evaluate(() => window.__bench.init({ assetBase: "/assets/" }));
-    if (!init.mlReady) log("bench: WARNING — the ML runtime did not come up; ML rows will be fallbacks");
-    log(`bench: ML ready ${init.mlReady} (warm-up ${init.mlWarmUpMs.toFixed(0)} ms) · WebGL ${init.renderer}`);
-    const throttle = await cpuThrottle(page);
-    const knownFamilies = init.families.map((f) => f.id);
+    if (needsBrowser) {
+      page = await browser.newPage();
+      page.on("pageerror", (error) => pageErrors.push(String(error)));
+      page.on("console", (message) => {
+        if (message.type() === "error") log(`[page] ${message.text().slice(0, 400)}`);
+      });
+      await page.goto(`${server.url}/bench.html`);
+      await page.waitForFunction(() => window.__benchReady === true, null, { timeout: 60_000 });
+      init = await page.evaluate(() => window.__bench.init({ assetBase: "/assets/" }));
+      if (!init.mlReady) log("bench: WARNING — the ML runtime did not come up; ML rows will be fallbacks");
+      log(`bench: ML ready ${init.mlReady} (warm-up ${init.mlWarmUpMs.toFixed(0)} ms) · WebGL ${init.renderer}`);
+      throttle = await cpuThrottle(page);
+    }
+    const knownFamilies = init?.families.map((f) => f.id) ?? [];
     let families = options.families ?? knownFamilies;
-    for (const family of families) {
+    for (const family of init === null ? [] : families) {
       if (!knownFamilies.includes(family)) {
         throw new Error(`unknown family "${family}" (registered: ${knownFamilies.join(", ")})`);
       }
@@ -355,7 +433,7 @@ async function main() {
       families = families.filter((family) => family in seedPlan);
       log(`bench: --setting ${options.settings.join(",")}: ${families.map((f) => `${f} ${seedPlan[f].length} scenes`).join(", ")}`);
     }
-    for (const variant of options.variants) {
+    for (const variant of init === null ? [] : options.variants) {
       if (!(variant in init.variants)) {
         throw new Error(`unknown variant "${variant}" (known: ${Object.keys(init.variants).join(", ")})`);
       }
@@ -376,15 +454,19 @@ async function main() {
         options.out !== null && options.suites.length > 1 ? join(options.out, suiteName) : options.out,
       );
       mkdirSync(outDir, { recursive: true });
-      const environment = {
-        executable,
-        renderer: init.renderer,
-        userAgent: init.userAgent,
-        mlReady: init.mlReady,
-        mlWarmUpMs: init.mlWarmUpMs,
-        variants: init.variants,
-      };
-      const config = suite.synthetic
+      const environment = suite.runtime === "node"
+        ? { runtime: "node", node: process.version, platform: `${process.platform}-${process.arch}`, cpus: cpus().length }
+        : {
+            executable,
+            renderer: init.renderer,
+            userAgent: init.userAgent,
+            mlReady: init.mlReady,
+            mlWarmUpMs: init.mlWarmUpMs,
+            variants: init.variants,
+          };
+      const config = suite.config !== undefined
+        ? suite.config(options)
+        : suite.synthetic
         ? {
             families,
             seeds: suiteName === "session" ? options.sessionSeeds : options.seeds,
@@ -423,6 +505,7 @@ async function main() {
         outDir,
         log,
         environment,
+        config,
       });
       const results = {
         schema: RESULTS_SCHEMA,
@@ -431,8 +514,8 @@ async function main() {
         createdAt: new Date().toISOString(),
         git,
         config,
-        environment,
-        families: init.families,
+        environment: { ...environment, ...(result.environment ?? {}) },
+        families: init?.families ?? [],
         summary: result.summary,
         sheets: result.sheets,
         scenes: result.scenes,
@@ -480,8 +563,8 @@ async function main() {
       exitCode = exitCode || 1;
     }
   } finally {
-    await browser.close();
-    await server.close();
+    await browser?.close();
+    await server?.close();
   }
   process.exit(exitCode);
 }
