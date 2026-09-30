@@ -259,6 +259,16 @@ needed for either. The ready cue's haptic tick uses `navigator.vibrate`, which
 iOS does not have — there it is silently skipped (the cue is also announced
 once per page to screen readers).
 
+**The camera stream.** The library asks `getUserMedia` for the back camera
+(`facingMode: { ideal: "environment" }`) at an ideal 3840×2160 and nothing
+else — no aspect ratio, no resize mode — so the phone picks one of its own
+modes (a 4K 9:16 portrait stream on a recent Galaxy; a 4:3 one where the
+nearest mode is 4:3). Asking for a 9:16 shape would not show more: on a
+screen taller than the stream, the full-bleed viewfinder shows the stream's
+whole height either way, so the angle on screen is the same, and a 4:3
+stream only carries more margin off screen — which a photo taken from the
+preview frame (Safari has no `ImageCapture`) keeps.
+
 **What the camera shows is what is judged.** "Afaste um pouco", "Aproxime",
 the ready cue and auto-capture judge the page against the part of the frame
 the person can actually see — the video under the layout's fit, clipped by
