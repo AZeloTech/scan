@@ -132,7 +132,17 @@ export function ConfirmCornersScreen({
     },
     [capture.attention, diagnosticsSink, pageNumber],
   );
+  /**
+   * Set synchronously by the first answer — Confirmar, Foto inteira, Refazer
+   * or Escape — so no second one can follow it. The buttons are disabled once
+   * the page is flying, but Escape is not a button: without this, Escape
+   * during the flight reported a retake and left the screen while the
+   * pending confirmation went on to save the page.
+   */
+  const answeredRef = React.useRef(false);
   const retake = React.useCallback(() => {
+    if (answeredRef.current) return;
+    answeredRef.current = true;
     reportAnswer("retake", null);
     onRetake();
   }, [onRetake, reportAnswer]);
@@ -152,6 +162,8 @@ export function ConfirmCornersScreen({
    */
   const land = React.useCallback(
     async (corners: NormalizedQuad | null) => {
+      if (answeredRef.current) return;
+      answeredRef.current = true;
       if (probing()) {
         probe({
           type: "confirm-done",
