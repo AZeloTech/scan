@@ -129,7 +129,9 @@ freezes at 1.0.
   single warp. It is refused, and the page left as it was, unless the text
   is plainly in lines at one angle: a page lying on its side, a level heading
   over a skewed body, handwriting across level rules, a graphic or too little
-  text all keep their tilt. The turned page is then checked against the flat
+  text all keep their tilt. A page counts as on its side only when its print
+  lines up more sharply a quarter turn away, not merely more strongly: a dense
+  form's columns line glyphs up vertically too. The turned page is then checked against the flat
   page it came from — more level, lines no less straight, no print pushed
   out of the frame — or the turn is dropped. The corners the turn uncovers
   are filled with the paper right beside them, shading included, and nothing
@@ -139,7 +141,7 @@ freezes at 1.0.
   the engine declines. On the synthetic bench, pages fixed go from 81 to 225
   of 255 (tilt-only pages 56 → 200 of 204) with no new harm; the engine runs
   on 78 of 279 pages instead of all of them. On the labelled real stills,
-  fixes go from 7 to 21 of 30. The switch stays on over a page whose tilt
+  fixes go from 7 to 23 of 30. The switch stays on over a page whose tilt
   was fixed, whatever the engine said about the curl, and a timeout on the
   curl no longer takes the turn away on the next edit. A corner edit
   discards a stored turn or curvature map, which used to be reused on the new

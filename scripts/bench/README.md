@@ -1206,6 +1206,13 @@ Node at `--jobs 8`. Real stills: 7 → 21 of 30 complete, no harm, no lost fix; 
 pages flag a seam while the fill's own step across its edge stays within
 ±3 grey levels at p90 on all but two.
 
+The sideways refusal then compared raw projection energy, and a dense form
+(still 145830) read as on its side at every tilt from 2° to 8°: 12 of the
+real pages' abstains. Compared by peak sharpness instead, real stills go to
+23 of 30 complete, 3 partial, 4 no-op, no harm, no lost fix; the synthetic
+run is unchanged scene for scene (its 9 sideways abstains become
+low-confidence ones).
+
 ## Status
 
 Phase 3 (the live loop) added the sustained session, remounts and leak

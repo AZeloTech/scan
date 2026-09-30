@@ -832,7 +832,10 @@ function estimateDetailed(image: DeskewImage): DetailedEstimate {
   const lineCount = linePeaks(smoothBins(coarseBins), 3, 3).length;
 
   const partial = { peakRatio, lineCount, components: n, coarseDeg, graphicInkShare };
-  if (sideways.energies[sideways.best] > energies[best]) return none(abstain("sideways", partial));
+  // Sharper, not merely stronger: a form's columns line glyphs up vertically
+  // too, and on a dense table their raw energy can edge past the rows'; a
+  // page on its side has no rows to speak of at all.
+  if (sideways.peakRatio > peakRatio) return none(abstain("sideways", partial));
   if (lineCount < MIN_LINES) return none(abstain("few-lines", partial));
   if (peakRatio < MIN_PEAK_RATIO) return none(abstain("low-confidence", partial));
   if (rival > RIVAL_MAX_RATIO * energies[best]) return none(abstain("ambiguous", partial));

@@ -316,8 +316,14 @@ test("one column to one side: both ink halves are measured, so a curl cannot sli
   assert.ok(Number.isFinite(l) && Number.isFinite(r), `halves ${l} / ${r}`);
   assert.equal(level.act, true, level.reason);
   assert.ok(Math.abs(level.deg - 3) <= 0.15, `${level.deg}`);
-  const curled = estimateSkew(page("onecol-left", 0, 7, 10));
+  // A column this curled splits its own two halves by ~4°: the veto sees it.
+  // (Split at the page centre, its right half was empty — NaN — and the
+  // column was rotated by the average of its bend.)
+  const curled = estimateSkew(page("onecol-left", 0, 7, 25));
+  const [cl, cr] = curled.halves ?? [NaN, NaN];
+  assert.ok(Number.isFinite(cl) && Number.isFinite(cr), `halves ${cl} / ${cr}`);
   assert.equal(curled.act, false, `${curled.reason} ${curled.deg}`);
+  assert.equal(curled.reason, "curved");
 });
 
 test("a level heading over a skewed body abstains as mixed", () => {
