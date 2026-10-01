@@ -46,13 +46,14 @@ import { absoluteViolations, checkComparable, compareSummaries, RESULTS_SCHEMA }
 import { startServer } from "./server.mjs";
 import { SUITES } from "./suites/index.mjs";
 import { buildScene, frameSize } from "./emulator/index.js";
+import { DEFAULT_FOLLOW, parseFollow } from "./emulator/session.js";
 import { DEFAULT_STREAM } from "./suites/session.mjs";
 
 const USAGE = `usage: npm run bench -- [--suite detector|session|real-stills|real-video|all|emulator]
        [--family F1,F2,…] [--setting name,…] [--seeds N] [--variants ml,classical,production,refined,ml+refine,ml+live]
        [--session approach-hold,…] [--stream WxH] [--skip-replay] [--lane main|worker] [--no-frame-cache]
        [--layout rail|standard|classic|filmstrip|onehand|collapse] [--viewport WxH] [--fit cover|contain|maxcrop]
-       [--frame-by screen|sensor] [--stream-scale N]
+       [--frame-by screen|sensor] [--follow fill|area|off|fill:ENTER:EXIT] [--stream-scale N]
        [--cpu 1|4|6] [--size portrait|landscape|WxH] [--compare results.json]
        [--out dir] [--headed]
 real-stills / real-video need SCAN_REAL_MEDIA=<dir>; their output goes to the cache, never the repo.`;
@@ -114,6 +115,7 @@ function parse() {
       viewport: { type: "string" },
       fit: { type: "string" },
       "frame-by": { type: "string" },
+      follow: { type: "string" },
       "stream-scale": { type: "string" },
       help: { type: "boolean", default: false },
     },
@@ -158,6 +160,8 @@ function parse() {
     viewport: parseViewport(values.viewport),
     fit: parseFit(values.fit),
     frameBy: parseFrameBy(values["frame-by"], values.layout),
+    // How the scripted user answers "Aproxime" (`followHint`): undefined is the app's own rule.
+    follow: values.follow === undefined ? undefined : parseFollow(values.follow),
     streamScale: parseStreamScale(values["stream-scale"]),
   };
 }
@@ -402,6 +406,7 @@ async function main() {
                   viewport: options.viewport === null ? null : `${options.viewport.width}x${options.viewport.height}`,
                   fit: options.fit,
                   frameBy: options.frameBy,
+                  follow: options.follow === undefined ? DEFAULT_FOLLOW : options.follow,
                   streamScale: options.streamScale,
                 }
               : {}),

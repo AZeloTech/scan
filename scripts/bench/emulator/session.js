@@ -232,10 +232,9 @@ function amplitudeAt(keys, t) {
   return lerp(a.amplitude, b.amplitude, f);
 }
 
-/** The camera pose at `t`: keyframes, then the hand's tremor on top. */
+/** The camera pose at `t`: keyframes, the scripted user following "Aproxime" ({@link followHint}), then the hand's tremor on top. */
 export function poseAt(script, t) {
-  const [a, b, f] = bracket(script.camera, t);
-  const pose = lerpPose(a.pose, b.pose, f);
+  const pose = followedPose(script, t, keyedPose(script, t));
   const amplitude = amplitudeAt(script.tremor.keys, t);
   if (amplitude <= 0) return pose;
   const [nx, ny, nr] = tremorAt(script.tremor.model, t);
@@ -247,6 +246,327 @@ export function poseAt(script, t) {
     target: [pose.target[0] + nx * mm, pose.target[1] + ny * mm],
     roll: pose.roll + nr * amplitude * 40,
   };
+}
+
+/** The keyframed pose at `t`, before the user's own corrections and the tremor. */
+function keyedPose(script, t) {
+  const [a, b, f] = bracket(script.camera, t);
+  return lerpPose(a.pose, b.pose, f);
+}
+
+/* ── the scripted user frames the page, and follows "Aproxime" ──────────── */
+
+/**
+ * The app's "too far" line, which the scripted user follows (`--follow`):
+ * `fill` is the app's rule now (`FILL_ENTER` / `FILL_EXIT`, `src/lib/guidance.ts`
+ * — the page's reach along the view's limiting axis); `area` the rule before
+ * it (`AREA_ENTER` / `AREA_EXIT`: its share of the view's area). Mirrored
+ * here because the emulator is plain JS; `session.test.mjs` holds the `fill`
+ * numbers to the source.
+ */
+export const FOLLOW_RULES = {
+  fill: { kind: "fill", enter: 0.78, exit: 0.83 },
+  area: { kind: "area", enter: 0.14, exit: 0.17 },
+};
+
+/** The rule a run follows unless `--follow` says otherwise: the app's own. */
+export const DEFAULT_FOLLOW = FOLLOW_RULES.fill;
+
+/**
+ * How much of the view a person fills with the page when nothing asks for
+ * more (`fill`): the owner's field run on a Galaxy S25 Ultra under the old
+ * area rule put two pages across 54 % and 45 % of the still's 9:16 crop —
+ * 66 % and 55 % of the narrower visible region.
+ */
+export const NATURAL_FILL = [0.55, 0.72];
+
+/**
+ * `--follow fill|area|off|fill:ENTER:EXIT|area:ENTER:EXIT` as a rule, or null
+ * (`off`: the scripted user holds where the script says, whatever the hint).
+ */
+export function parseFollow(text) {
+  if (text === undefined || text === null || text === "") return DEFAULT_FOLLOW;
+  if (text === "off") return null;
+  const [kind, enter, exit] = text.split(":");
+  const base = FOLLOW_RULES[kind];
+  if (base === undefined) throw new Error(`--follow ${text}: expected fill, area or off (optionally kind:enter:exit)`);
+  if (enter === undefined) return base;
+  const rule = { kind, enter: Number(enter), exit: Number(exit ?? enter) };
+  if (!(rule.enter > 0 && rule.exit >= rule.enter && rule.exit < 1)) throw new Error(`--follow ${text}: expected 0 < enter <= exit < 1`);
+  return rule;
+}
+
+/** A rule's measure of a page (`points`: its corners in fractions of the visible region): its fill (bounding box, clipped) or its clipped area. */
+export function framingMeasure(kind, points) {
+  if (kind === "area") {
+    const inside = clipPolygon(points, [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+      [0, 1],
+    ]);
+    return inside.length >= 3 ? polygonArea(inside) : 0;
+  }
+  const clip = (v) => Math.min(1, Math.max(0, v));
+  const xs = points.map(([x]) => clip(x));
+  const ys = points.map(([, y]) => clip(y));
+  return Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+}
+
+/** Where a layer's corners fall from `pose`, in fractions of `region` (frame fractions). */
+function inRegion(pose, frame, layer, region) {
+  const camera = cameraFromPose(pose, frame);
+  return projectRect(camera, layer).map((p) => [(p.u / frame.width - region.x) / region.width, (p.v / frame.height - region.y) / region.height]);
+}
+
+/** "Until the end" in a follow segment, as plain JSON (Infinity is not). */
+const FOREVER = 1e9;
+
+/** The natural framing settles over this long before a hold starts (the camera is still arriving). */
+const NATURAL_RAMP_MS = 600;
+
+/**
+ * The scripted user keeps the page's corners at least this far (share of the
+ * view) from its edge, over and above the tremor's swings: between
+ * "Afaste um pouco"'s enter and exit lines (`BORDER_ENTER` / `BORDER_EXIT`).
+ */
+const FOLLOW_EDGE = 0.02;
+
+/** How far into an approach the user is at `t`: 0 before it, 1 while there, eased in between. */
+function followProgress(segment, t) {
+  if (t <= segment.reactAt || t >= segment.releaseTo) return 0;
+  if (t < segment.arriveAt) return smootherstep((t - segment.reactAt) / (segment.arriveAt - segment.reactAt));
+  if (t <= segment.releaseFrom) return 1;
+  return 1 - smootherstep((t - segment.releaseFrom) / (segment.releaseTo - segment.releaseFrom));
+}
+
+/** The natural framing's distance scale at `t` (log-interpolated between its keys; 1 before the first). */
+function naturalScaleAt(keys, t) {
+  if (keys.length === 0 || t <= keys[0].t) return 1;
+  const [a, b, f] = bracket(keys, t);
+  return Math.exp(lerp(Math.log(a.scale), Math.log(b.scale), f));
+}
+
+/** The middle of a layer's outline from `pose`, in pixels (what a person centres on screen). */
+function outlineMiddle(pose, frame, layer) {
+  const pts = projectRect(cameraFromPose(pose, frame), layer);
+  const us = pts.map((p) => p.u);
+  const vs = pts.map((p) => p.v);
+  return [(Math.min(...us) + Math.max(...us)) / 2, (Math.min(...vs) + Math.max(...vs)) / 2];
+}
+
+/**
+ * A pose `progress` of the way to the user's corrected one: `scale`^progress
+ * the distance, and the page's outline moved that far towards the middle of
+ * `region` — what the person frames in (people centre what they see, not the
+ * page's own middle).
+ */
+function correctedPose(pose, frame, layer, region, scale, progress) {
+  if (progress <= 0) return pose;
+  const centre = rectCentre(layer);
+  const start = outlineMiddle(pose, frame, layer);
+  const goal = [(region.x + region.width / 2) * frame.width, (region.y + region.height / 2) * frame.height];
+  const want = [lerp(start[0], goal[0], progress), lerp(start[1], goal[1], progress)];
+  const scaled = { ...pose, distance: pose.distance * scale ** progress };
+  const at = project(cameraFromPose(pose, frame), centre);
+  let pixel = [at.u + want[0] - start[0], at.v + want[1] - start[1]];
+  let out = aimAt(scaled, frame, centre, pixel);
+  for (let i = 0; i < 3; i += 1) {
+    const middle = outlineMiddle(out, frame, layer);
+    if (Math.hypot(want[0] - middle[0], want[1] - middle[1]) < 0.5) break;
+    pixel = [pixel[0] + want[0] - middle[0], pixel[1] + want[1] - middle[1]];
+    out = aimAt(scaled, frame, centre, pixel);
+  }
+  return out;
+}
+
+/** The keyed pose at `t` at the user's own framing (`script.follow.natural`). */
+function naturalPose(script, t, pose) {
+  const keys = script.follow?.natural ?? [];
+  const scale = naturalScaleAt(keys, t);
+  return scale === 1 ? pose : { ...pose, distance: pose.distance * scale };
+}
+
+/** The keyed pose with the user's framing and corrections at `t` applied (`script.follow`). */
+function followedPose(script, t, keyed) {
+  const follow = script.follow;
+  if (follow === undefined || follow === null) return keyed;
+  const pose = naturalPose(script, t, keyed);
+  for (const segment of follow.segments) {
+    const progress = followProgress(segment, t);
+    if (progress <= 0) continue;
+    const layer = layerAt(script.scene.layers[segment.layer], segment.layer, script, t);
+    return correctedPose(pose, script.frame, layer, follow.aim ?? follow.region, segment.scale, progress);
+  }
+  return pose;
+}
+
+/**
+ * The scripted user frames a page as people do, and follows the app's
+ * "Aproxime" as people do.
+ *
+ * **Their own framing.** In every framed hold (`marks.ready` windows, else
+ * `holdFrom…holdTo` and `lockFrom2…holdTo2`; a session with neither but
+ * `marks.stable` — a page returned to again and again, `whip-off-auto` —
+ * holds from each of those) the page is held at the size people hold it
+ * at when nothing asks for more ({@link NATURAL_FILL}, seeded per hold —
+ * the script's own distance scaled to it, settling over the
+ * {@link NATURAL_RAMP_MS} before the hold, easing between holds, kept after
+ * the last; never so close that a corner crowds the edge).
+ *
+ * **Following the hint.** A hold whose page the app would call too far
+ * (`rule`, measured in the app's visible `region` at the hold's start —
+ * under its exit line: a page that came in from afar arrives with the hint
+ * already up, and it stays up until the exit line) gets an approach: the hint comes up (the lock, then its 300 ms), the person
+ * reacts (0.7–1.2 s after the hold starts, all told) and comes in over
+ * 0.7–1.2 s, re-centring the page, until it is a little past the line the
+ * hint clears at (exit × 1.02–1.08: the hint lags the move, so people
+ * overshoot) — or, with a shaking hand, as close as its swings leave the
+ * corners clear of the edge — and holds there; between two holds they ease
+ * back (the next page is elsewhere). A practised user (the `stable` holds)
+ * is there from the moment the page arrives.
+ *
+ * The marks move with the user: a ready window and a `stable` moment inside
+ * an approach start where it ends; `marks.follow` records each approach for
+ * the scorer. Under a rule no natural framing breaks (`area`, before) there
+ * is no approach — the hint never asks.
+ */
+export function followHint(script, rule, region) {
+  if (rule === null || rule === undefined) return script;
+  const marks = script.marks ?? {};
+  const view = region ?? script.frame.view ?? { x: 0, y: 0, width: 1, height: 1 };
+  // Where the person centres the page: the part of the screen they frame in
+  // (below the hint, above the controls), else the app's region.
+  const aim = script.frame.view ?? view;
+  const frame = script.frame;
+  const windows =
+    (marks.ready ?? []).length > 0
+      ? marks.ready.map((w) => ({ from: w.from, to: w.to }))
+      : [
+          ...(marks.holdFrom !== undefined && marks.holdTo !== undefined ? [{ from: marks.holdFrom, to: marks.holdTo }] : []),
+          ...(marks.lockFrom2 !== undefined && marks.holdTo2 !== undefined ? [{ from: marks.lockFrom2, to: marks.holdTo2 }] : []),
+        ];
+  const practised = windows.length === 0 && (marks.stable ?? []).length > 0 && marks.pageless !== true;
+  const spans = practised ? practisedSpans(script, marks.stable) : windows.sort((a, b) => a.from - b.from);
+  if (spans.length === 0) return script;
+  const roomAt = (t) => {
+    // A shaking hand keeps its distance: the corners stay clear of the
+    // cut-off line by the tremor's swings (2 × its RMS) on each axis.
+    const peak = 2 * amplitudeAt(script.tremor.keys, t);
+    return [FOLLOW_EDGE + (peak * frame.height) / (view.width * frame.width), FOLLOW_EDGE + peak / view.height];
+  };
+  const roomy = (points, room) => points.every(([x, y]) => x >= room[0] && x <= 1 - room[0] && y >= room[1] && y <= 1 - room[1]);
+  // Bisect a distance scale on [0.25, 4] for the boundary of `closerOk`
+  // (true for every scale at or above the answer).
+  const boundary = (closerOk) => {
+    let lo = Math.log(0.25);
+    let hi = Math.log(4);
+    if (closerOk(Math.exp(lo))) return Math.exp(lo);
+    if (!closerOk(Math.exp(hi))) return Math.exp(hi);
+    for (let i = 0; i < 40; i += 1) {
+      const mid = (lo + hi) / 2;
+      if (closerOk(Math.exp(mid))) hi = mid;
+      else lo = mid;
+    }
+    return Math.exp(hi);
+  };
+  // 1. The user's own framing of each hold.
+  const natural = [];
+  const pages = spans.map((span, index) => {
+    const pageIndex = pageLayerIndex(script, primaryAt(script, span.from));
+    if (pageIndex === null) return null;
+    const layer = layerAt(script.scene.layers[pageIndex], pageIndex, script, span.from);
+    const keyed = keyedPose(script, span.from);
+    const scripted = framingMeasure("fill", inRegion(keyed, frame, layer, view));
+    const rng = rngFor("frame", script.id, script.seed, index);
+    const want = rng.range(NATURAL_FILL[0], NATURAL_FILL[1]);
+    const room = roomAt(span.from);
+    const fillAt = (scale) => framingMeasure("fill", inRegion({ ...keyed, distance: keyed.distance * scale }, frame, layer, view));
+    // The farthest scale that still fills `want`, kept back to where the corners have room.
+    const toWant = boundary((scale) => fillAt(scale) <= want);
+    const toRoom = boundary((scale) => roomy(inRegion({ ...keyed, distance: keyed.distance * scale }, frame, layer, view), room));
+    const scale = Math.max(toWant, toRoom);
+    natural.push({ t: Math.max(0, span.from - NATURAL_RAMP_MS), scale }, { t: span.to, scale });
+    return { pageIndex, layer, scripted, want, scale };
+  });
+  natural.sort((a, b) => a.t - b.t);
+  const withNatural = { ...script, follow: { rule, region: view, aim, natural, segments: [] } };
+  // 2. Following the hint, from that framing.
+  const segments = [];
+  const record = [];
+  spans.forEach((span, index) => {
+    const page = pages[index];
+    if (page === null) return;
+    const { pageIndex, layer } = page;
+    const pose = naturalPose(withNatural, span.from, keyedPose(script, span.from));
+    const before = framingMeasure(rule.kind, inRegion(pose, frame, layer, view));
+    const rng = rngFor("follow", script.id, script.seed, index);
+    const overshoot = rule.kind === "fill" ? rng.range(1.02, 1.08) : rng.range(1.1, 1.3);
+    const reactAt = practised ? span.from - 250 : span.from + rng.range(700, 1200);
+    const arriveAt = practised ? span.from : reactAt + rng.range(700, 1200);
+    const base = { from: span.from, to: span.to, page: pageIndex, scripted: page.scripted, natural: framingMeasure("fill", inRegion(pose, frame, layer, view)), before };
+    if (before >= rule.exit || (!practised && arriveAt >= span.to)) {
+      record.push({ ...base, approached: false });
+      return;
+    }
+    const target = rule.kind === "fill" ? Math.min(0.92, rule.exit * overshoot) : rule.exit * overshoot;
+    const pointsAt = (scale) => inRegion(correctedPose(pose, frame, layer, aim, scale, 1), frame, layer, view);
+    const measureAt = (scale) => framingMeasure(rule.kind, pointsAt(scale));
+    const room = roomAt(arriveAt);
+    const scale = Math.min(1, Math.max(boundary((k) => measureAt(k) <= target), boundary((k) => roomy(pointsAt(k), room))));
+    if (measureAt(scale) <= before + 0.01) {
+      record.push({ ...base, approached: false });
+      return;
+    }
+    const next = spans[index + 1];
+    const releaseFrom = practised ? span.leaveAt : next === undefined ? FOREVER : span.to;
+    const releaseTo = practised ? span.leaveAt + 200 : next === undefined ? FOREVER : Math.max(span.to + 1, next.from - 1);
+    segments.push({ layer: pageIndex, reactAt, arriveAt, releaseFrom, releaseTo, scale });
+    record.push({ ...base, approached: true, reactAt, arriveAt, target, after: measureAt(scale), practised });
+  });
+  const moved = (t) => {
+    const r = record.find((f) => f.approached && !f.practised && t >= f.from && t < f.arriveAt);
+    return r === undefined ? t : r.arriveAt;
+  };
+  return {
+    ...script,
+    follow: { rule, region: view, aim, natural, segments },
+    marks: {
+      ...marks,
+      follow: record,
+      ...(marks.ready === undefined ? {} : { ready: marks.ready.map((w) => ({ ...w, from: moved(w.from) })) }),
+      ...(marks.stable === undefined ? {} : { stable: marks.stable.map(moved) }),
+    },
+  };
+}
+
+/** The layer index of the scene's `page`-th page (its document layers in order), or null. */
+function pageLayerIndex(script, page) {
+  let seen = -1;
+  for (let i = 0; i < script.scene.layers.length; i += 1) {
+    if (script.scene.layers[i].document === undefined) continue;
+    seen += 1;
+    if (seen === page) return i;
+  }
+  return null;
+}
+
+/** A practised user's spans: from each `stable` moment to when the camera next leaves that pose. */
+function practisedSpans(script, stable) {
+  return stable.map((from) => {
+    const keys = script.camera;
+    const at = keys.findIndex((k) => k.t >= from);
+    let leaveAt = keys[keys.length - 1].t;
+    if (at >= 0) {
+      for (let i = at; i < keys.length - 1; i += 1) {
+        if (keys[i + 1].pose !== keys[at].pose) {
+          leaveAt = keys[i].t;
+          break;
+        }
+      }
+    }
+    return { from, to: leaveAt, leaveAt };
+  });
 }
 
 /** A layer's centre and rotation at `t`, when the script moves it. */
@@ -399,9 +719,17 @@ export function buildSession(id, seed, options = {}) {
   // `view`: the part of the frame the layout under test shows (frame
   // fractions) — the scripted user frames the page in it, as a person aims
   // by the screen (`--frame-by screen`). Without it, the whole frame.
-  const size = options.view ? { ...frameSize(options.size ?? "portrait"), view: options.view } : (options.size ?? "portrait");
+  // A measured view carries the app's whole visible region alongside
+  // (`region`, untrimmed): what the app judges "Aproxime" in.
+  const { region: viewRegion = null, ...viewRect } = options.view ?? {};
+  const size = options.view ? { ...frameSize(options.size ?? "portrait"), view: viewRect } : (options.size ?? "portrait");
   // `family` overrides the scene family a session would pick (the playground's choice).
-  const built = session.build(rng, { seed, size, family: options.family ?? null });
+  // `follow` / `region`: the rule the user answers to and where the app
+  // judges it — a session built around the "too far" line (`hover-far`)
+  // swings across the line under test.
+  const follow = options.follow === undefined ? DEFAULT_FOLLOW : options.follow;
+  const region = options.region ?? viewRegion;
+  const built = session.build(rng, { seed, size, family: options.family ?? null, follow, region });
   const script = {
     id,
     seed,
@@ -417,7 +745,10 @@ export function buildSession(id, seed, options = {}) {
   script.frame = script.scene.frame;
   script.tremor = { model: tremorModel(rng.fork("tremor").seed32()), keys: built.tremor };
   script.still = { ...DEFAULT_STILL, ...(built.still ?? {}) };
-  return script;
+  // The user follows "Aproxime" (`options.follow`: a rule, null to hold where
+  // the script says; absent, the app's own), judged in the app's visible
+  // region (`options.region`; absent, the part of the frame the user frames in).
+  return followHint(script, follow, region);
 }
 
 /** A pose the user starts from: farther, leaning more, aimed off to one side. */
@@ -1712,10 +2043,9 @@ export function cameraAt(script, t, frame = script.frame, focalPixels) {
  */
 const VIEW_CROP = { x: 0, y: 0.075, width: 1, height: 0.85 };
 
-/** A layer as the viewfinder shows it from `pose`: its nearest corner's margin and its share of the view. */
-function inView(pose, frame, layer) {
+/** A layer as the viewfinder shows it from `pose` (in `crop`, frame fractions): its nearest corner's margin, its share of the view, and its fill. */
+function inView(pose, frame, layer, crop = frame.view ?? VIEW_CROP) {
   const camera = cameraFromPose(pose, frame);
-  const crop = frame.view ?? VIEW_CROP;
   const pts = projectRect(camera, layer).map((p) => [
     (p.u / frame.width - crop.x) / crop.width,
     (p.v / frame.height - crop.y) / crop.height,
@@ -1729,7 +2059,13 @@ function inView(pose, frame, layer) {
   ]);
   const area = inside.length >= 3 ? polygonArea(inside) : 0;
   const whole = polygonArea(pts);
-  return { margin, area, inShare: whole > 0 ? area / whole : 0, center: pts.reduce((s, [x, y]) => [s[0] + x / 4, s[1] + y / 4], [0, 0]) };
+  return {
+    margin,
+    area,
+    fill: framingMeasure("fill", pts),
+    inShare: whole > 0 ? area / whole : 0,
+    center: pts.reduce((s, [x, y]) => [s[0] + x / 4, s[1] + y / 4], [0, 0]),
+  };
 }
 
 /** Bisect `f` in [0, 1] so that `measure(f)` (monotonic) meets `target`. */
@@ -2199,18 +2535,20 @@ registerSession({
   inDefault: false,
   group: "breaker",
   describe:
-    "held 4 s with the page at 15.5 % of the view (inside the too-far hint's hysteresis band), then the distance swings between 11.5 % and 19.5 % every second until 12 s; the hint may be \"Aproxime\" or none, and should change seldom; auto-capture on",
-  build(rng, { seed, size, family }) {
+    "held 4 s with the page inside the too-far hint's hysteresis band (its fill — or, under the old rule, its area — halfway between the enter and exit lines), then the distance swings to 2.5 points past either line every second until 12 s; the hint may be \"Aproxime\" or none, and should change seldom; auto-capture on",
+  build(rng, { seed, size, family, follow, region }) {
     const { scene, found } = framedScene(seed, size, family, 0.06);
+    const rule = follow ?? DEFAULT_FOLLOW;
     const base = framingCamera(rng.fork("aim"), scene.frame, found.layer, { coverage: 0.14, tilt: [0, 10], aimSpread: 5, marginFraction: 0.1 });
-    const at = (f) => ({ ...base, distance: base.distance * Math.exp(lerp(Math.log(0.6), Math.log(2.2), f)) });
-    const pose = (share) => at(solveFor((f) => inView(at(f), scene.frame, found.layer).area, share, false));
-    const mid = pose(0.155);
+    const at = (f) => ({ ...base, distance: base.distance * Math.exp(lerp(Math.log(0.4), Math.log(2.2), f)) });
+    const crop = region ?? scene.frame.view ?? VIEW_CROP;
+    const pose = (share) => at(solveFor((f) => inView(at(f), scene.frame, found.layer, crop)[rule.kind], share, false));
+    const mid = pose((rule.enter + rule.exit) / 2);
     return {
       scene,
       duration: 13000,
       autoCapture: true,
-      camera: swing(mid, pose(0.115), pose(0.195), 4000, 12000, 1000),
+      camera: swing(mid, pose(rule.enter - 0.025), pose(rule.exit + 0.025), 4000, 12000, 1000),
       tremor: [{ t: 0, amplitude: 0.004 }],
       actions: [],
       marks: { ...NO_GUIDANCE, hints: [{ name: "hover far", from: 900, to: 12000, expect: ["move-closer", null], conditionFrom: 0 }] },

@@ -20,6 +20,7 @@ test("the diagnostics HUD says what the loop is doing, in numbers only", () => {
       autoArmed: true,
       blocked: "auto: countdown 40 %",
       passes: 12,
+      fill: 0.846,
     },
     { torch: false, autoOffered: true, autoOn: true, autoFires: 2, still: { width: 2250, height: 4000, attention: "corner-outside" } },
     false,
@@ -32,7 +33,7 @@ test("the diagnostics HUD says what the loop is doing, in numbers only", () => {
     "stream 720×1280 · still 2250×4000",
     "visible x0 y3 w100 h94 % · fit maxcrop",
     "torch no · vibrate no",
-    "locked · ready on · auto armed · fired 2",
+    "locked · fill 85 % · ready on · auto armed · fired 2",
     "why: auto: countdown 40 %",
     "last photo: corner-outside",
   ]);

@@ -129,8 +129,9 @@ import {
   AutoCapture,
   BORDER_EXIT,
   borderMargin,
-  AREA_EXIT,
+  FAR_CANDIDATE_AREA,
   areaShare,
+  fillShare,
   HintDebounce,
   motionOf,
   rawHint,
@@ -625,6 +626,8 @@ interface Runtime {
   watchScore: number | null;
   /** Confirming readings in a row whose paper runs on past an edgeless side ({@link OPEN_READINGS}). */
   openHits: number;
+  /** How much of the visible region the page (found or suspected) fills (`fillShare`), or null with none. */
+  fill: number | null;
 }
 
 function freshRuntime(): Runtime {
@@ -676,6 +679,7 @@ function freshRuntime(): Runtime {
     watchMoved: false,
     watchScore: null,
     openHits: 0,
+    fill: null,
   };
 }
 
@@ -834,6 +838,8 @@ export interface LiveDiagnostics {
   blocked: string | null;
   /** Passes answered since this hook mounted (a stalled loop stops counting). */
   passes: number;
+  /** How much of the visible region the page fills along its limiting axis (`fillShare`), or null with no page. */
+  fill: number | null;
 }
 
 /**
@@ -926,6 +932,8 @@ export interface LiveDetect {
   noteCapture: () => void;
   /** The one hint over the viewfinder (`lib/guidance.ts`), or none. */
   hint: HintKey | null;
+  /** How much of the view the page filled (`fillShare`) when {@link hint} appeared — its wording's band; null with no page. */
+  hintFill: number | null;
   /** The ready cue: a found sheet, framed, sharp and still. */
   ready: boolean;
   /** Bumped once per page as the ready cue comes on: the one haptic tick (and a spoken "ready"). */
@@ -1104,6 +1112,7 @@ export function useLiveDetect({
   const [frameBox, setFrameBox] = React.useState<FrameBox | null>(null);
   const [tabHidden, setTabHidden] = React.useState(false);
   const [hint, setHint] = React.useState<HintKey | null>(null);
+  const [hintFill, setHintFill] = React.useState<number | null>(null);
   const [ready, setReady] = React.useState(false);
   /** Bumped once per page when the ready cue comes on: the haptic tick and the spoken "ready" ({@link ReadyTick}). */
   const [readyTick, setReadyTick] = React.useState(0);
@@ -1296,6 +1305,7 @@ export function useLiveDetect({
     guidance.tick.reset();
     guidance.auto.pause();
     setHint(null);
+    setHintFill(null);
     setReady(false);
   }, [loopLive, overlay]);
 
@@ -2010,7 +2020,7 @@ export function useLiveDetect({
           evidence.background >= FAR_MIN_BACKGROUND &&
           evidence.counterInk <= evidence.ink * PAPER.maxCounterRatio + PAPER.counterFloor &&
           evidence.solidInk <= PAPER.maxSolidInk);
-      const far = confidence >= ML_TRUSTED_CONFIDENCE && farPaper && onEdges && areaShare(seen) < AREA_EXIT && (rejected === "floor" || rejected === null);
+      const far = confidence >= ML_TRUSTED_CONFIDENCE && farPaper && onEdges && areaShare(seen) < FAR_CANDIDATE_AREA && (rejected === "floor" || rejected === null);
       // Cut off: a corner at or past the viewfinder's edge, or an edgeless
       // side with the page's paper running on past it to the frame's edge.
       const cutOff = evidence.open > 0;
@@ -2446,6 +2456,7 @@ export function useLiveDetect({
       const sheetFrame = tracking ? runtime.shown : suspected;
       const sheet = sheetFrame === null ? null : toVisible(sheetFrame, visible);
       if (sheet !== null) runtime.sheetSeenAt = now;
+      runtime.fill = sheet === null ? null : fillShare(sheet);
       // A corner under a control drawn over the picture is a corner the
       // person cannot see: the page is cut off to them, as at an edge.
       const covered =
@@ -2553,6 +2564,7 @@ export function useLiveDetect({
       if (shown !== announcedHint) {
         announcedHint = shown;
         setHint(shown);
+        setHintFill(runtime.fill);
       }
       const diag = diagRef.current;
       if (diag !== null) noteDiagnostics(diag, now, isReady, fire);
@@ -2576,6 +2588,7 @@ export function useLiveDetect({
           on: isReady,
           ms: isReady || memo.readyAt === null ? null : now - memo.readyAt,
           why: isReady ? null : runtime.blockWhy,
+          fill: runtime.fill,
         });
         memo.readyAt = isReady ? now : null;
       }
@@ -2798,6 +2811,7 @@ export function useLiveDetect({
       autoArmed: guidanceRef.current.auto.armed,
       blocked: runtime.blockWhy,
       passes: passCountRef.current,
+      fill: runtime.fill,
     };
   }, []);
 
@@ -2811,6 +2825,7 @@ export function useLiveDetect({
     noteCapture,
     endCapture,
     hint,
+    hintFill,
     ready,
     readyTick,
     visible,

@@ -37,7 +37,7 @@ import {
 import { prefetchDewarpAssets } from "@/lib/dewarp/prefetch";
 import { connectionKind, shouldPrefetchHeavyAssets } from "@/lib/network";
 import { captureFromFile, type Capture, type CapturePath, type CaptureSizes } from "@/lib/capture-intake";
-import type { HintKey } from "@/lib/guidance";
+import { FILL_NEAR, type HintKey } from "@/lib/guidance";
 import { assessSource, type GateReading } from "@/lib/capture-gate";
 import { normalizedCoverage, type NormalizedQuad } from "@/lib/quad";
 import { refineOnCanvas } from "@/lib/refine";
@@ -1335,9 +1335,10 @@ export function CaptureStage({
     const previous = hintShownRef.current;
     if ((previous?.key ?? null) === shownHint) return;
     const now = performance.now();
-    if (previous !== null) diagnosticsSink.emit({ type: "hint", id: previous.key, shown: false, ms: now - previous.at });
+    const fill = detect.diagnostics().fill;
+    if (previous !== null) diagnosticsSink.emit({ type: "hint", id: previous.key, shown: false, ms: now - previous.at, fill });
     hintShownRef.current = shownHint === null ? null : { key: shownHint, at: now };
-    if (shownHint !== null) diagnosticsSink.emit({ type: "hint", id: shownHint, shown: true, ms: null });
+    if (shownHint !== null) diagnosticsSink.emit({ type: "hint", id: shownHint, shown: true, ms: null, fill: detect.hintFill ?? fill });
   }, [diagnosticsSink, shownHint]);
 
   const loopStateRef = React.useRef({ running: false, found: false });
@@ -1585,7 +1586,7 @@ export function CaptureStage({
           >
             {shownHint !== null && (
               <Chip mono tone={HINT_TONE[shownHint]} className="shadow-sm">
-                {hintCopy(copy.capture.hints, shownHint)}
+                {hintCopy(copy.capture.hints, shownHint, detect.hintFill)}
               </Chip>
             )}
             {offerTorch && (
@@ -1774,7 +1775,7 @@ export function CaptureStage({
           hint:
             shownHint === null
               ? null
-              : { key: shownHint, text: hintCopy(copy.capture.hints, shownHint), tone: HINT_TONE[shownHint] },
+              : { key: shownHint, text: hintCopy(copy.capture.hints, shownHint, detect.hintFill), tone: HINT_TONE[shownHint] },
           torchOffer: offerTorch
             ? () => {
                 setTorchOn(true);
@@ -1880,8 +1881,12 @@ const HINT_TONE: Record<HintKey, "night" | "alert" | "warning"> = {
   "hold-still": "night",
 };
 
-/** A hint's words. */
-function hintCopy(hints: ReturnType<typeof useCopy>["capture"]["hints"], key: HintKey): string {
+/**
+ * A hint's words. "Aproxime" for a page that already nearly fills the view
+ * when the hint appeared (`fill`, kept while it shows) is "Aproxime mais um
+ * pouco": a small move asked for, not a big one that overshoots.
+ */
+function hintCopy(hints: ReturnType<typeof useCopy>["capture"]["hints"], key: HintKey, fill: number | null): string {
   switch (key) {
     case "searching":
       return hints.searching;
@@ -1890,7 +1895,7 @@ function hintCopy(hints: ReturnType<typeof useCopy>["capture"]["hints"], key: Hi
     case "move-back":
       return hints.moveBack;
     case "move-closer":
-      return hints.moveCloser;
+      return fill !== null && fill >= FILL_NEAR ? hints.moveCloserNear : hints.moveCloser;
     case "low-light":
       return hints.lowLight;
     case "glare":

@@ -166,6 +166,8 @@ export interface AppCopy {
       notFound: string;
       moveBack: string;
       moveCloser: string;
+      /** "Move closer" for a page that already nearly fills the view (`FILL_NEAR`, `lib/guidance.ts`): a small move, not a big one. */
+      moveCloserNear: string;
       lowLight: string;
       glare: string;
       holdStill: string;
@@ -964,6 +966,7 @@ const PT: AppCopy = {
       notFound: "Não achei a folha — toque para capturar",
       moveBack: "Afaste um pouco",
       moveCloser: "Aproxime",
+      moveCloserNear: "Aproxime mais um pouco",
       lowLight: "Pouca luz",
       glare: "Reflexo — incline o celular",
       holdStill: "Segure firme",
@@ -1622,6 +1625,7 @@ const EN: AppCopy = {
       notFound: "Can't find the page — tap to capture",
       moveBack: "Move back a little",
       moveCloser: "Move closer",
+      moveCloserNear: "Move a little closer",
       lowLight: "Low light",
       glare: "Glare — tilt the phone",
       holdStill: "Hold still",

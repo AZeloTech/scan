@@ -58,14 +58,14 @@ export const DEFAULT_STREAM = "720x1280";
  * build. Any change to any of them is another key, so a stale frame is never
  * replayed — and editing one session's script re-renders that session only.
  */
-export function frameCacheKey(id, seed, stream, browserVersion, view = null) {
+export function frameCacheKey(id, seed, stream, browserVersion, view = null, follow = undefined) {
   const hash = createHash("sha256");
   const dir = join(BENCH_DIR, "emulator");
   for (const name of readdirSync(dir).filter((n) => n.endsWith(".js")).sort()) {
     const source = readFileSync(join(dir, name), "utf8");
     hash.update(name).update(name === "session.js" ? source.slice(0, source.indexOf("registerSession({")) : source);
   }
-  hash.update(JSON.stringify(buildSession(id, seed, { size: stream, view })));
+  hash.update(JSON.stringify(buildSession(id, seed, { size: stream, view, ...(follow === undefined ? {} : { follow }) })));
   hash.update(FRAME_CACHE_VERSION).update(browserVersion);
   return `${id}-${seed}-${stream}-${hash.digest("hex").slice(0, 16)}`;
 }
@@ -515,17 +515,18 @@ export async function runSessionSuite({ page, throttle: _unused, options, outDir
   const view = options.frameBy === "screen" ? await measureFramingView(browser, origin, options) : null;
   if (view !== null) {
     log(`session: framing by the screen — view x ${pctView(view.x)} y ${pctView(view.y)} w ${pctView(view.width)} h ${pctView(view.height)} % of the frame`);
+    log(`session: the app's visible region x ${pctView(view.region.x)} y ${pctView(view.region.y)} w ${pctView(view.region.width)} h ${pctView(view.region.height)} %`);
   }
   for (const id of ids) {
     for (let seed = 1; seed <= options.sessionSeeds; seed += 1) {
       const started = Date.now();
       const { context, page: phone, errors } = await openSessionPage(browser, origin, options.layout, options.viewport);
       try {
-        const cache = options.frameCache === false ? null : frameCacheKey(id, seed, options.stream, browserVersion, view);
+        const cache = options.frameCache === false ? null : frameCacheKey(id, seed, options.stream, browserVersion, view, options.follow);
         const prepared = await phone.evaluate(
-          ([name, s, size, key, settings, v, scale]) =>
-            window.__session.prepare(name, s, { size, cache: key, knobs: settings, view: v, streamScale: scale }),
-          [id, seed, options.stream, cache, knobs, view, options.streamScale ?? 1],
+          ([name, s, size, key, settings, v, scale, follow]) =>
+            window.__session.prepare(name, s, { size, cache: key, knobs: settings, view: v, streamScale: scale, ...(follow === undefined ? {} : { follow }) }),
+          [id, seed, options.stream, cache, knobs, view, options.streamScale ?? 1, options.follow],
         );
         const throttle = await cpuThrottle(phone);
         await throttle.set(options.cpu);
@@ -620,7 +621,12 @@ export async function measureFramingView(browser, origin, options) {
   }
 }
 
-/** {@link measureFramingView}'s arithmetic: the region, trimmed by the controls over its top and bottom. */
+/**
+ * {@link measureFramingView}'s arithmetic: the region, trimmed by the
+ * controls over its top and bottom — with the untrimmed region alongside
+ * (`region`: what the app judges its hints in, which the scripted user
+ * follows; `buildSession` takes it off the view).
+ */
 export function framingView(region) {
   let top = region.y;
   let bottom = region.y + region.height;
@@ -633,7 +639,13 @@ export function framingView(region) {
     else bottom = Math.min(bottom, b.y);
   }
   const round = (v) => Math.round(v * 1e4) / 1e4;
-  return { x: round(left), y: round(top), width: round(right - left), height: round(Math.max(0, bottom - top)) };
+  return {
+    x: round(left),
+    y: round(top),
+    width: round(right - left),
+    height: round(Math.max(0, bottom - top)),
+    region: { x: round(region.x), y: round(region.y), width: round(region.width), height: round(region.height) },
+  };
 }
 
 /**

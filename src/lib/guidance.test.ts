@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  AREA_ENTER,
   areaShare,
   AUTO_FIRE_MS,
   AutoCapture,
   borderMargin,
+  BORDER_ENTER,
+  FILL_ENTER,
+  FILL_EXIT,
+  fillShare,
   HINT_APPEAR_MS,
   HINT_MIN_GAP_MS,
   HINT_MIN_SHOW_MS,
@@ -32,13 +35,15 @@ function rect(x0: number, y0: number, x1: number, y1: number): NormalizedQuad {
 }
 
 const page = rect(0.2, 0.2, 0.8, 0.75);
+/** A page held as the hints want it: across 86 % of the view's width, 7 % clear of each side. */
+const framed = rect(0.07, 0.2, 0.93, 0.75);
 
 function input(overrides: Partial<GuidanceInput> = {}): GuidanceInput {
   return {
     now: 10_000,
     since: 0,
     locked: true,
-    sheet: page,
+    sheet: framed,
     sheetSeenAt: 10_000,
     aspect: 1.5,
     motion: 0.005,
@@ -78,7 +83,7 @@ test("hints come in priority order", () => {
   assert.equal(rawHint(input({ sheet: cut, bright: 60, glare: 0.3, motion: 0.1 }), null), "move-back");
   assert.equal(rawHint(input({ locked: false, sheet: cut }), null), "move-back");
   const small = rect(0.4, 0.4, 0.6, 0.6);
-  assert.ok(areaShare(small) < AREA_ENTER);
+  assert.ok(fillShare(small) < FILL_ENTER);
   assert.equal(rawHint(input({ sheet: small, bright: 60 }), null), "move-closer");
   assert.equal(rawHint(input({ locked: false, sheet: small }), null), "move-closer");
   assert.equal(rawHint(input({ bright: 60, glare: 0.3 }), null), "low-light");
@@ -90,6 +95,100 @@ test("hints come in priority order", () => {
   assert.equal(rawHint(input({ locked: false, sheet: small, bright: 60 }), null), "move-closer");
   // A found sheet whose paper runs on past the edge is cut off, wherever its corners are.
   assert.equal(rawHint(input({ cutOff: true }), null), "move-back");
+});
+
+test("fill: the page's reach along the view's limiting axis, clipped to the view", () => {
+  const near = (a: number, b: number) => Math.abs(a - b) < 1e-9;
+  // An upright page in a tall view: width-limited.
+  assert.ok(near(fillShare(rect(0.1, 0.3, 0.9, 0.82)), 0.8));
+  // A long receipt: height-limited.
+  assert.ok(near(fillShare(rect(0.4, 0.05, 0.6, 0.95)), 0.9));
+  // Past an edge, only what the view shows counts.
+  assert.ok(near(fillShare(rect(-0.2, 0.3, 0.7, 0.6)), 0.7));
+  // A page turned in the view reaches by its corners: a diamond across the
+  // whole width fills it, though its sides are shorter than the view.
+  const diamond: NormalizedQuad = {
+    topLeft: { x: 0.5, y: 0.3 },
+    topRight: { x: 0.95, y: 0.5 },
+    bottomRight: { x: 0.5, y: 0.7 },
+    bottomLeft: { x: 0.05, y: 0.5 },
+  };
+  assert.ok(near(fillShare(diamond), 0.9));
+  // Perspective: the near edge is the one that reaches.
+  const tilted: NormalizedQuad = {
+    topLeft: { x: 0.2, y: 0.25 },
+    topRight: { x: 0.8, y: 0.25 },
+    bottomRight: { x: 0.9, y: 0.7 },
+    bottomLeft: { x: 0.1, y: 0.7 },
+  };
+  assert.ok(near(fillShare(tilted), 0.8));
+});
+
+test("too far: by fill, not area — a page as big as a tall screen allows is never too far", () => {
+  // A 0.46-wide view (a tall phone) and an A4 page across 90 % of its width:
+  // it covers only ~59 % of the view's area, yet nothing closer is possible.
+  const aspect = 1 / 0.46;
+  const heightShare = (0.9 * 1.414) / aspect;
+  const a4 = rect(0.05, 0.5 - heightShare / 2, 0.95, 0.5 + heightShare / 2);
+  assert.ok(areaShare(a4) < 0.6);
+  assert.equal(rawHint(input({ sheet: a4, aspect }), null), null);
+  // The same page across 60 % of the width: found, sharp, still — and "Aproxime".
+  const h = (0.6 * 1.414) / aspect;
+  const smaller = rect(0.2, 0.5 - h / 2, 0.8, 0.5 + h / 2);
+  assert.equal(rawHint(input({ sheet: smaller, aspect }), null), "move-closer");
+  // A page suspected (not yet found) at that size is "Aproxime" too.
+  assert.equal(rawHint(input({ locked: false, sheet: smaller, aspect }), null), "move-closer");
+});
+
+test("too far has a band: no ping-pong between Aproxime, nothing and Afaste um pouco", () => {
+  const centred = (fill: number) => rect(0.5 - fill / 2, 0.25, 0.5 + fill / 2, 0.75);
+  const between = (FILL_ENTER + FILL_EXIT) / 2;
+  // Inside the band the answer is whatever is showing.
+  assert.equal(rawHint(input({ sheet: centred(between) }), null), null);
+  assert.equal(rawHint(input({ sheet: centred(between) }), "move-closer"), "move-closer");
+  // Below it, always too far; at the exit line, never.
+  assert.equal(rawHint(input({ sheet: centred(FILL_ENTER - 0.01) }), null), "move-closer");
+  assert.equal(rawHint(input({ sheet: centred(FILL_EXIT) }), "move-closer"), null);
+  // Between the exit line and "Afaste um pouco" there is room to hold the
+  // page: a centred page clears the cut-off line until it reaches 97 %, so
+  // the target leaves at least 6 % of the view's width spare on either side
+  // for a hand's tremor and an off-centre aim.
+  assert.ok((1 - FILL_EXIT) / 2 - BORDER_ENTER >= 0.06, String(FILL_EXIT));
+  for (let fill = FILL_EXIT; fill <= 1 - 2 * BORDER_ENTER - 0.001; fill += 0.01) {
+    assert.equal(rawHint(input({ sheet: centred(fill) }), null), null, fill.toFixed(2));
+    assert.equal(rawHint(input({ sheet: centred(fill) }), "move-closer"), null, fill.toFixed(2));
+  }
+  // Too close: "Afaste um pouco", whatever was showing.
+  assert.equal(rawHint(input({ sheet: centred(0.99) }), "move-closer"), "move-back");
+  // A page drifting across the enter line on alternate readings never makes the slot flicker.
+  const hints = new HintDebounce();
+  const seen: (string | null)[] = [];
+  for (let t = 0; t < 8000; t += 100) {
+    const fill = t % 200 === 0 ? FILL_ENTER - 0.005 : FILL_ENTER + 0.005;
+    const shown = hints.update(rawHint(input({ sheet: centred(fill) }), hints.current), t);
+    if (seen[seen.length - 1] !== shown) seen.push(shown);
+  }
+  assert.ok(seen.length <= 2, seen.join(" → "));
+});
+
+test("answering Aproxime moves the page: the slot clears rather than saying Segure firme", () => {
+  // While "Aproxime" (or "Afaste um pouco") is up, a page big enough now but still moving is the approach.
+  assert.equal(rawHint(input({ motion: 0.05 }), "move-closer"), null);
+  assert.equal(rawHint(input({ motion: 0.05 }), "move-back"), null);
+  // A blurred frame is still "Segure firme"; and once the slot is clear, so is a hand still moving.
+  assert.equal(rawHint(input({ motion: 0.05, sharp: false }), "move-closer"), "hold-still");
+  assert.equal(rawHint(input({ motion: 0.05 }), null), "hold-still");
+  // The sequence a person coming in sees: Aproxime, then nothing (the cue waits for stillness), never Segure firme.
+  const hints = new HintDebounce();
+  const small = rect(0.2, 0.3, 0.7, 0.7);
+  const seen: (string | null)[] = [];
+  for (let t = 0; t <= 6000; t += 100) {
+    const moving = t >= 2000 && t < 3200;
+    const sheet = t < 2600 ? small : framed;
+    const shown = hints.update(rawHint(input({ sheet, motion: moving ? 0.05 : 0.005 }), hints.current), t);
+    if (seen[seen.length - 1] !== shown) seen.push(shown);
+  }
+  assert.deepEqual(seen, [null, "move-closer", null]);
 });
 
 test("each condition has hysteresis", () => {

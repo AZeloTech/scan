@@ -46,6 +46,7 @@ import {
   weightedPercentile,
   WRONG_CROP_MAX_CORNER_ERROR,
 } from "./metrics.mjs";
+import { FOLLOW_RULES, framingMeasure } from "./emulator/session.js";
 
 /** An overlay counts as shown to the user from this opacity up. */
 export const OVERLAY_SHOWN_OPACITY = 0.5;
@@ -569,6 +570,7 @@ export function scoreSession(script, record) {
   out.hints = hintTimeline(record);
   out.guidance = scoreGuidance(script, record, gtAt, out.captures);
   out.visibility = scoreVisibility(script, record, gtAt, out.captures);
+  out.framing = scoreFraming(script, record, gtAt, out.captures, out.visibility);
   out.captureDetects = scoreCaptureDetects(record);
   out.captureFreeze = scoreCaptureFreeze(record);
   out.perf = scorePerf(record);
@@ -1289,4 +1291,120 @@ export function scoreVisibility(script, record, gtAt, captures) {
     area: areas.length === 0 ? null : areas[Math.floor(areas.length / 2)],
     region: last === null ? (record.visible ?? null) : { x: last.x, y: last.y, width: last.width, height: last.height, fit: last.fit },
   };
+}
+
+/* ── framing: how close the page is held, and what that gives the PDF ──── */
+
+/**
+ * The app's "too far" line (`FILL_ENTER` / `FILL_EXIT`, `src/lib/guidance.ts`,
+ * mirrored by the emulator's `FOLLOW_RULES.fill`) and the share past it the
+ * scorer counts a page as plainly big enough — "Aproxime" shown over such a
+ * page is a wrong hint (the hysteresis and a detector a few pixels out
+ * excuse anything closer to the line).
+ */
+export const FRAMING_RULE = FOLLOW_RULES.fill;
+export const FRAMING_CLEAR = 0.03;
+/** "Aproxime mais um pouco" from this fill up (`FILL_NEAR`). */
+export const FRAMING_NEAR = 0.6;
+
+/**
+ * The phone the PDF's resolution is reported for: the Galaxy S25 Ultra's
+ * still (4080×3060), cut to the preview's field of view — 2295×4080 for a
+ * 9:16 stream, 3060×4080 for 3:4 (the owner's field run). The page's pixels
+ * in the PDF are its edges' lengths in that crop.
+ */
+export const FIELD_STILL_LONG = 4080;
+export const FIELD_STILL_SHORT = 3060;
+/** A4's short side, inches: the PDF's dpi for an A4 page. */
+const A4_SHORT_IN = 210 / 25.4;
+
+/** A truth quad (`[[x, y] × 4]`, frame fractions) in fractions of `region`. */
+function inRegionPoints(points, region) {
+  return points.map(([x, y]) => [(x - region.x) / region.width, (y - region.y) / region.height]);
+}
+
+/**
+ * The page's size in the field phone's still (cut to the preview's field of
+ * view, `frame` the stream's shape): the longer of each pair of opposite
+ * edges, as the warp makes it — `{ short, long }` px.
+ */
+export function fieldPagePixels(points, frame) {
+  const portrait = frame.height >= frame.width;
+  const aspect = portrait ? frame.width / frame.height : frame.height / frame.width;
+  const shortPx = Math.min(FIELD_STILL_SHORT, FIELD_STILL_LONG * aspect);
+  const [w, h] = portrait ? [shortPx, FIELD_STILL_LONG] : [FIELD_STILL_LONG, shortPx];
+  const edge = (a, b) => Math.hypot((b[0] - a[0]) * w, (b[1] - a[1]) * h);
+  const [tl, tr, br, bl] = points;
+  const across = Math.max(edge(tl, tr), edge(bl, br));
+  const down = Math.max(edge(tl, bl), edge(tr, br));
+  return { short: Math.min(across, down), long: Math.max(across, down) };
+}
+
+/**
+ * Framing over each hold (the windows {@link scoreVisibility} judges, from
+ * when the page was *presented* — a hold the scripted user came in on,
+ * `marks.follow`, counts from before the approach):
+ *
+ * - `fillAtStart` / `fillAtReady` — the page's fill (its reach along the
+ *   visible region's limiting axis, as the app measures it) when presented
+ *   and when the ready cue came on; `toReadyMs` — presented → cue on;
+ * - `closerMs` "Aproxime" shown, `closerWrongMs` shown over a page plainly
+ *   big enough ({@link FRAMING_CLEAR} past the exit line), `moveBackMs`
+ *   "Afaste um pouco" shown, `otherMs` any other hint, `changes` the hint's
+ *   changes inside the hold;
+ * - the session's "Aproxime" onsets with the page's fill then (`closerOnsets`)
+ *   — near ones get "Aproxime mais um pouco";
+ * - every capture: the page's fill at the tap and its size in the field
+ *   phone's still ({@link fieldPagePixels}) and the dpi that is for A4.
+ */
+export function scoreFraming(script, record, gtAt, captures, visibility) {
+  const marks = script.marks ?? {};
+  const t0 = record.startedAt;
+  const at = (cameraMs) => t0 + cameraMs;
+  const region = regionAt(record);
+  const series = hintSeries(record);
+  const follow = marks.follow ?? [];
+  const fillAt = (t) => {
+    const gt = gtAt(t);
+    if (gt === undefined || gt === null) return null;
+    return framingMeasure("fill", inRegionPoints(toPoints(gt), region(t)));
+  };
+  const holds = (visibility?.holds ?? []).map((h) => {
+    const approach = follow.find((f) => f.arriveAt === h.from || f.from === h.from) ?? null;
+    const presented = approach === null ? h.from : approach.from;
+    const w = { closerMs: 0, closerWrongMs: 0, moveBackMs: 0, otherMs: 0, ms: 0 };
+    for (let t = at(presented); t < at(h.to); t += 50) {
+      w.ms += 50;
+      const key = hintAt(series, t);
+      if (key === null) continue;
+      if (key === "move-closer") {
+        w.closerMs += 50;
+        const fill = fillAt(t);
+        if (fill !== null && fill >= FRAMING_RULE.exit + FRAMING_CLEAR) w.closerWrongMs += 50;
+      } else if (key === "move-back") w.moveBackMs += 50;
+      else w.otherMs += 50;
+    }
+    const changes = series.filter((e) => e.t > at(presented) && e.t < at(h.to)).length;
+    return {
+      from: presented,
+      to: h.to,
+      approached: approach?.approached === true,
+      approach,
+      fillAtStart: fillAt(at(presented)),
+      reached: h.reached,
+      toReadyMs: h.onsetAt === null ? null : Math.max(0, h.onsetAt - presented),
+      fillAtReady: h.onsetAt === null ? null : fillAt(at(h.onsetAt)),
+      changes,
+      ...w,
+    };
+  });
+  const closerOnsets = series.filter((e) => e.key === "move-closer").map((e) => ({ t: e.t - t0, fill: fillAt(e.t) }));
+  const shots = captures.map((c) => {
+    const gt = gtAt(at(c.tapAt));
+    if (gt === undefined || gt === null) return { trigger: c.trigger, tapAt: c.tapAt, fill: null, px: null, dpi: null };
+    const points = toPoints(gt);
+    const px = fieldPagePixels(points, script.frame);
+    return { trigger: c.trigger, tapAt: c.tapAt, fill: fillAt(at(c.tapAt)), px, dpi: px.short / A4_SHORT_IN };
+  });
+  return { rule: FRAMING_RULE, holds, closerOnsets, captures: shots };
 }

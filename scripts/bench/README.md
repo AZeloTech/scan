@@ -828,6 +828,28 @@ screen. `--frame-by sensor` frames in the whole frame, as every run before
 did (and `standard` keeps doing by default, so its numbers stay comparable).
 The view is logged and is part of the frame-cache key.
 
+**The scripted user holds the page as people do, and follows "Aproxime"**
+(`followHint`, `emulator/session.js`). In every framed hold the page is held
+at the size people hold it at unprompted — 55–72 % of the visible region's
+reach (`NATURAL_FILL`, from the owner's field run), seeded per hold. A hold
+whose page the app would call too far gets an approach, as a person answers
+the hint: 0.7–1.2 s after the hold starts they come in over 0.7–1.2 s,
+re-centring the page on screen, to a little past the line the hint clears
+at (×1.02–1.08), or as close as their tremor leaves the corners clear of
+the edge — and hold there; the ready window and the `stable` mark start at
+the arrival (`marks.follow` records each approach). `--follow` names the
+rule followed: `fill` (default: the app's own, `FILL_ENTER` / `FILL_EXIT`,
+mirrored as `FOLLOW_RULES` and held to the source by `session.test.mjs`),
+`area` (the rule before it: `--follow area` against a build of that time
+measures "before" with the same people), `fill:ENTER:EXIT` (a candidate) or
+`off` (the script as written). `hover-far` swings across whichever line is
+followed. The report's framing numbers (`scoreFraming`) give, per hold, the
+page's fill when presented and at the ready cue, the time from presenting
+to the cue, "Aproxime" shown and shown over a page plainly big enough, the
+hint's changes, and for every capture the page's size in the Galaxy S25
+Ultra's still (its 4080×3060 photo cut to the preview's field of view) and
+the dpi that is for A4.
+
 `--stream-scale N` delivers every frame scaled up N× (`--stream 720x1280
 --stream-scale 3` is a 2160×3840 stream, what a 4K phone camera negotiates):
 the scene and its truth are the same; only the pixels the app grabs and
@@ -857,6 +879,10 @@ own pixels, embedded as-is (`/DCTDecode`, one PDF unit per pixel, rung 0);
 and it is the drawn page at the full resolution of its source (±3 %). Then
 girar + cantos + acabamento through the real store and render pipeline: every
 render from the canonical, at the canonical's size — no generational shrink.
+Then the size ladder: the `s25` page again under a host's `maxBytes` (by
+default 97, 80 and 60 % of its own PDF; `--budget x0.5,300000`, or
+`--no-ladder`): each must fit, a quality rung must embed every pixel of the
+final, and a budget the as-reviewed PDF meets must not step down.
 `--case s25,50mp`, `--no-edits`, `--headed`. Output: `.bench-out/quality-*/`.
 
 ## WebKit (`npm run bench:webkit`)

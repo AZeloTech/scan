@@ -172,7 +172,8 @@ pixel ratio, safe-area insets, vibration support), the camera coming up
 (stream size, time to a live preview, torch support), the detection lane and
 why, the live loop sampled at most twice in any second (detection time and median,
 cadence, frame age, found / locked / ready, and the HUD's `why:` reason),
-the visible region, hints shown and for how long, the ready cue on and off,
+the visible region, hints shown and for how long and the ready cue on and
+off (each with `fill`, the page's reach across the viewfinder at that moment),
 auto-capture's countdown, cancellations (with the reason), fires (time from a
 steady page) and re-arming, each capture (manual or automatic, the photo as
 it arrived, the size it was asked for, the stream size, the part of the photo
@@ -314,6 +315,22 @@ screen taller than the stream, the full-bleed viewfinder shows the stream's
 whole height either way, so the angle on screen is the same, and a 4:3
 stream only carries more margin off screen — which a photo taken from the
 preview frame (Safari has no `ImageCapture`) keeps.
+
+**How close.** "Aproxime" asks for the page to fill most of what the
+camera shows — not most of its area (a tall phone's viewfinder is about
+0.46 as wide as it is tall and an A4 page 0.71, so a page as big as the
+screen allows still covers only ~65 % of it) but most of its *reach*: the
+page's extent along the viewfinder's limiting axis (its bounding box's
+larger share of the width or the height). Under 78 % the hint comes up,
+and it goes once the page reaches 83 % (between the two lines, whatever
+was showing stays — no ping-pong); a page nearly there (60 % or more when
+the hint appears) reads "Aproxime mais um pouco". Above that band there is
+room to hold the page before "Afaste um pouco" (a corner within 1.5 % of
+the edge). The ready cue — and so auto-capture — waits for it; the shutter
+does not: a photo can be taken at any size. Why it matters: the photo's
+resolution goes to the page in proportion to how much of the frame it
+fills (on a Galaxy S25 Ultra a page across 54 % of the photo's width is
+~125–150 dpi for A4; held as asked, ~190 dpi).
 
 **What the camera shows is what is judged.** "Afaste um pouco", "Aproxime",
 the ready cue and auto-capture judge the page against the part of the frame

@@ -19,7 +19,7 @@ freezes at 1.0.
   reason is reported. Only a source larger than the browser can draw is fitted
   (iOS/iPadOS WebKit: 16,777,216 px of area; elsewhere 268,435,456 px, 32,767
   px a side), and that is reported too. The canonical is written at q95 and
-  the final at q92 (was q92/q85); the PDF embeds the final's own bytes at its
+  the final at q95 (was q92/q85); the PDF embeds the final's own bytes at its
   own pixels, and the size ladder (only with `maxBytes`) lowers quality before
   it ever lowers resolution. `onDiagnostics` reports the size at every stage:
   `capture` (still, request, stream, kept field of view, canonical bytes and
@@ -73,6 +73,22 @@ freezes at 1.0.
   where there is a real hover.
 
 ### Changed
+- **"Aproxime" asks for a page that fills the viewfinder.** The hint used to
+  come up only for a page under 14 % of the view's area; the field showed
+  pages held across about half of the photo's width (~125–150 dpi for A4 on
+  a Galaxy S25 Ultra). Now it judges the page's reach along the viewfinder's
+  limiting axis (`fillShare`: its bounding box's larger share of the visible
+  width or height — an area target could never be met on a tall screen):
+  "Aproxime" under 78 %, gone at 83 %, worded "Aproxime mais um pouco" for a
+  page already at 60 % or more when it appears. The ready cue and
+  auto-capture wait for it; the shutter never does. While "Aproxime" or
+  "Afaste um pouco" is up, the page moving is the person doing as asked:
+  the slot clears instead of switching to "Segure firme" (the ready cue
+  still waits for stillness). `onDiagnostics`' `hint` and `ready` events
+  carry `fill`, and the HUD shows it.
+- **The final JPEG is q95** (was q92), the same as the canonical; the size
+  ladder for a host's `maxBytes` gains a q92 rung before q85 (quality
+  still goes before any pixel).
 - **Deleting a page takes one tap and can be undone.** The page editor's bin
   no longer asks for confirmation: the page leaves at once and a toast,
   "Página excluída · Desfazer", offers it back for 5 s (not dismissed while

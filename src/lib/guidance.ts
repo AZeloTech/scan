@@ -22,11 +22,14 @@
  *     cut off or far away, when framing it comes first, as below;
  *  2. a corner at or past the edge of what the viewfinder shows —
  *     "Afaste um pouco";
- *  3. the page small in the viewfinder — "Aproxime";
+ *  3. the page not filling the viewfinder — "Aproxime" ("Aproxime mais um
+ *     pouco" when it already nearly does: {@link FILL_NEAR});
  *  4. too dark — "Pouca luz" (with the torch offered where the camera has one);
  *  5. a reflection washing out part of the page — "Reflexo — incline o
  *     celular";
- *  6. a found sheet that keeps moving, or a blurred frame — "Segure firme";
+ *  6. a found sheet that keeps moving, or a blurred frame — "Segure firme"
+ *     (not the moment "Aproxime" or "Afaste um pouco" is answered: the page
+ *     moves because the person is moving it as asked);
  *  7. nothing: the page is ready.
  *
  * Each condition has an entry and an exit threshold (hysteresis), and the
@@ -92,13 +95,42 @@ export const BORDER_ENTER = 0.015;
 export const BORDER_EXIT = 0.03;
 
 /**
- * The page's share of the viewfinder under which it is too far: enter below
- * {@link AREA_ENTER}, leave above {@link AREA_EXIT}. A page held for a photo
- * covers 0.2–0.5 of the view in the bench's hold sessions (a receipt or an ID
- * card down to 0.19).
+ * How much of the viewfinder the page fills ({@link fillShare}: its reach
+ * along the view's limiting axis) under which it is too far: enter below
+ * {@link FILL_ENTER}, leave only at {@link FILL_EXIT} or more.
+ *
+ * Not an area: the viewfinder on a tall phone is about 0.46 as wide as it is
+ * tall and an A4 page 0.71, so a page as big as the screen can show it covers
+ * at most ~65 % of it — an area target of 70–80 % could never be met. Reach is
+ * what the PDF's resolution follows: on the Galaxy S25 Ultra the visible part
+ * of the 4080×3060 still is 2295 px wide, so a page across 54 % of it (the
+ * owner's field run, under the old area rule) is ~1240 px — 150 dpi for A4 —
+ * and across 85 % of it ~1950 px (235 dpi).
+ *
+ * The band from {@link FILL_EXIT} to "Afaste um pouco" ({@link BORDER_ENTER}:
+ * a corner within 1.5 % of the edge, i.e. a centred page reaching 97 %) is
+ * where a held page lives; the gap between enter and exit keeps a page held
+ * at the line from toggling the hint (set on the bench's hover and
+ * follow-the-hint sessions, `scripts/bench/README.md`).
  */
-export const AREA_ENTER = 0.14;
-export const AREA_EXIT = 0.17;
+export const FILL_ENTER = 0.78;
+export const FILL_EXIT = 0.83;
+
+/**
+ * At or above this fill when it appears, "Aproxime" is said as "Aproxime mais
+ * um pouco": the page is found and already nearly big enough — a small move
+ * is asked for, not a big one that overshoots into "Afaste um pouco". The
+ * wording is chosen when the hint appears and kept while it shows (no text
+ * change under the person's eyes).
+ */
+export const FILL_NEAR = 0.6;
+
+/**
+ * A page the model is sure of but could not take as a found sheet is a *far*
+ * page (`hooks/useLiveDetect.ts`'s candidate) only while it covers less than
+ * this share of the view: under the model's own coverage floor.
+ */
+export const FAR_CANDIDATE_AREA = 0.17;
 
 /**
  * Too dark to frame by: the frame's brightest twentieth (its 95th luma
@@ -267,6 +299,40 @@ function lerpAt(a: number[], b: number[], t: number): number[] {
 }
 
 /**
+ * How much of the view the page fills along its limiting axis: the larger of
+ * its extent's share of the view's width and of its height (its bounding box,
+ * clipped to the view). An upright A4 page in a tall phone's viewfinder is
+ * width-limited, a long receipt height-limited, a page turned sideways
+ * width-limited again — each reads how far it is from filling the screen.
+ *
+ * The bounding box, not the quad's side lengths: a page turned in the view
+ * reaches the edges with its corners before its sides are as long as the
+ * view, so a side-length target could ask for a size no framing allows ("Aproxime"
+ * up to the moment "Afaste um pouco" takes over, and back). A box inside the
+ * view is exactly four corners inside it, so 1 is always reachable.
+ */
+export function fillShare(quad: NormalizedQuad): number {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const key of CORNER_KEYS) {
+    const { x, y } = quad[key];
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  }
+  const clip = (v: number) => Math.min(1, Math.max(0, v));
+  return Math.max(clip(maxX) - clip(minX), clip(maxY) - clip(minY));
+}
+
+/** Whether the page fills too little of the view ({@link FILL_ENTER} / {@link FILL_EXIT}); `showing` is the hint up already. */
+export function tooFar(quad: NormalizedQuad, showing: boolean): boolean {
+  return fillShare(quad) < (showing ? FILL_EXIT : FILL_ENTER);
+}
+
+/**
  * How much a sheet moved lately: over its recent readings (time, quad in the
  * visible crop), the largest corner move between the newest and any reading
  * within `windowMs` before it, as a share of the view's diagonal (`aspect` =
@@ -345,7 +411,7 @@ export function rawHint(input: GuidanceInput, current: HintKey | null): HintKey 
     // first, as for a found one), too dark to see into, or nothing at all.
     if (sheet !== null) {
       if (input.cutOff === true || borderMargin(sheet) < (keep("move-back") ? BORDER_EXIT : BORDER_ENTER)) return "move-back";
-      if (areaShare(sheet) < (keep("move-closer") ? AREA_EXIT : AREA_ENTER)) return "move-closer";
+      if (tooFar(sheet, keep("move-closer"))) return "move-closer";
     }
     if (dark) return "low-light";
     const quiet = input.now - Math.max(input.since, input.sheetSeenAt ?? input.since);
@@ -354,10 +420,15 @@ export function rawHint(input: GuidanceInput, current: HintKey | null): HintKey 
   // A found sheet whose paper runs on past the viewfinder's edge is cut off
   // too, wherever the model drew its corners.
   if (input.cutOff === true || borderMargin(sheet) < (keep("move-back") ? BORDER_EXIT : BORDER_ENTER)) return "move-back";
-  if (areaShare(sheet) < (keep("move-closer") ? AREA_EXIT : AREA_ENTER)) return "move-closer";
+  if (tooFar(sheet, keep("move-closer"))) return "move-closer";
   if (dark) return "low-light";
   if (input.glare !== null && input.glare >= (keep("glare") ? GLARE_EXIT : GLARE_ENTER)) return "glare";
   const shaky = input.motion !== null && input.motion > (keep("hold-still") ? SHAKY_EXIT : SHAKY_ENTER);
+  // The page moving while "Aproxime" / "Afaste um pouco" is up is the person
+  // doing as asked, not a shaking hand: the slot clears instead of trading
+  // one hint for "Segure firme" (the ready cue waits for stillness all the
+  // same). Once it has cleared, a hand still moving gets "Segure firme".
+  if (shaky && input.sharp !== false && (current === "move-closer" || current === "move-back")) return null;
   if (shaky || input.sharp === false) return "hold-still";
   return null;
 }

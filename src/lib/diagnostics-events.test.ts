@@ -45,8 +45,8 @@ const EVERY_PAYLOAD: ScanDiagnosticsPayload[] = [
     why: "auto: countdown 40 %",
   },
   { type: "visible", x: 0.2, y: 0, width: 0.6, height: 1, fit: "cover" },
-  { type: "hint", id: "move-closer", shown: false, ms: 1200 },
-  { type: "ready", on: false, ms: 900, why: "camera moved (watch 0.071)" },
+  { type: "hint", id: "move-closer", shown: false, ms: 1200, fill: 0.712 },
+  { type: "ready", on: false, ms: 900, why: "camera moved (watch 0.071)", fill: 0.846 },
   { type: "auto", phase: "fire", ms: 540, reason: null },
   {
     type: "capture",

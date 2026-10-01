@@ -343,10 +343,14 @@ export type ScanDiagnosticsPayload =
     }
   /** The part of the frame the person can see changed (fractions of the frame). */
   | { type: "visible"; x: number; y: number; width: number; height: number; fit: string }
-  /** A hint appeared, or went away after `ms`. */
-  | { type: "hint"; id: string; shown: boolean; ms: number | null }
-  /** The ready cue came on, or went off after `ms` (with why, when it is known). */
-  | { type: "ready"; on: boolean; ms: number | null; why: string | null }
+  /**
+   * A hint appeared, or went away after `ms`. `fill`: how much of the visible
+   * region the page filled along its limiting axis at that moment (0–1; null
+   * with no page) — what "Aproxime" is judged on.
+   */
+  | { type: "hint"; id: string; shown: boolean; ms: number | null; fill: number | null }
+  /** The ready cue came on, or went off after `ms` (with why, when it is known); `fill` as for `hint`. */
+  | { type: "ready"; on: boolean; ms: number | null; why: string | null; fill: number | null }
   /**
    * Auto-capture: its countdown started, was cancelled (`reason`; `ms` into
    * it), fired (`ms` since the page was steady and ready), or re-armed for
