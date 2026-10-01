@@ -330,7 +330,7 @@ the edge). The ready cue — and so auto-capture — waits for it; the shutter
 does not: a photo can be taken at any size. Why it matters: the photo's
 resolution goes to the page in proportion to how much of the frame it
 fills (on a Galaxy S25 Ultra a page across 54 % of the photo's width is
-~125–150 dpi for A4; held as asked, ~190 dpi).
+~125–150 dpi for A4; held as asked, the page gets ~40 % more pixels each way — ~175–210 dpi).
 
 **What the camera shows is what is judged.** "Afaste um pouco", "Aproxime",
 the ready cue and auto-capture judge the page against the part of the frame
