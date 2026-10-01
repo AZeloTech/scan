@@ -184,7 +184,7 @@ class FakeCodec {
           rung: 0,
           // The writer embeds each page's final as it is: its own pixels.
           embedded: pages.map((page) => ({ width: 1240, height: 1754, bytes: page.jpeg.size })),
-          quality: 0.92,
+          quality: 0.95,
         };
       },
     };
@@ -620,7 +620,7 @@ test("the diagnostics hear every render's sizes and every page the PDF embeds", 
     assert.equal(event.page, 1);
     assert.deepEqual(event.warped, { width: 1240, height: 1754 });
     assert.equal(event.final.width, 1240);
-    assert.equal(event.final.quality, 0.92);
+    assert.equal(event.final.quality, 0.95);
     assert.ok(event.final.bytes > 0);
   }
   for (const request of codec.requests) assert.equal(request.canonical, canonical, "rendered from the canonical");

@@ -100,6 +100,9 @@ export interface SizeRung {
  */
 export const SIZE_LADDER: readonly SizeRung[] = [
   { quality: encodeQuality("final"), longEdge: Number.POSITIVE_INFINITY },
+  // The final is q95; a budget that held the q92 pages it used to be steps
+  // down only this far, not straight to q85.
+  { quality: 0.92, longEdge: Number.POSITIVE_INFINITY },
   { quality: 0.85, longEdge: Number.POSITIVE_INFINITY },
   { quality: 0.75, longEdge: Number.POSITIVE_INFINITY },
   { quality: 0.65, longEdge: Number.POSITIVE_INFINITY },

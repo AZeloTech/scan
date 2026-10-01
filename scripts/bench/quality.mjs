@@ -12,9 +12,15 @@
  * render must come from the canonical, at the canonical's pixel size — no
  * generational shrink.
  *
+ * With the `s25` case run, the size ladder too (`--budget`): the same page
+ * through a host's `maxBytes` — by default 97 %, 80 % and 60 % of that
+ * case's own PDF — each must fit, quality must go before any pixel does
+ * (a quality rung embeds every pixel of the final), and a budget the
+ * as-reviewed PDF meets must not step down at all.
+ *
  * Synthetic only: the scene is drawn in code. Output under `.bench-out/`.
  *
- *   node scripts/bench/quality.mjs [--case s25|50mp|safari|timeout|closest …] [--headed]
+ *   node scripts/bench/quality.mjs [--case s25|50mp|safari|timeout|closest …] [--budget x0.97,x0.7,250000 …] [--no-ladder] [--headed]
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -138,17 +144,23 @@ async function pdfImages(base64) {
   });
 }
 
+/** The ladder's default budgets: shares of the `s25` case's own PDF. */
+const DEFAULT_BUDGETS = ["x0.97", "x0.8", "x0.6"];
+
 function parseArgs(argv) {
   const cases = [];
   let headed = false;
   let edits = true;
+  let budgets = DEFAULT_BUDGETS;
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--case") cases.push(...argv[++i].split(","));
     else if (argv[i] === "--headed") headed = true;
     else if (argv[i] === "--no-edits") edits = false;
+    else if (argv[i] === "--no-ladder") budgets = [];
+    else if (argv[i] === "--budget") budgets = argv[++i].split(",");
     else throw new Error(`unknown argument ${argv[i]}`);
   }
-  return { cases: cases.length > 0 ? cases : Object.keys(CASES), headed, edits };
+  return { cases: cases.length > 0 ? cases : Object.keys(CASES), headed, edits, budgets };
 }
 
 const options = parseArgs(process.argv.slice(2));
@@ -283,6 +295,47 @@ try {
     if (errors.length > 0) failures.push(`${name}: page errors: ${errors.join(" | ")}`);
     results.push({ case: name, title: spec.title, ms: Date.now() - started, pdfBytes: run.bytes, streamCap: caps, streamSizes: run.streamSizes, takePhotoCalls: run.stillCalls, pages });
     await context.close();
+  }
+
+  // The size ladder: the s25 page under a host's `maxBytes`.
+  const reference = results.find((r) => r.case === "s25");
+  if (options.budgets.length > 0 && reference !== undefined) {
+    const spec = CASES.s25;
+    const asReviewed = reference.pdfBytes;
+    for (const text of options.budgets) {
+      const budget = text.startsWith("x") ? Math.round(asReviewed * Number(text.slice(1))) : Number(text);
+      const label = `ladder ${text} (${Math.round(budget / 1024)} KB)`;
+      const context = await browser.newContext(PHONE);
+      const page = await context.newPage();
+      const errors = [];
+      page.on("pageerror", (error) => errors.push(String(error)));
+      await page.goto(`${server.url}/page-quality.html`);
+      await page.waitForFunction(() => window.__qualityReady === true, null, { timeout: 60_000 });
+      let run = null;
+      try {
+        run = await page.evaluate((args) => window.__quality.flow(args), { sensor: spec.sensor, stream: STREAM, still: spec.still, maxBytes: budget });
+      } catch (error) {
+        failures.push(`${label}: ${error.message}`);
+      }
+      if (run !== null) {
+        const build = run.events.find((e) => e.type === "build") ?? null;
+        const render = run.events.filter((e) => e.type === "render").at(-1) ?? null;
+        const image = (await pdfImages(run.pdf))[0]?.images[0] ?? null;
+        check(run.bytes <= budget, `${label}: the PDF is ${run.bytes} bytes, over the budget`);
+        if (budget >= asReviewed) check(build?.rung === 0, `${label}: a budget the as-reviewed PDF meets stepped down to rung ${build?.rung}`);
+        else check((build?.rung ?? 0) > 0, `${label}: over budget at rung 0 but not stepped down`);
+        // Quality before pixels: a rung that kept the final's size is a quality rung.
+        const kept = image !== null && render !== null && image.width === render.final.width && image.height === render.final.height;
+        check(kept || build?.resampled === true, `${label}: the image changed size without saying it resampled`);
+        log(
+          `quality: ${label} — rung ${build?.rung} q${build?.quality} · ${build?.resampled ? "resampled" : "every pixel"} · ` +
+            `PDF image ${image?.width}×${image?.height} of the final's ${render?.final?.width}×${render?.final?.height} · ${Math.round(run.bytes / 1024)} KB`,
+        );
+        results.push({ case: `ladder-${text}`, budget, asReviewed, pdfBytes: run.bytes, rung: build?.rung ?? null, quality: build?.quality ?? null, resampled: build?.resampled ?? null, image, final: render?.final ?? null });
+      }
+      if (errors.length > 0) failures.push(`${label}: page errors: ${errors.join(" | ")}`);
+      await context.close();
+    }
   }
 
   if (options.edits) {

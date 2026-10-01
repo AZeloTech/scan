@@ -358,7 +358,7 @@ test("the chosen rung is recorded in the subject", async () => {
   const metadata = await metadataOf(result.blob);
 
   assert.ok(result.rung > 0);
-  assert.match(metadata.subject ?? "", /Size ladder: rung 1, q85, full resolution\./);
+  assert.match(metadata.subject ?? "", /Size ladder: rung 1, q92, full resolution\./);
 });
 
 test("when the floor still overshoots, no file is produced", async () => {

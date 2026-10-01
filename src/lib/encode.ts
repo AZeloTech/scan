@@ -54,18 +54,21 @@ export type EncodeRole = "canonical" | "final" | "thumb";
  * | canonical → final | canonical | final (in the PDF) | PSNR |
  * |---|---|---|---|
  * | q0.92 → q0.85 (before) | 2.78 MB | 2.34 MB | 33.6 dB |
- * | q0.95 → q0.92 (now)    | 3.77 MB | 3.22 MB | 36.5 dB |
- * | q0.95 → q0.95          | 3.77 MB | 3.76 MB | 39.8 dB |
+ * | q0.95 → q0.92          | 3.77 MB | 3.22 MB | 36.5 dB |
+ * | q0.95 → q0.95 (now)    | 3.77 MB | 3.76 MB | 39.8 dB |
  * | single q1.0 (ceiling)  | —       | 8.58 MB | 52.7 dB |
  *
- * q0.95/q0.92 buys ~3 dB (half the squared error) for ~38 % more bytes per
- * page; q1.0 costs 2.7× the bytes for noise the camera made. The canonical is
- * never shipped (the store holds it, the PDF gets the final), so its extra
- * megabyte is memory, not file size.
+ * q0.95/q0.92 bought ~3 dB (half the squared error) for ~38 % more bytes per
+ * page over the old chain; the final at q0.95 buys ~3 dB more for ~17 %
+ * more (the owner's call, once the page fills more of the frame and the
+ * pixels are worth keeping); q1.0 costs 2.7× the bytes for noise the camera
+ * made. The canonical is never shipped (the store holds it, the PDF gets the
+ * final), so its extra megabyte is memory, not file size. A host that sets
+ * `maxBytes` gets q0.92 back first (`SIZE_LADDER`, `lib/pdf.ts`).
  */
 const JPEG_QUALITY: Record<EncodeRole, number> = {
   canonical: 0.95,
-  final: 0.92,
+  final: 0.95,
   thumb: 0.8,
 };
 

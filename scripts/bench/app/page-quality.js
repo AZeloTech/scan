@@ -3,7 +3,7 @@
  *
  * `window.__quality` for `scripts/bench/quality.mjs`:
  *
- *   flow({ sensor, stream, still })  — mount the real `<ScanFlow>` on a fake
+ *   flow({ sensor, stream, still, maxBytes }) — mount the real `<ScanFlow>` on a fake
  *     camera, take one page with the shutter, confirm it, open step 2, tap
  *     "Gerar PDF", and hand back the PDF (base64) and every diagnostics event.
  *   edits({ sensor, stream })        — the real render pipeline, through the
@@ -249,7 +249,7 @@ function blobToBase64(blob) {
 
 /* ── the flow ───────────────────────────────────────────────────────────── */
 
-async function flow({ sensor, stream, still = "ok", pages = 1, restore = "ok" }) {
+async function flow({ sensor, stream, still = "ok", pages = 1, restore = "ok", maxBytes = null }) {
   const camera = installCamera({ sensor, stream, still, restore });
   const events = [];
   let completed = null;
@@ -260,6 +260,7 @@ async function flow({ sensor, stream, still = "ok", pages = 1, restore = "ok" })
       assetBaseUrl: "/assets/",
       lang: "pt-BR",
       onDiagnostics: (event) => events.push(event),
+      ...(maxBytes === null ? {} : { maxBytes }),
       onComplete: (result) => {
         completed = result;
       },
