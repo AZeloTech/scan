@@ -330,7 +330,7 @@ test("auto-capture counts down on a ready page and fires once per page", () => {
   for (let t = 4000; t < 9000; t += 100) assert.equal(step(t, 4000).fire, false);
 });
 
-test("auto-capture re-arms on another page, a page gone, or a changed scene — never on time and motion over the same page", () => {
+test("auto-capture re-arms on another page or a page gone — never on time and motion over the same page", () => {
   const elsewhere = rect(0.35, 0.3, 0.95, 0.85);
   const fire = (auto: AutoCapture, at: number) => auto.update({ now: at + AUTO_FIRE_MS, readyOnSince: at, sheet: page, moving: false, aspect: 1.5, confirmedAt: at + AUTO_FIRE_MS - AUTO_QUIET_MS }).fire;
 
@@ -354,14 +354,8 @@ test("auto-capture re-arms on another page, a page gone, or a changed scene — 
   assert.equal(fire(shaken, 0), true);
   for (let t = 1000; t <= 9000; t += 100) shaken.update({ now: t, readyOnSince: null, sheet: page, moving: t % 300 === 0, aspect: 1.5 });
   assert.equal(shaken.armed, false);
-  const swapped = new AutoCapture();
-  assert.equal(fire(swapped, 0), true);
-  swapped.update({ now: 3000, readyOnSince: null, sheet: page, moving: false, aspect: 1.5, sceneChange: 0.04 });
-  assert.equal(swapped.armed, false);
-  swapped.update({ now: 3100, readyOnSince: null, sheet: page, moving: false, aspect: 1.5, sceneChange: 0.2 });
-  assert.equal(swapped.armed, true);
   // A ready cue that was already on counts from the re-arm, not from before it.
-  assert.equal(swapped.update({ now: 3110, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: 3100 }).fire, false);
+  assert.equal(gone.update({ now: 1600 + REARM_GONE_MS + 10, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: 1600 + REARM_GONE_MS }).fire, false);
 });
 
 test("auto-capture's final look runs during the countdown: a frame read well into it, fresh at the fire (R3)", () => {

@@ -62,7 +62,7 @@
  * have held {@link AUTO_FIRE_MS} — and a detection pass on a frame sampled
  * after that has found the page where it was — it fires, once per
  * page. After a fire it waits for the page to change (a sheet somewhere
- * else, no sheet for a second, or the scene changed), counted from when the
+ * else, or no sheet for a second), counted from when the
  * viewfinder came back from the confirm screen, before it may fire again —
  * the phone moving over the same page is not another page. It goes through
  * the same capture as a tap — capture priority, refinement, the confirm
@@ -390,15 +390,13 @@ export function readingsAgree(readings: readonly { at: number; quad: NormalizedQ
  * diagonal) from the one taken — the live loop's own jump threshold — …
  */
 export const REARM_JUMP = 0.08;
-/** …or no sheet for this long while the viewfinder was live… */
-export const REARM_GONE_MS = 1000;
 /**
- * …or the scene itself changed since the fire (a page swapped in at much
- * the same place while the confirm screen was up): the viewfinder's 24×24
- * luma against the one at the fire (`frameMotionScore`, `lib/frame-motion.ts`)
- * at least this far apart — the live loop's own "the scene moved" line.
+ * …or no sheet for this long while the viewfinder was live. Nothing else:
+ * one capture per presentation (R4). The viewfinder's luma changing, or the
+ * phone moving over the same page, is not another page — both re-armed
+ * until 5b, and a page held through the confirm screen was taken twice.
  */
-export const REARM_SCENE_CHANGE = 0.1;
+export const REARM_GONE_MS = 1000;
 
 /**
  * The part of the camera frame the viewfinder shows (its object-cover crop),
@@ -1075,7 +1073,6 @@ export class AutoCapture {
     sheet: NormalizedQuad | null;
     moving: boolean;
     aspect: number;
-    sceneChange?: number | null;
     confirmedAt?: number | null;
     /** The ready cue's full conditions hold right now ({@link ReadyCue.steady}); false: no fire until they do. */
     steady?: boolean;
@@ -1211,20 +1208,18 @@ export class AutoCapture {
   }
 
   /**
-   * Another page, after a fire: a sheet somewhere else, the page gone for
-   * {@link REARM_GONE_MS}, or the scene changed. The phone moving over the
-   * same page — or a corner's reading jittering, which reads as moving — is
-   * not another page however long it lasts: until 5b that plus two seconds
-   * re-armed, and a page held through the confirm screen was taken twice
-   * (bench present-auto, 5–7 s after the first fire).
+   * Another page, after a fire: a sheet somewhere else, or the page gone
+   * for {@link REARM_GONE_MS}. The phone moving over the same page — or a
+   * corner's reading jittering, which reads as moving — or the view's light
+   * changing is not another page however long it lasts: until 5b "moved plus
+   * two seconds" and a whole-view luma change re-armed, and a page held
+   * through the confirm screen was taken twice (bench present-auto, 5–7 s
+   * after the first fire). A page swapped in at the same place without
+   * leaving the view is for the shutter (or 5e's page identity).
    */
-  private watchForAnotherPage({ now, sheet, aspect, sceneChange }: { now: number; sheet: NormalizedQuad | null; aspect: number; sceneChange?: number | null }): void {
+  private watchForAnotherPage({ now, sheet, aspect }: { now: number; sheet: NormalizedQuad | null; aspect: number }): void {
     const fired = this.fired;
     if (fired === null) return;
-    if (sceneChange !== undefined && sceneChange !== null && sceneChange >= REARM_SCENE_CHANGE) {
-      this.fired = null;
-      return;
-    }
     if (sheet !== null) {
       this.seenSinceFire = true;
       this.goneSince = null;

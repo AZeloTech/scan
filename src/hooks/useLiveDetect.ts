@@ -632,8 +632,6 @@ interface Runtime {
   glare: number | null;
   /** A page suspected but not found (see {@link CANDIDATE_READINGS}), in frame fractions. */
   candidate: { quad: NormalizedQuad; at: number; hits: number; cutOff: boolean } | null;
-  /** The motion probe's luma at the last auto-capture: a scene changed since re-arms it. */
-  firedLuma: Uint8ClampedArray | null;
   /** When a page (found or suspected) was last seen. */
   sheetSeenAt: number | null;
   /** The auto-capture countdown on the brackets (0–1), null when not counting. */
@@ -788,7 +786,6 @@ function freshRuntime(): Runtime {
     sheetSeenAt: null,
     countdown: null,
     dropFast: false,
-    firedLuma: null,
     confirmedAt: null,
     motionAt: null,
     suspectAt: null,
@@ -1559,7 +1556,6 @@ export function useLiveDetect({
       diagRef.current?.emit({ type: "auto", phase: "cancel", ms: now - memo.countdownAt, reason: "manual capture" });
       memo.countdownAt = null;
     }
-    if (sheet !== null) runtime.firedLuma = runtime.motionHistory[runtime.motionHistory.length - 1]?.luma ?? null;
   }, []);
 
   const endCapture = React.useCallback(() => {
@@ -1634,7 +1630,6 @@ export function useLiveDetect({
     // page" is judged from now, against the scene as it is now — the first
     // motion probe of this run replaces the one from before the capture.
     guidanceRef.current.auto.resume(performance.now());
-    runtime.firedLuma = null;
     // A probe kept across a pause would pair two frames minutes apart and read
     // the difference as a swing; the loop re-learns stillness from scratch.
     runtime.motionHistory = [];
@@ -2926,16 +2921,12 @@ export function useLiveDetect({
         guidance.auto.armed &&
         (raw === null || raw === "hold-still" || (FRAMING_HINTS.has(raw) && lockedSince !== null && now - lockedSince <= BOOST_FRAMING_MS));
       if (autoCaptureRef.current) {
-        const latest = runtime.motionHistory[runtime.motionHistory.length - 1]?.luma ?? null;
-        // Back from the confirm screen, the scene is compared with itself as it was then.
-        if (!guidance.auto.armed && runtime.firedLuma === null) runtime.firedLuma = latest;
         const auto = guidance.auto.update({
           now,
           readyOnSince: guidance.settled.onSince,
           sheet: tracking ? sheet : null,
           moving: motion !== null && motion > SHAKY_ENTER,
           aspect,
-          sceneChange: runtime.firedLuma === null || latest === null ? null : frameMotionScore(runtime.firedLuma, latest),
           confirmedAt: runtime.confirmedAt,
           steady: guidance.ready.steady,
           ready: guidance.ready.onSince !== null,
@@ -2982,7 +2973,6 @@ export function useLiveDetect({
           runtime.countdownStart = null;
         }
         if (fire) {
-          runtime.firedLuma = latest;
           runtime.lastFire = {
             at: now,
             marks: {
@@ -2996,7 +2986,6 @@ export function useLiveDetect({
             },
           };
         }
-        else if (guidance.auto.armed) runtime.firedLuma = null;
       }
       // "Mova o celular": which way, kept while the hint shows (`DirectionLatch`).
       // A corner under a control is uncovered by moving towards the control,
