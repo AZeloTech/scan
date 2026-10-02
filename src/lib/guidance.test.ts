@@ -18,6 +18,8 @@ import {
   coveredDirection,
   lastMovedAt,
   settledSince,
+  watchOnset,
+  WATCH_ONSET_MIN,
   shakeMotion,
   SHAKY_ENTER,
   SETTLE_WINDOW_MS,
@@ -784,4 +786,19 @@ test("'Mova o celular' with a corner under a control: towards the control, not b
   const crop = { x: 0, y: 0.1, width: 1, height: 0.7 };
   assert.equal(coveredDirection({ x: 0.3, y: 0.72, width: 0.4, height: 0.08 }, crop), "down");
   assert.equal(coveredDirection({ x: 0.3, y: 0.1, width: 0.4, height: 0.08 }, crop), "up");
+});
+
+test("the camera watch's onset: a jump over its own baseline on the page, under the fixed line", () => {
+  // The bench's whip (5b): a hold scoring 0.002–0.005, then 0.018 on a frame 83 ms into the pull.
+  const hold = [0.003, 0.002, 0.005, 0.004, 0.003];
+  assert.equal(watchOnset(0.018, hold), true);
+  assert.equal(watchOnset(0.008, hold), false);
+  // Under the floor, however quiet the hold: not motion.
+  assert.equal(watchOnset(WATCH_ONSET_MIN - 0.001, [0.001, 0.001, 0.001]), false);
+  // A textured desk whose tremor scores 0.015–0.04: its own baseline, not the floor, sets the line.
+  const busy = [0.015, 0.024, 0.011, 0.024, 0.038];
+  assert.equal(watchOnset(0.035, busy), false);
+  assert.equal(watchOnset(0.08, busy), true);
+  // Fewer than three scores on the page: no baseline yet.
+  assert.equal(watchOnset(0.04, [0.002, 0.002]), false);
 });

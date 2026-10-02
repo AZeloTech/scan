@@ -158,6 +158,7 @@ import {
   settledOn,
   settledSince,
   lastMovedAt,
+  watchOnset,
   coveredDirection,
   autoFrameAgeMax,
   readingsAgree,
@@ -675,8 +676,12 @@ interface Runtime {
   /** When the preview was last watched while the cue was on, and whether it has moved off the confirmed frame since. */
   watchAt: number;
   watchMoved: boolean;
+  /** The last look at the camera saw motion starting (`watchOnset`), under the fixed line. */
+  watchOnset: boolean;
   /** The last watch score (the bench's overlay probe). */
   watchScore: number | null;
+  /** The watch's recent scores on the held page (oldest first): its own baseline (`watchOnset`). */
+  watchScores: number[];
   /** Confirming readings in a row whose paper runs on past an edgeless side ({@link OPEN_READINGS}). */
   openHits: number;
   /** How much of the visible region the page (found or suspected) fills (`fillShare`), or null with none. */
@@ -797,7 +802,9 @@ function freshRuntime(): Runtime {
     watchBase: null,
     watchAt: Number.NEGATIVE_INFINITY,
     watchMoved: false,
+    watchOnset: false,
     watchScore: null,
+    watchScores: [],
     openHits: 0,
     fill: null,
     answer: null,
@@ -891,6 +898,7 @@ function clearTracking(runtime: Runtime, overlay: LiveOverlayRefs): void {
   runtime.stillWhy = null;
   runtime.watchBase = null;
   runtime.watchMoved = false;
+  runtime.watchScores = [];
   runtime.openHits = 0;
   overlay.bracketsHalo.current?.setAttribute("d", "");
   overlay.brackets.current?.setAttribute("d", "");
@@ -920,6 +928,7 @@ function invalidateConfirmation(runtime: Runtime, now: number): void {
   runtime.settledVerdict = false;
   runtime.watchBase = null;
   runtime.watchMoved = false;
+  runtime.watchScores = [];
   runtime.motionAt = now;
 }
 
@@ -1563,6 +1572,7 @@ export function useLiveDetect({
     runtime.sheetReadings = [];
     runtime.watchBase = null;
     runtime.watchMoved = false;
+    runtime.watchScores = [];
     measure();
   }, [measure]);
 
@@ -2964,7 +2974,7 @@ export function useLiveDetect({
             ? measured
               ? "auto: cancelled, corner uncertain"
               : "auto: cancelled, corners unmeasured"
-            : `auto: cancelled, camera moved (watch ${runtime.watchScore === null ? "–" : runtime.watchScore.toFixed(3)})`;
+            : `auto: cancelled, camera ${runtime.watchMoved ? "moved" : "starting to move"} (watch ${runtime.watchScore === null ? "–" : runtime.watchScore.toFixed(3)})`;
           // Not taken: the page is still owed its one fire.
           guidance.auto.retract();
           guidance.ready.update(false, false, now);
@@ -3084,12 +3094,21 @@ export function useLiveDetect({
       const seen = watchProbe(video);
       const score = seen === null ? null : frameMotionScore(base, seen);
       runtime.watchScore = score;
-      if (score !== null && score >= WATCH_MOVED) {
-        runtime.watchMoved = true;
+      // Motion starting, still under the fixed line: the score jumping over
+      // the watch's own baseline on this page (`watchOnset`).
+      const onset = score !== null && watchOnset(score, runtime.watchScores);
+      if (score !== null) {
+        runtime.watchScores.push(score);
+        if (runtime.watchScores.length > 8) runtime.watchScores.shift();
+      }
+      const moved = score !== null && score >= WATCH_MOVED;
+      if (moved) runtime.watchMoved = true;
+      if (onset || moved) {
         // A new motion epoch: auto-capture wants a frame read after this, fresh stillness and quiet (`AutoCapture`).
         runtime.motionAt = Math.max(runtime.motionAt ?? now, now);
       }
-      return !runtime.watchMoved;
+      runtime.watchOnset = onset;
+      return !runtime.watchMoved && !onset;
     }
 
     /** Whether the overlay has been sampled since the capture froze it. */

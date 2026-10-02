@@ -340,6 +340,28 @@ export function settledSince(readings: readonly { at: number; quad: NormalizedQu
   return settledOn(motionAt === null ? readings : readings.filter((r) => r.at > motionAt), aspect);
 }
 
+/**
+ * The camera watch against its own baseline: a score at least
+ * {@link WATCH_ONSET_RATIO} times the median of the watch's previous
+ * {@link WATCH_ONSET_HISTORY} scores on the held page (at least three of
+ * them), and over {@link WATCH_ONSET_MIN}, is motion starting — still under
+ * the watch's fixed line, which a textured desk's tremor alone can come near.
+ * Bench whip-off (5b): a fire 92 ms into a whip had the newest frame 83 ms
+ * in, scoring 0.018 against a hold that scored 0.002–0.005; on held pages,
+ * 2 % of the countdowns' samples crossed 3× their median.
+ */
+export const WATCH_ONSET_RATIO = 3;
+export const WATCH_ONSET_MIN = 0.012;
+export const WATCH_ONSET_HISTORY = 5;
+
+/** Motion starting, by {@link WATCH_ONSET_RATIO}: `score` against the watch's `previous` scores on this page (oldest first). */
+export function watchOnset(score: number, previous: readonly number[]): boolean {
+  if (previous.length < 3) return false;
+  const recent = previous.slice(-WATCH_ONSET_HISTORY).sort((a, b) => a - b);
+  const median = recent[Math.floor(recent.length / 2)];
+  return score > Math.max(WATCH_ONSET_MIN, WATCH_ONSET_RATIO * median);
+}
+
 /** The frame-age bound of the fire's final look for a loop reading every `intervalMs`. */
 export function autoFrameAgeMax(intervalMs: number): number {
   return Math.min(AUTO_FRAME_AGE_MAX_MS, Math.max(AUTO_FRAME_AGE_MS, 1.5 * intervalMs));
