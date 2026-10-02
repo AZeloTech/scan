@@ -222,7 +222,7 @@ function render(results) {
           "viewfinder box samples that moved or resized.",
       );
       out.push("");
-      out.push("| session | hint windows: correct / wrong / none (first correct p50 ms) | churn /s (fast) | hold hints | ready precision / recall / on no page ms | auto: fires / false / tremor / pages fired of / repeat / not owed / latency p50 ms | auto failed/severe of n · manual failed/severe of n | layout shifts |");
+      out.push("| session | hint windows: correct / wrong / none (first correct p50 ms) | churn /s (fast) | hold hints | ready precision / recall / on no page ms | auto: fires / false / tremor / pages fired of / repeat / not owed / latency p50 ms · at the shutter: unsafe (moving / cut / unverified) | auto failed/severe of n · manual failed/severe of n | layout shifts |");
       out.push("|---|---|---:|---:|---:|---:|---:|---:|");
       for (const [session, { all: a }] of guided) {
         const g = a.guidance;
@@ -232,7 +232,8 @@ function render(results) {
         out.push(
           `| ${session} | ${windows || "–"} | ${g.changesPerSecond === null ? "–" : g.changesPerSecond.toFixed(2)} (${g.fastChanges}) | ${pct(g.holdHintShare, 0)} | ` +
             `${pct(g.readyPrecision, 0)} / ${pct(g.readyRecall, 0)} / ${ms(g.readyNoPageMs)} | ` +
-            `${g.fires} / ${g.falseFires} / ${g.firesDuringTremor} / ${g.pagesFired} of ${g.pages} / ${g.repeatFires} / ${(g.firesInNoFire ?? 0) + (g.firesInHintWindow ?? 0)} / ${ms(g.fireLatencyP50)} | ` +
+            `${g.fires} / ${g.falseFires} / ${g.firesDuringTremor} / ${g.pagesFired} of ${g.pages} / ${g.repeatFires} / ${(g.firesInNoFire ?? 0) + (g.firesInHintWindow ?? 0)} / ${ms(g.fireLatencyP50)} · ` +
+            `${g.firesUnsafe ?? 0} (${g.firesMovingAtShutter ?? 0} / ${g.firesCutAtShutter ?? 0} / ${g.firesUnverified ?? 0}) | ` +
             `${g.autoCaptures.failed}/${g.autoCaptures.severe} of ${g.autoCaptures.captures} · ${g.manualCaptures.failed}/${g.manualCaptures.severe} of ${g.manualCaptures.captures} | ${g.layoutShifts} of ${g.layoutSamples} |`,
         );
       }
@@ -762,6 +763,10 @@ export function summarize(rows) {
         firesInNoFire: 0,
         firesInHintWindow: 0,
         firesUncertain: 0,
+        firesUnverified: 0,
+        firesMovingAtShutter: 0,
+        firesCutAtShutter: 0,
+        firesUnsafe: 0,
         firesOnCovered: 0,
         occlusion: { unknownMs: 0, inferredMs: 0, separateMs: 0, coveredHintRightMs: 0, coveredHintWrongMs: 0, separateHintMs: 0 },
         pages: 0,
@@ -877,6 +882,10 @@ export function summarize(rows) {
       G.firesInNoFire += g.auto.firesInNoFire ?? 0;
       G.firesInHintWindow += g.auto.firesInHintWindow ?? 0;
       G.firesUncertain += g.auto.firesUncertain ?? 0;
+      G.firesUnverified += g.auto.firesUnverified ?? 0;
+      G.firesMovingAtShutter += g.auto.firesMovingAtShutter ?? 0;
+      G.firesCutAtShutter += g.auto.firesCutAtShutter ?? 0;
+      G.firesUnsafe += g.auto.firesUnsafe ?? 0;
       G.firesOnCovered += g.auto.firesOnCovered ?? 0;
       for (const k of Object.keys(G.occlusion)) G.occlusion[k] += g.occlusion?.[k] ?? 0;
       G.pages += g.auto.pages;
@@ -1035,6 +1044,10 @@ function summarizeGuidance(G) {
     firesInNoFire: G.firesInNoFire,
     firesInHintWindow: G.firesInHintWindow,
     firesUncertain: G.firesUncertain,
+    firesUnverified: G.firesUnverified,
+    firesMovingAtShutter: G.firesMovingAtShutter,
+    firesCutAtShutter: G.firesCutAtShutter,
+    firesUnsafe: G.firesUnsafe,
     firesOnCovered: G.firesOnCovered,
     occlusion: G.occlusion,
     fireLatencyP50: latencies.length > 0 ? percentile(latencies, 50) : null,

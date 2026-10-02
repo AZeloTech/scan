@@ -689,8 +689,16 @@ share of the default sessions' framed holds with a hint up; the ready cue's
 precision (cue-on time with the overlay on the page, within 2 % of the
 diagonal) and recall (over `marks.ready`) and its time over a frame with no
 page; automatic captures, false fires, fires in a tremor window, pages that
-got one, repeat fires, fires where none is owed (a `noFire` window, or a
-hint window other than "searching") and their latency from stable; failed/severe of
+got one, repeat fires (every shutter call past the first on a page, whatever
+its image), fires where none is owed (a `noFire` window, or a
+hint window other than "searching") and their latency from stable; then the
+fires judged **at the shutter call** rather than by the image they got
+(`shutterTruth`): unsafe = in a no-fire or tremor window, on a page moving
+more than 1.5 % of the diagonal or not wholly in view from the call through
+the 150 ms a phone takes to expose its still (ground truth), or with the
+corners unverified (no `auto-fire` probe of its own, or one without
+corners — an unmeasured corner is as forbidden as an uncertain one);
+failed/severe of
 automatic against manual captures in the same sessions; and whether the
 viewfinder's box ever moved (the scripted page samples it every 100 ms and
 on every hint change). One hint replaced by another is one change, not two

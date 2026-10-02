@@ -68,6 +68,9 @@ export const CAPTURE_FAILURES = new Set(["wrong", "false positive", "no corners"
  */
 export const PAGELESS_CAPTURE = "page-less capture";
 
+/** An `auto-fire` probe belongs to the fire whose tap comes at most this long after it. */
+const FIRE_PROBE_BEFORE_MS = 250;
+
 /** The bench could not name the image that became the page: missing data, not a verdict. */
 export const UNSCORED_CAPTURE = "unscored";
 
@@ -920,6 +923,52 @@ function pageAt(script, t) {
 }
 
 /**
+ * How long after the shutter call a phone's still is exposed (the S25's is
+ * about 0.1 s): the window an automatic capture's page has to stay whole and
+ * still in, judged on the scene itself (the frames' ground truth), whatever
+ * image the capture ended up with — on the bench the still often arrives
+ * after the app's timeout, and the preview it falls back to is grabbed a
+ * second or two later, when the scene may be back where it was.
+ */
+export const SHUTTER_EXPOSE_MS = 150;
+/**
+ * The page's largest corner move over that window, as a share of the frame's
+ * diagonal, above which the shutter was called on a moving page: the app's
+ * own still line (`STILL_MAX`). A held phone's tremor moves it a few tenths of
+ * a percent (5b fires on held pages: p50 0.4 %, p90 0.9 %).
+ */
+export const SHUTTER_MOTION_MAX = 0.015;
+
+/**
+ * The scene at a shutter call at camera time `tapAt`, from the frames' ground
+ * truth (`record.frames`: `{ t, quad, whole }`): `whole` the page wholly in
+ * view on every frame from the one on screen at the call to the end of the
+ * exposure window; `motion` its largest corner move over that window (share
+ * of the frame's diagonal). Null when no frame covers it.
+ */
+export function shutterTruth(frames, tapAt, frame, exposeMs = SHUTTER_EXPOSE_MS) {
+  const list = frames ?? [];
+  let first = -1;
+  for (let i = 0; i < list.length; i += 1) if (list[i].t <= tapAt) first = i;
+  if (first < 0) return null;
+  const span = [];
+  for (let i = first; i < list.length && list[i].t <= tapAt + exposeMs; i += 1) span.push(list[i]);
+  const whole = span.every((f) => f.quad !== null && f.quad !== undefined && f.whole === true);
+  const diagonal = Math.hypot(frame.width, frame.height);
+  const a = span[0].quad;
+  let motion = 0;
+  if (a !== null && a !== undefined) {
+    for (const f of span) {
+      if (f.quad === null || f.quad === undefined) continue;
+      for (let k = 0; k < 4; k += 1) {
+        motion = Math.max(motion, Math.hypot((f.quad[k][0] - a[k][0]) * frame.width, (f.quad[k][1] - a[k][1]) * frame.height) / diagonal);
+      }
+    }
+  }
+  return { whole, motion };
+}
+
+/**
  * The guidance a session showed: each scripted hint window (`marks.hints`),
  * the hint's churn, hints shown over a framed hold, the ready cue's precision
  * (cue-on time with the overlay on the page, within `LOCK_TOLERANCE`) and
@@ -1002,15 +1051,27 @@ export function scoreGuidance(script, record, gtAt, captures) {
   const noFire = marks.noFire ?? [];
   const hinted = marks.hints ?? [];
   // What the app said the page's corners were at each fire (5d+ phase B,
-  // `auto-fire` probe): auto-capture never fires on an uncertain page.
+  // `auto-fire` probe): auto-capture never fires on an uncertain page. Each
+  // fire is matched to its own probe — the nearest one at most
+  // FIRE_PROBE_BEFORE_MS before its tap (or a hair after), used once — and a
+  // fire without one, or whose probe has no corners, is unverified: an
+  // unmeasured corner is as forbidden as an uncertain one.
   const fireProbes = record.events.filter((e) => e.type === "auto-fire");
-  const uncertainAt = (tapAt) => {
-    const probeAt = [...fireProbes].reverse().find((e) => e.t - t0 <= tapAt + 50);
-    if (probeAt === undefined) return null;
-    return probeAt.separate === true || (probeAt.corners !== null && Object.values(probeAt.corners).some((p) => p !== "seen"));
+  const usedProbes = new Set();
+  const fireProbeAt = (tapAt) => {
+    let best = null;
+    for (const e of fireProbes) {
+      const d = tapAt - (e.t - t0);
+      if (usedProbes.has(e) || d > FIRE_PROBE_BEFORE_MS || d < -50) continue;
+      if (best === null || Math.abs(d) < Math.abs(tapAt - (best.t - t0))) best = e;
+    }
+    if (best !== null) usedProbes.add(best);
+    return best;
   };
-  // Where each fire's time went (5b, the probe's `timeline`), in camera ms.
-  const fireProbeAt = (tapAt) => [...fireProbes].reverse().find((e) => e.t - t0 <= tapAt + 50) ?? null;
+  const uncertainOf = (probeAt) => {
+    if (probeAt === null || probeAt.corners === null || probeAt.corners === undefined) return null;
+    return probeAt.separate === true || Object.values(probeAt.corners).some((p) => p !== "seen");
+  };
   const toCamera = (marksAt) =>
     marksAt === null || marksAt === undefined
       ? null
@@ -1027,6 +1088,7 @@ export function scoreGuidance(script, record, gtAt, captures) {
       const since = stable.filter((s) => s <= c.tapAt).pop();
       const fp = fireProbeAt(c.tapAt);
       const presented = presentedAt(c.tapAt);
+      const scene = shutterTruth(record.frames, c.tapAt, frame);
       return {
         // 5b: the fire's timeline (camera ms) and the loop's interval then; when the page was presented; the capture's time to its corners.
         timeline: toCamera(fp?.timeline),
@@ -1035,8 +1097,9 @@ export function scoreGuidance(script, record, gtAt, captures) {
         fromPresentedMs: presented === null ? null : c.tapAt - presented,
         stableAt: since ?? null,
         captureMs: c.captureMs ?? null,
-        // The app called a corner inferred / unknown, or two sheets, at the fire (must never be true); null: not reported.
-        uncertain: uncertainAt(c.tapAt),
+        // The app called a corner inferred / unknown, or two sheets, at the fire (must never be true); null: not
+        // reported or not measured (unverified — counted with the uncertain ones in `firesUnverified`).
+        uncertain: uncertainOf(fp),
         // The script's page had a covered corner (`marks.covered`) at the fire.
         covered: marks.covered === true,
         tapAt: c.tapAt,
@@ -1048,6 +1111,11 @@ export function scoreGuidance(script, record, gtAt, captures) {
         inNoFire: noFire.find((w) => c.tapAt >= w.from && c.tapAt <= w.to)?.name ?? null,
         inHintWindow: hinted.find((w) => !w.expect.some((k) => k === "searching" || k === "not-found") && c.tapAt >= w.from && c.tapAt <= w.to)?.name ?? null,
         falseFire: marks.pageless === true || c.pagelessCapture === true || c.verdict === "false positive" || c.verdict === PAGELESS_CAPTURE,
+        // The scene at the shutter call itself (ground truth, `shutterTruth`), whatever image the capture got:
+        // the page wholly in view and still from the call through the exposure window.
+        sceneAtShutter: scene,
+        movingAtShutter: scene !== null && scene.motion > SHUTTER_MOTION_MAX,
+        cutAtShutter: scene !== null && !scene.whole,
       };
     });
   const pages = marks.pageless ? 0 : (marks.pages ?? (marks.stable?.length > 0 ? 1 : 0));
@@ -1086,10 +1154,19 @@ export function scoreGuidance(script, record, gtAt, captures) {
       firesInNoFire: fires.filter((f) => f.inNoFire !== null).length,
       firesInHintWindow: fires.filter((f) => f.inHintWindow !== null).length,
       firesUncertain: fires.filter((f) => f.uncertain === true).length,
+      firesUnverified: fires.filter((f) => f.uncertain !== false).length,
+      firesMovingAtShutter: fires.filter((f) => f.movingAtShutter).length,
+      firesCutAtShutter: fires.filter((f) => f.cutAtShutter).length,
+      // Shutter calls that broke a rule at the call itself — in a no-fire or tremor window, on a moving or cut-off
+      // page, uncertain or unverified corners, page-less — whatever image came of it.
+      firesUnsafe: fires.filter(
+        (f) => f.inNoFire !== null || f.inTremor || f.movingAtShutter || f.cutAtShutter || f.uncertain !== false || marks.pageless === true,
+      ).length,
       firesOnCovered: fires.filter((f) => f.covered).length,
       pages,
       pagesFired: firedPages.size,
-      repeatFires: Math.max(0, fires.filter((f) => !f.falseFire).length - firedPages.size),
+      // Every shutter call past the first on a page, whatever its image's verdict.
+      repeatFires: [...fires.reduce((by, f) => by.set(f.page, (by.get(f.page) ?? 0) + 1), new Map()).values()].reduce((n, k) => n + Math.max(0, k - 1), 0),
     },
     layout: { samples: boxes.length, shifts, maxShiftPx: shiftPx },
     occlusion: occlusionHints(record, series, liveFrom, liveTo),

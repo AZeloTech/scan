@@ -17,6 +17,8 @@ import {
   scorePerf,
   scoreSession,
   scoreVisibility,
+  shutterTruth,
+  SHUTTER_MOTION_MAX,
   toPoints,
   truthOnScreen,
   UNSCORED_CAPTURE,
@@ -640,6 +642,49 @@ test("guidance: the ready cue's precision, auto-capture fires, latency, tremor a
   assert.equal(g.layout.shifts, 0);
   const pageless = scoreGuidance({ ...script, marks: { pageless: true } }, record, truthOnScreen(record), captures);
   assert.equal(pageless.auto.falseFires, 2);
+});
+
+test("guidance: a fire is judged at its shutter call — its own probe, unmeasured corners unverified, the scene's motion, every repeat", () => {
+  const t0 = 1000;
+  // The page held still to 2 s, then pulled off to the right over 200 ms (1.5 page widths).
+  const shift = (t) => (t <= 2000 ? 0 : t >= 2200 ? 0.9 : (0.9 * (t - 2000)) / 200);
+  const frames = Array.from({ length: 120 }, (_, k) => {
+    const t = (k * 1000) / 30;
+    const dx = shift(t);
+    return { t, quad: PAGE.map(([x, y]) => [x + dx, y]), whole: dx < 0.05 };
+  });
+  const corners = { topLeft: "seen", topRight: "seen", bottomRight: "seen", bottomLeft: "seen" };
+  const record = {
+    startedAt: t0,
+    frames,
+    presented: frames.map((_, k) => ({ k, at: t0 + (k * 1000) / 30 })),
+    actions: [{ what: "camera-live", at: t0 }, { what: "auto-on", at: t0 + 10 }],
+    boxes: [],
+    events: [
+      // Fire 1 (tap 1000) has its probe; fire 2 (tap 1900, the exposure running into the pull) has one with no
+      // corners; fire 3 (tap 3000) has none of its own — the old one at 1000 must not stand in for it.
+      { type: "auto-fire", t: t0 + 998, corners, separate: false },
+      { type: "auto-fire", t: t0 + 1895, corners: null, separate: null },
+    ],
+  };
+  const script = { frame: FRAME, duration: 4000, primary: [{ t: 0, page: 0 }], marks: { stable: [500] } };
+  const captures = [1000, 1900, 3000].map((tapAt) => ({ trigger: "auto", tapAt, verdict: "good", severe: false, pagelessCapture: false }));
+  const g = scoreGuidance(script, record, truthOnScreen(record), captures);
+  assert.deepEqual(g.auto.fires.map((f) => f.uncertain), [false, null, null]);
+  assert.equal(g.auto.firesUncertain, 0);
+  assert.equal(g.auto.firesUnverified, 2);
+  // The image verdicts are all "good" (the bench's preview fallback can do that); the shutter calls are not.
+  assert.deepEqual(g.auto.fires.map((f) => f.movingAtShutter), [false, true, false]);
+  assert.deepEqual(g.auto.fires.map((f) => f.cutAtShutter), [false, true, true]);
+  assert.equal(g.auto.firesMovingAtShutter, 1);
+  assert.equal(g.auto.firesCutAtShutter, 2);
+  assert.equal(g.auto.firesUnsafe, 2);
+  assert.equal(g.auto.falseFires, 0);
+  // Three shutter calls on one page: two repeats, whatever their images were judged.
+  assert.equal(g.auto.repeatFires, 2);
+  const still = shutterTruth(frames, 1000, FRAME);
+  assert.ok(still.whole && still.motion < SHUTTER_MOTION_MAX);
+  assert.equal(shutterTruth(frames, -50, FRAME), null);
 });
 
 test("visible region: holds, a false \"Afaste\", ready outside the region, auto corners outside", () => {
