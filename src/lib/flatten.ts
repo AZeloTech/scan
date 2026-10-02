@@ -241,6 +241,17 @@ async function detectFrame(
     new Promise<void>((resolve) => window.setTimeout(resolve, LANE_WAIT_MS)),
   ]);
   const mlPrimary = primaryDetector({ ready: isMlReady(), disabled: isMlDisabled() }) === "ml";
+  // A still larger than the frames the capture path is measured on goes to
+  // the model smoothly reduced (the corners scaled back), and to the
+  // classical detector, if it is asked, whole.
+  const reduced = mlPrimary ? reduceForMl(source) : null;
+  if (reduced !== null) {
+    try {
+      return await detectReduced(source, reduced, budgetMs, urls);
+    } finally {
+      releaseCanvas(reduced.canvas);
+    }
+  }
   if (detectLane() === "worker") {
     const held = await detectFrameInWorker(source, budgetMs, mlPrimary);
     // A worker that died during the job handed the session to this thread.
@@ -261,6 +272,83 @@ async function detectFrame(
     detection: await detectOnCanvas(source, budgetMs, urls),
     lane: "main",
     fellThrough: mlPrimary && mlSkipped === null,
+    mlSkipped,
+    queueMs: null,
+  };
+}
+
+/**
+ * Long edge (px) above which a still is reduced before the model reads it —
+ * the 1080 × 1920 frames the bench measures the capture path on are not.
+ * The model squeezes whatever it is given to its own small input with a
+ * medium-quality resample; from a 4000 px phone still that resample threw
+ * its confidence from 0.99 (the live sample of the same scene) to 0.81–0.87,
+ * under the capture's coverage floor (the covered-corner session, phase B).
+ * A high-quality reduction first gives it a picture it reads better
+ * (two of those stills found again). Reducing further, to 1024, made the
+ * capture path worse on the bench (F8 refined wrong 6.7 → 10 %, F1–F7
+ * 8.5 → 10.7 %).
+ */
+export const ML_STILL_LONG_EDGE = 1920;
+
+/** `source` reduced to {@link ML_STILL_LONG_EDGE} (high-quality smoothing), or null when it is no larger. */
+function reduceForMl(source: HTMLCanvasElement): { canvas: HTMLCanvasElement; scale: number } | null {
+  const long = Math.max(source.width, source.height);
+  if (!(long > ML_STILL_LONG_EDGE)) return null;
+  const scale = ML_STILL_LONG_EDGE / long;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(source.width * scale));
+  canvas.height = Math.max(1, Math.round(source.height * scale));
+  const context = canvas.getContext("2d");
+  if (context === null) {
+    releaseCanvas(canvas);
+    return null;
+  }
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(source, 0, 0, canvas.width, canvas.height);
+  return { canvas, scale: canvas.width / source.width };
+}
+
+/**
+ * {@link detectFrame} for a large still: the model on the reduced copy, its
+ * corners scaled back to the still; the classical detector — when the model
+ * found nothing and the policy falls through, or could not run — on the
+ * still itself, on the session's lane.
+ */
+async function detectReduced(
+  source: HTMLCanvasElement,
+  reduced: { canvas: HTMLCanvasElement; scale: number },
+  budgetMs: number,
+  urls: AssetUrls,
+): Promise<HeldDetection> {
+  const pass = await mlPass(reduced.canvas, budgetMs, urls);
+  if (pass.detection !== null) {
+    const up = (p: { x: number; y: number }) => ({ x: p.x / reduced.scale, y: p.y / reduced.scale });
+    const c = pass.detection.corners;
+    return {
+      detection: {
+        ...pass.detection,
+        corners: { topLeft: up(c.topLeft), topRight: up(c.topRight), bottomRight: up(c.bottomRight), bottomLeft: up(c.bottomLeft) },
+      },
+      lane: detectLane() === "worker" ? "worker" : "main",
+      fellThrough: false,
+      mlSkipped: null,
+      queueMs: null,
+    };
+  }
+  const mlSkipped: HeldDetection["mlSkipped"] = pass.outcome === "busy" ? "busy" : null;
+  if (pass.outcome === "none" && !CAPTURE_CLASSICAL_FALL_THROUGH) {
+    return { detection: null, lane: detectLane() === "worker" ? "worker" : "main", fellThrough: false, mlSkipped, queueMs: null };
+  }
+  if (detectLane() === "worker") {
+    const held = await detectFrameInWorker(source, budgetMs, false);
+    if (held !== null) return { ...held, fellThrough: mlSkipped === null, mlSkipped };
+  }
+  return {
+    detection: await detectOnCanvas(source, budgetMs, urls),
+    lane: "main",
+    fellThrough: mlSkipped === null,
     mlSkipped,
     queueMs: null,
   };
