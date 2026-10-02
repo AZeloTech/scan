@@ -135,6 +135,8 @@ export interface OverlayProbe {
   countdown?: number | null;
   /** The last watch of the camera while the cue was on: its motion score against the confirmed frame (`hooks/useLiveDetect.ts`). */
   watch?: number | null;
+  /** The first thing keeping the ready cue off or auto-capture from firing (the HUD's `why:`), or null. */
+  why?: string | null;
   /** A photo is being taken: the overlay is frozen on the quad of the tap. */
   capturing?: boolean;
   /** The drawn page's corners as the newest measuring pass said (`lib/corner-check.ts`); null with no page or none measured. */

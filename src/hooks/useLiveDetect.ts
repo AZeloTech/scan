@@ -3102,6 +3102,7 @@ export function useLiveDetect({
           ready: announcedReady,
           countdown: runtime.countdown,
           watch: runtime.watchScore,
+          why: runtime.blockWhy,
           corners: tracking ? provenanceDiagnostic(runtime.check) : null,
           separate: tracking ? (runtime.check?.separate ?? null) : null,
         });
