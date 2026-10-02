@@ -15,6 +15,20 @@ freezes at 1.0.
   chosen when the hint appears and changes only under the hint's own
   minimum-show rules. `onDiagnostics`: hint id `move-phone` with a
   `direction`.
+- **Auto-capture fires sooner on a page held still.** Its countdown starts
+  when the page settles, and the ready cue's stillness and the final look at
+  a fresh frame are gathered while it runs instead of one after another; a
+  page held very still gets the 300 ms countdown. After an "Aproxime" the
+  person followed, the end of that move no longer brings up "Segure firme";
+  a camera-watch blip under a hand's tremor holds the fire without
+  restarting the countdown, and a fire it vetoes is not counted as the
+  page's one fire. The detection worker reads faster near a fire and while
+  a framing hint is being followed. It never fires sooner than 1.2 s after
+  the page was found. Every safety check stays (a fresh confirming frame, the
+  camera watch at the fire, certain corners, once per page). Synthetic bench,
+  a person who follows the hints: from a steady page to the fire, p50 1.1 s →
+  0.66 s (cpu 1) and 4.0 s → 1.6 s (cpu 4). `onDiagnostics`: the ready and
+  auto events carry `phases`, where the time went (numbers only).
 
 ### Added
 - **A covered corner is placed where its edges meet, and the app knows it
