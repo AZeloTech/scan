@@ -1492,3 +1492,96 @@ registerDocument({
     signature(ctx, rng, right - 62, foot - 3, rng.range(35, 50));
   },
 });
+
+/* ── an imaging report: dark panels over most of the page (5d+) ─────────── */
+
+const IMAGING_STUDIES = ["ULTRASSONOGRAFIA DE ABDOME TOTAL", "ULTRASSONOGRAFIA OBSTÉTRICA", "ECOGRAFIA DE TIREOIDE", "DOPPLER DE CARÓTIDAS"];
+const IMAGING_LABELS = ["LT 4,2 cm", "AP 2,8 cm", "VOL 12 mL", "D1 1,9 cm", "FC 142 bpm", "IR 0,64"];
+
+/**
+ * An ultrasound report as clinics print them: a short header, then four to
+ * six near-black image panels covering most of the page (a grey speckled
+ * sector in each, now and then a red or blue Doppler blob, white labels), a
+ * caption under each, and a signature at the foot — the page's white is
+ * only its margins. Each panel is one `mark` region: a crop that cuts into
+ * one has cut the content the scan is for.
+ */
+registerDocument({
+  id: "imaging-report",
+  sizeMm: [210, 297],
+  draw(ctx, rng, [W, H]) {
+    const family = rng.pick(FAMILIES);
+    const ink = rng.pick(["#141414", "#1c1c1c", "#202428"]);
+    const side = rng.range(8, 14);
+    const left = side;
+    const right = W - side;
+    let y = rng.range(10, 15);
+    ctx.fillStyle = ink;
+    font(ctx, 4.2, family, "bold");
+    ctx.fillText(rng.pick(["CLÍNICA AZELO DE IMAGEM", "AZELO DIAGNÓSTICO POR IMAGEM", "CENTRO AZELO DE ULTRASSOM"]), left, y + 4);
+    font(ctx, 2.8, family);
+    ctx.fillText(`Paciente: ${rng.pick(PATIENTS)}`, left, y + 10);
+    ctx.fillText(`Data: ${rng.int(1, 28)}/${rng.int(1, 12)}/2026`, right - 40, y + 10);
+    font(ctx, 3.2, family, "bold");
+    ctx.fillText(rng.pick(IMAGING_STUDIES), left, y + 17);
+    y += 22;
+    const cols = 2;
+    const rows = rng.pick([2, 3, 3]);
+    const gap = rng.range(3, 5);
+    const caption = 5;
+    const footer = rng.range(24, 32);
+    const panelW = (right - left - gap * (cols - 1)) / cols;
+    const panelH = Math.min(panelW * 1.3, (H - y - footer - rows * (gap + caption)) / rows);
+    const black = rng.pick(["#050505", "#0b0b0c", "#101012", "#141414"]);
+    for (let r = 0; r < rows; r += 1) {
+      for (let c = 0; c < cols; c += 1) {
+        const x = left + c * (panelW + gap);
+        const top = y + r * (panelH + gap + caption);
+        region(ctx, "mark", () => {
+          ctx.fillStyle = black;
+          ctx.fillRect(x, top, panelW, panelH);
+          // The sector: a fan from an apex near the top, grey, speckled.
+          const apex = [x + panelW / 2 + rng.range(-4, 4), top + panelH * 0.08];
+          const reach = panelH * rng.range(0.78, 0.88);
+          const half = rng.range(0.45, 0.65);
+          ctx.fillStyle = rng.pick(["#4a4a4a", "#545454", "#5e5e5e", "#3f3f3f"]);
+          ctx.beginPath();
+          ctx.moveTo(apex[0], apex[1]);
+          ctx.arc(apex[0], apex[1], reach, Math.PI / 2 - half, Math.PI / 2 + half);
+          ctx.closePath();
+          ctx.fill();
+          for (let k = 0; k < 90; k += 1) {
+            const a = Math.PI / 2 + rng.range(-half, half) * 0.95;
+            const d = rng.range(0.1, 0.97) * reach;
+            const g = rng.int(20, 200);
+            ctx.fillStyle = `rgb(${g},${g},${g})`;
+            ctx.fillRect(apex[0] + Math.cos(a) * d, apex[1] + Math.sin(a) * d, rng.range(0.6, 2.4), rng.range(0.3, 1));
+          }
+          // A dark structure in it (a cyst, a vessel, a bladder).
+          ctx.fillStyle = black;
+          ctx.beginPath();
+          ctx.ellipse(apex[0] + rng.range(-8, 8), apex[1] + reach * rng.range(0.45, 0.65), rng.range(4, 10), rng.range(3, 7), rng.range(0, 3), 0, Math.PI * 2);
+          ctx.fill();
+          if (rng.chance(0.3)) {
+            ctx.fillStyle = rng.pick(["#c0282a", "#2a54c0"]);
+            ctx.beginPath();
+            ctx.ellipse(apex[0] + rng.range(-10, 10), apex[1] + reach * rng.range(0.3, 0.7), rng.range(2, 5), rng.range(1.5, 4), 0, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.fillStyle = "#e8e8e8";
+          font(ctx, 2.2, MONO);
+          ctx.fillText(rng.pick(IMAGING_LABELS), x + 2, top + panelH - 2.5);
+          ctx.fillText(`${r * cols + c + 1}`, x + panelW - 4, top + 4);
+        });
+        ctx.fillStyle = ink;
+        font(ctx, 2.4, family);
+        ctx.fillText(rng.pick(["Fígado", "Vesícula biliar", "Rim direito", "Rim esquerdo", "Baço", "Bexiga", "Lobo direito", "Lobo esquerdo"]), x, top + panelH + 3.6);
+      }
+    }
+    const foot = H - footer + 6;
+    font(ctx, 2.6, family);
+    ctx.fillText("Exame realizado com transdutor convexo de 3,5 MHz.", left, foot);
+    ctx.fillText(rng.pick(PHYSICIANS), right - 50, foot + 12);
+    signature(ctx, rng, right - 50, foot + 7, rng.range(30, 42));
+  },
+});

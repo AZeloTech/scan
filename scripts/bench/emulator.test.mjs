@@ -294,3 +294,73 @@ test("a content box sits where the page's fractions say, and a scene without a p
   const empty = buildScene("F6", 1);
   assert.equal(withContent(groundTruth(empty), empty, () => []).content, null);
 });
+
+test("F8 cycles its settings by seed, and its occluders cover what they claim", async () => {
+  const { buildScene, groundTruth } = await import("./emulator/index.js");
+  const { F8_SETTINGS } = await import("./emulator/family-f8.js");
+  assert.equal(new Set(F8_SETTINGS).size, F8_SETTINGS.length);
+  const toLocal = (layer, [x, y]) => {
+    const a = (layer.rotation * Math.PI) / 180;
+    const dx = x - layer.center[0];
+    const dy = y - layer.center[1];
+    return [Math.cos(a) * dx + Math.sin(a) * dy, -Math.sin(a) * dx + Math.cos(a) * dy];
+  };
+  const toWorld = (layer, [x, y]) => {
+    const a = (layer.rotation * Math.PI) / 180;
+    return [layer.center[0] + Math.cos(a) * x - Math.sin(a) * y, layer.center[1] + Math.sin(a) * x + Math.cos(a) * y];
+  };
+  const inside = (layer, point) => {
+    const [lx, ly] = toLocal(layer, point);
+    return Math.abs(lx) <= layer.size[0] / 2 && Math.abs(ly) <= layer.size[1] / 2;
+  };
+  const signs = [
+    [-1, -1],
+    [1, -1],
+    [1, 1],
+    [-1, 1],
+  ];
+  for (let seed = 1; seed <= F8_SETTINGS.length * 4; seed += 1) {
+    const params = buildScene("F8", seed);
+    assert.equal(params.setting, F8_SETTINGS[(seed - 1) % F8_SETTINGS.length], `F8 #${seed}`);
+    assert.deepEqual(buildScene("F8", seed), params, `F8 #${seed}: a scene is a pure function of its seed`);
+    const gt = groundTruth(params);
+    const primary = gt.pages[gt.primary];
+    assert.ok(primary.inFrame.every(Boolean), `F8 #${seed}: the whole page is in frame`);
+    assert.deepEqual(primary.occluded, [0, 1, 2, 3].filter((c) => !primary.visible[c]), `F8 #${seed}: covered = in frame, not seen`);
+    const page = params.layers[primary.layer];
+    const occluderLayers = params.layers.filter((l) => l.occluder);
+    assert.deepEqual(gt.occluders.map((o) => o.kind), occluderLayers.map((l) => l.occluder));
+    for (const o of gt.occluders) assert.ok(o.polygon.length >= 4, `F8 #${seed}: an occluder has an outline`);
+    const { occlusion } = params;
+    if (params.setting === "owner-case" || params.setting === "sheet-over") {
+      assert.deepEqual(primary.occluded, [occlusion.corner], `F8 #${seed}: the covered corner is the one asked for`);
+      const sheet = occluderLayers[0];
+      assert.ok(sheet.height > page.height, `F8 #${seed}: the sheet lies over the page`);
+      // Along each edge meeting at the corner the sheet ends where `along` says.
+      const [sx, sy] = signs[occlusion.corner];
+      const [hw, hh] = [page.size[0] / 2, page.size[1] / 2];
+      const edges = [
+        (f) => [sx * hw - sx * f * page.size[0], sy * hh],
+        (f) => [sx * hw, sy * hh - sy * f * page.size[1]],
+      ];
+      edges.forEach((at, i) => {
+        const f = occlusion.along[i];
+        assert.ok(f >= 0.05 && f <= 0.35, `F8 #${seed}: coverage ${f}`);
+        assert.ok(inside(sheet, toWorld(page, at(f - 0.01))), `F8 #${seed}: edge ${i} covered short of ${f}`);
+        assert.ok(!inside(sheet, toWorld(page, at(f + 0.01))), `F8 #${seed}: edge ${i} uncovered past ${f}`);
+      });
+      if (params.setting === "owner-case") {
+        assert.ok(params.camera.tilt >= 30 && params.camera.tilt <= 45, `F8 #${seed}: tilt`);
+        assert.ok(occlusion.stackPx >= 2 && occlusion.stackPx <= 6, `F8 #${seed}: the stack shows 2–6 px`);
+        // The covered corner is the one the image shows top-left.
+        const sums = primary.px.map(([u, v]) => u + v);
+        assert.equal(occlusion.corner, sums.indexOf(Math.min(...sums)), `F8 #${seed}: top-left in the image`);
+      }
+    }
+    if (params.setting === "two-sheets" && occlusion.scannedUnder) {
+      assert.deepEqual(primary.occluded, [occlusion.corner], `F8 #${seed}: the page on top covers the corner asked for`);
+      assert.equal(gt.pages.length, 2);
+    }
+    if (params.setting === "staple") assert.deepEqual(primary.occluded, [], `F8 #${seed}: a staple leaves the corner seen`);
+  }
+});

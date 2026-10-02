@@ -7,7 +7,7 @@ Nothing here ships — `package.json` publishes `dist/`, `assets/` and
 
 ```sh
 npm run bench -- --suite detector --family F1 --seeds 10   # one family, quick
-npm run bench -- --suite detector --seeds 10               # F1–F7, ~1 min
+npm run bench -- --suite detector --seeds 10               # F1–F8, ~1 min
 npm run bench -- --suite detector                          # every family, 40 seeds, ~4 min
 npm run bench -- --suite detector --cpu 4                  # a mid-range phone's CPU
 npm run bench -- --suite detector --seeds 10 --compare .bench-out/latest-detector/results.json
@@ -488,7 +488,10 @@ both follow.
   (plastic, rounded corners, full-bleed colour, a silhouette where a photo
   would be) and a handwritten note (pseudo-cursive strokes and a signature);
   for F7, a lab report ruled to within millimetres of its edges
-  (`edge-ruled`) and a letterhead printed to the edge (`bleed-band`).
+  (`edge-ruled`) and a letterhead printed to the edge (`bleed-band`); for
+  F8, an ultrasound report whose near-black image panels cover most of the
+  page, its white only the margins (`imaging-report`; each panel is one
+  `mark` content box).
   Only the repository's personas are named; numbers stay short and clinical.
 - **Effects** (`effects.js`): a finger or thumb over a corner or an edge —
   a shaded skin capsule with a nail, knuckle creases, a soft shadow, out of
@@ -508,6 +511,7 @@ both follow.
 | F5 occlusion, partial, two docs | not all there, or not alone | `finger`, `partial` (1–2 corners out), `two-docs`, `object-on-page` |
 | F6 hard negatives | no document at all | `empty-desk`, `laptop`, `notebook`, `placemat`, `keyboard`, `clutter` |
 | F7 refine-adversarial | a straight edge where the page's is not, or the page's own edge taken away — built against the edge refinement | outside the page: `mat-edge`, `folder`, `table-edge`, `white-board`, `parallel-object`, `shadow-out`, `neighbour`, `stacked`, `striped-cloth`, `tiles`, `compound` (a white table's or a shadow's edge 3–12 % out while a thumb or glare weakens the page's own); on it: `shadow-in`, `margin-rule`, `bleed-band`, `crease`, `glare-edge`, `blind-shadow`; the edge itself: `white-on-white`, `finger-edge`, `curl`, `dog-ear`, `receipt-tear`; the field cases of the refinement's review: `dark-stock` (navy or black card printed in white, a kraft envelope with a white label, a dark ID card — on a white, grey or wooden table, with a dark object, the table's edge or both past it), `black-table` (a white page on a black table or leather mat whose edge is 3–12 % out, often a white sheet, receipt or card lying across that edge), `form-border` (a printed border 3–8 mm inside the edges, the form's code in the margin outside it), `stack-offset` (sheets under the page offset 1–5 mm along both axes), `screen` (a document on a tablet or a phone: bezel, the viewer's bars), `booklet` (the right-hand page of an open booklet: facing page, gutter shadow, page block, cover), `curled-receipt` (rolled along or across, or one end curling up), `jpeg-strong` (quality 0.2–0.45), `sharpen-halo` (an unsharp mask), `clipped-highlights` (a gain that clips paper and white tables to 255) |
+| F8 occluded corners, overlapping sheets | something lies over the page and a corner the warp needs is under it (5d+) | `owner-case` (the described field case: a white leaflet, curled, over the corner the image shows top-left — 8–15 % of the top edge, 15–25 % of the left — of a stacked imaging report on a brown stitched desk mat on wood, tilt 30–45°, warm light, the hand's shadow low left), `sheet-over` (any corner, 5–35 % along each edge, the sheet's own corner on the page turned up to 25°, flat or curled, contact shadow none → soft; stack or single sheet; mat on wood or any desk; tilt 0–45°), `clipboard` (a board under the page, a metal or black clip over its top edge, mid-edge or slid over a corner), `binder-clip` (over a corner or gripping an edge near one, wire handles out past the page), `staple` (a fanned stapled packet, a staple across a corner — the corner itself seen), `two-sheets` (two printed sheets overlapping: the scanned one under the other, a corner covered 15–60 % along each edge, or on top of it) |
 
 F7 is a regression family: its setting is assigned **by seed**, cycling
 through the 32 settings in that order (seed 1 `mat-edge`, seed 33 `mat-edge`
@@ -521,6 +525,26 @@ baseline must have been run with the same `--setting`. Its
 params carry the attacked side (`target`, 0–3 = the page's top, right,
 bottom, left) and, where there is one, how far off it the distractor lies
 (`gapFrac`, fraction of the frame diagonal; negative = inside the page).
+
+F8 cycles its six settings by seed the same way (`--setting owner-case,sheet-over
+--seeds 20` for 20 of each). Its truth is still the page's whole rectangle —
+the covered corner where it really is — and it adds what lies over it: each
+layer laid over the page on purpose carries `occluder` (its kind), so
+`gt.occluders` lists them with their outlines (normalized, lifted where a
+sheet curls), and `gt.pages[i].occluded` names the corners in frame that are
+covered (in frame and not `visible`). The params' `occlusion` says what was
+asked for: the corner, the coverage along each edge meeting there (the
+page's top/bottom edge first), the sheet's turn, its tip, whether it curls,
+its shadow, the stack's thickness in pixels. Wherever the truth has an
+occluder or a covered corner, the detector suite also scores each answer
+for **occlusion** (`suites/detector-occlusion.mjs`, its own section in the
+report, per family and setting, not gated): the **covered corner's error**
+(% of the diagonal), **occluder included** (the quad reaches onto an
+occluder past the page by more than 0.5 % of the page's area — the union of
+page and sheet) and the **mode** — where the covered corner went: the true
+corner (within 1.5 % of the diagonal), the occluder's own corner on the
+page (`occluder-tip`), where its edge crosses the page's (`edge-crossing`),
+out on the occluder, inside the page, elsewhere, or lost.
 
 To grow it, register — nothing in the runner changes:
 

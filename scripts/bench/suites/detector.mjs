@@ -11,6 +11,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { scoreDetection } from "../metrics.mjs";
 import { renderDetectorReport, summarizeDetector } from "../report.mjs";
+import { renderOcclusionSection, scoreOcclusion } from "./detector-occlusion.mjs";
 
 /** Tiles per contact sheet. */
 const SHEET_TILES = 30;
@@ -100,6 +101,11 @@ export async function runDetectorSuite({ page, throttle, options, outDir, log, e
           det,
           score: scoreDetection(verdictQuad, gt.quad, gt.frame, { content: gt.content ?? null }),
           rawScore: det.quad === null ? null : scoreDetection(det.quad, gt.quad, gt.frame, { content: gt.content ?? null }),
+          // Only where something lies over the page (F8): the covered corner, the occluder.
+          ...(() => {
+            const occlusion = scoreOcclusion(verdictQuad, gt);
+            return occlusion === null ? {} : { occlusion };
+          })(),
         });
       }
       await page.evaluate((id) => window.__bench.release(id), scene.id);
@@ -152,6 +158,6 @@ export async function runDetectorSuite({ page, throttle, options, outDir, log, e
     scenes,
     sheets,
     summary,
-    render: renderDetectorReport,
+    render: (results) => renderDetectorReport(results) + renderOcclusionSection(results.rows),
   };
 }

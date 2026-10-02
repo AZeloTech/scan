@@ -200,15 +200,28 @@ export function groundTruth(params, hidden = null) {
       corners: px.map(([u, v]) => [u / width, v / height]),
       inFrame,
       visible,
+      // In the frame but not seen: under a layer above it or an effect.
+      occluded: [0, 1, 2, 3].filter((corner) => inFrame[corner] && !visible[corner]),
       polygon,
       coverage: polygonArea(polygon) / (width * height),
     });
   });
   const primary = pages.length === 0 ? null : Math.max(0, Math.min(pages.length - 1, params.primaryPage ?? 0));
+  // What lies over a page on purpose (a sheet, a clip, a second page on top):
+  // each flagged layer's whole outline, normalized — lifted where it curls.
+  const occluders = params.layers.flatMap((layer, index) => {
+    if (!layer.occluder) return [];
+    const outline = layerOutline(layer, layer.curl ? OUTLINE_POINTS_PER_EDGE : 1).map((point) => {
+      const p = project(camera, point);
+      return [p.u / width, p.v / height];
+    });
+    return [{ layer: index, kind: layer.occluder, polygon: outline }];
+  });
   return {
     frame: { width, height },
     pages,
     primary,
+    occluders,
     quad: primary === null ? null : pages[primary].corners,
   };
 }
