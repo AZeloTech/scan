@@ -55,6 +55,14 @@ export interface PaperEvidence {
   /** How much the background itself varies from block to block (0–1 of the range). */
   backgroundSpread: number;
   /**
+   * The page's border band (just inside its sides, {@link MARGIN_INSETS}):
+   * the share of it within {@link MARGIN_BAND} of its own median luma, and
+   * that median over the interior's bright end (its 95th percentile). A white
+   * margin round printed images reads ~0.65–0.9 and ~1; null when not measured.
+   */
+  marginUniform?: number | null;
+  marginRelative?: number | null;
+  /**
    * Share of the interior clipped white ({@link GLARE_LUMA} and up) — a
    * lamp's reflection washing the print out. Not part of the verdict: it is
    * what the viewfinder's "reflection" hint reads (`lib/guidance.ts`).
@@ -122,6 +130,19 @@ export interface EvidenceRules {
    */
   textureInk: number;
   textureSpread: number;
+  /**
+   * A page of printed images — an imaging report's near-black panels, a
+   * sheet of photos — fails the text rules (its background share is low, its
+   * ink solid) but keeps a white margin round them: a border band at least
+   * `printMarginUniform` one even material, as bright as the brightest of
+   * the interior (`printMarginRelative` of its 95th percentile), with solid
+   * ink (`printSolidInk` and up) on a background share of `printBackground`
+   * and up. A laptop's lid, a notebook's cover, a keyboard have no such band.
+   */
+  printMarginUniform: number;
+  printMarginRelative: number;
+  printSolidInk: number;
+  printBackground: number;
 }
 
 /**
@@ -174,6 +195,10 @@ export const PAPER: EvidenceRules = {
   minInkOfRest: 0.22,
   textureInk: 0.04,
   textureSpread: 0.75,
+  printMarginUniform: 0.6,
+  printMarginRelative: 0.9,
+  printSolidInk: 0.2,
+  printBackground: 0.25,
 };
 
 /** The step's boxes, and how far from the side it is looked for — shares of the frame's short side. */
@@ -208,6 +233,11 @@ export const GLARE_LUMA = 250;
 export const GLARE_BLOCK_LUMA = 252;
 export const GLARE_PAPER_MAX = 245;
 export const GLARE_LIT_SHARE = 0.3;
+
+/** The border band: these insets (shares of the quad), this many samples per side at each, and the luma band of "one material". */
+const MARGIN_INSETS = [0.02, 0.035, 0.05] as const;
+const MARGIN_SAMPLES = 40;
+const MARGIN_BAND = 18;
 
 /** The interior grid: about one sample per 3 px, within these bounds per axis. */
 const GRID_MIN = 20;
@@ -279,6 +309,9 @@ export interface EvidenceSamples {
   blockMedians: number[];
   /** Share of the in-frame interior samples at {@link GLARE_LUMA} or brighter (absent: not measured). */
   clipped?: number;
+  /** The interior's bright end (95th percentile luma), and the border band's median luma and evenness (absent: not measured). */
+  bright?: number;
+  margin?: { luma: number; uniform: number } | null;
 }
 
 /**
@@ -416,7 +449,31 @@ function measureInterior(data: Uint8ClampedArray, width: number, height: number,
       blockOf[at] = Math.min(BLOCKS - 1, Math.floor((j * BLOCKS) / rows)) * BLOCKS + Math.min(BLOCKS - 1, Math.floor((i * BLOCKS) / cols));
     }
   }
-  return { residuals, cols, rows, inFrame, blockOf, blockMedians: known, clipped: inFrame > 0 ? clipped / inFrame : 0 };
+  const lit = Array.from(grid).filter((y) => !Number.isNaN(y)).sort((a, b) => a - b);
+  const bright = lit.length === 0 ? 0 : lit[Math.min(lit.length - 1, Math.floor(lit.length * 0.95))];
+  return { residuals, cols, rows, inFrame, blockOf, blockMedians: known, clipped: inFrame > 0 ? clipped / inFrame : 0, bright };
+}
+
+/**
+ * The border band just inside the quad's sides ({@link MARGIN_INSETS}, over
+ * the middle of each side): its median luma and the share of it within
+ * {@link MARGIN_BAND} of that — a page's white margin is one even material.
+ */
+function measureMargin(data: Uint8ClampedArray, width: number, height: number, c: Point[]): { luma: number; uniform: number } | null {
+  const values: number[] = [];
+  for (const d of MARGIN_INSETS) {
+    for (let i = 0; i < MARGIN_SAMPLES; i += 1) {
+      const t = 0.08 + (0.84 * (i + 0.5)) / MARGIN_SAMPLES;
+      for (const [u, v] of [[t, d], [t, 1 - d], [d, t], [1 - d, t]]) {
+        const p = inside(c, u, v);
+        const y = luma(data, width, height, p.x, p.y);
+        if (y !== null) values.push(y);
+      }
+    }
+  }
+  if (values.length < MARGIN_SAMPLES) return null;
+  const middle = median(values);
+  return { luma: middle, uniform: values.filter((y) => Math.abs(y - middle) <= MARGIN_BAND).length / values.length };
 }
 
 /**
@@ -436,7 +493,7 @@ export function measureEvidence(
   const { sides, lengths } = measureSides(data, width, height, c);
   const { inFrame, ...texture } = measureInterior(data, width, height, c);
   if (inFrame === 0) return null;
-  return { sides, sideLengths: lengths, ...texture, blocks: BLOCKS * BLOCKS };
+  return { sides, sideLengths: lengths, ...texture, blocks: BLOCKS * BLOCKS, margin: measureMargin(data, width, height, c) };
 }
 
 /**
@@ -529,6 +586,8 @@ export function judgeEvidence(samples: EvidenceSamples, rules: EvidenceRules = P
     inkSpread: spread,
     solidInk: inkSamples > 0 ? solid / inkSamples : 0,
     backgroundSpread: blockRange,
+    marginUniform: samples.margin == null ? null : samples.margin.uniform,
+    marginRelative: samples.margin == null || !(samples.bright! > 0) ? null : samples.margin.luma / samples.bright!,
   };
   // A reflection is a hot spot: blocks of the interior washed white while a
   // good part of the page is not. A page exposed to the top of the range is
@@ -552,6 +611,28 @@ export function paperLike(e: Omit<PaperEvidence, "ok" | "glare" | "open">, rules
  * run along the frame's edge, where there is no step to find).
  */
 export function paperSurface(e: Omit<PaperEvidence, "ok" | "glare" | "open">, rules: EvidenceRules = PAPER): boolean {
+  return printText(e, rules) || printedImages(e, rules);
+}
+
+/**
+ * A page of printed images ({@link EvidenceRules.printMarginUniform}): solid
+ * print inside a white margin as bright as anything on the sheet.
+ */
+function printedImages(e: Omit<PaperEvidence, "ok" | "glare" | "open">, rules: EvidenceRules): boolean {
+  return (
+    e.marginUniform != null &&
+    e.marginRelative != null &&
+    e.marginUniform >= rules.printMarginUniform &&
+    e.marginRelative >= rules.printMarginRelative &&
+    e.solidInk >= rules.printSolidInk &&
+    e.background >= rules.printBackground &&
+    e.ink <= rules.maxInk &&
+    e.inkSpread >= rules.minInkSpread
+  );
+}
+
+/** Text and line print on the sheet's own background — the rules the evidence was set on. */
+function printText(e: Omit<PaperEvidence, "ok" | "glare" | "open">, rules: EvidenceRules): boolean {
   return (
     e.background >= rules.minBackground &&
     e.ink >= (e.background >= rules.faintBackground ? rules.faintInk : rules.minInk) &&
