@@ -2784,12 +2784,12 @@ export function useLiveDetect({
       if (watching && now - runtime.watchAt >= WATCH_EVERY_MS) watch(now);
       // On its footing: the page found where it was by a recent pass, and
       // nothing since saying otherwise.
-      const footing =
+      const footed =
         tracking &&
         runtime.suspectAt === null &&
-        !runtime.watchMoved &&
         runtime.confirmedAt !== null &&
         now - runtime.confirmedAt <= READY_STALE_MS + 2 * runtime.intervalMs;
+      const footing = footed && !runtime.watchMoved;
       // The hint slot and the brackets never disagree: the cue comes on only
       // once the slot has emptied (at its own pace — a hint snatched away the
       // moment it appeared is the flicker the debounce exists to prevent),
@@ -2804,9 +2804,16 @@ export function useLiveDetect({
       const isReady = guidance.ready.update(strict, keep, now);
       // Settled: the same, on the short stillness window — auto-capture's
       // countdown starts here, and the cue's full stillness is gathered while
-      // it runs (the fire waits for the cue).
-      const settledStrict = footing && !covered && !uncertain && raw === null && shown === null && runtime.settledVerdict && reading?.sharp !== false;
-      guidance.settled.update(settledStrict, keep, now);
+      // it runs (the fire waits for the cue). The camera watch blocks the
+      // fire (through the cue, and once more at its instant) but does not
+      // restart the countdown: a hand's tremor at a slow cadence trips it
+      // every few hundred milliseconds, each trip cleared by the next pass
+      // on a later frame, and a countdown restarted on every one never
+      // finished (bench present-auto: 3 s of "camera moved" / "countdown 0 %").
+      // A camera that really left the page loses the footing at that pass.
+      const settledStrict = footed && !covered && !uncertain && raw === null && shown === null && runtime.settledVerdict && reading?.sharp !== false;
+      const settledKeep = footed && !covered && !uncertain && shown === null && raw === null;
+      guidance.settled.update(settledStrict, settledKeep, now);
       runtime.timeline.update(now, {
         lock: tracking,
         hint: raw === null && !covered,
@@ -2892,6 +2899,8 @@ export function useLiveDetect({
               ? "auto: cancelled, corner uncertain"
               : "auto: cancelled, corners unmeasured"
             : `auto: cancelled, camera moved (watch ${runtime.watchScore === null ? "–" : runtime.watchScore.toFixed(3)})`;
+          // Not taken: the page is still owed its one fire.
+          guidance.auto.retract();
           guidance.ready.update(false, false, now);
           runtime.countdown = null;
           runtime.countdownStart = null;

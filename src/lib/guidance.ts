@@ -1029,6 +1029,19 @@ export class AutoCapture {
   }
 
   /**
+   * The fire this moment's {@link update} answered was not taken (the live
+   * loop's last look at the camera, or a corner turned uncertain, vetoed it
+   * at its instant): the page is not taken, and the same countdown — done —
+   * fires on the next moment the cue and a fresh frame allow. Without this
+   * a vetoed fire counted as the page's one fire: auto-capture then waited
+   * for "another page", and re-armed only once the phone moved — a fire
+   * seconds later on the same page.
+   */
+  retract(): void {
+    this.fired = null;
+  }
+
+  /**
    * The person took this page themselves (a tap): it counts as taken, and
    * auto-capture waits for another page exactly as after a fire of its own.
    * `sheet` null: no page was framed — nothing to wait for.

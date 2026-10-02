@@ -685,3 +685,16 @@ test("hold still: the move a framing hint asked for is not shaking — the readi
   const shaking = [1000, 1100, 1200, 1300].map((t, i) => ({ at: t, quad: rect(0.25 + (i % 2) * 0.08, 0.25, 0.75 + (i % 2) * 0.08, 0.75) }));
   assert.ok((shakeMotion(shaking, 1.5, 600, 1000) ?? 0) > SHAKY_ENTER);
 });
+
+test("auto-capture: a fire vetoed at its instant is not the page's one fire — the same countdown fires on the next fresh frame", () => {
+  const auto = new AutoCapture();
+  const step = (now: number, confirmedAt: number) => auto.update({ now, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, steady: true, confirmedAt });
+  assert.equal(step(AUTO_FIRE_MS, AUTO_FIRE_MS - 20).fire, true);
+  // The live loop's last look at the camera said it moved: not taken.
+  auto.retract();
+  assert.equal(auto.armed, true);
+  // The next pass on a later frame: fires at once, the countdown not run again.
+  assert.deepEqual(cf(step(AUTO_FIRE_MS + 150, AUTO_FIRE_MS + 120)), { countdown: 1, fire: true });
+  // Taken now: once per page, as ever.
+  assert.equal(step(AUTO_FIRE_MS + 400, AUTO_FIRE_MS + 380).fire, false);
+});
