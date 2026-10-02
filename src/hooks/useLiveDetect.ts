@@ -115,6 +115,7 @@ import { classicalQuadSane, PAPER, paperEvidence, paperSurface, type PaperEviden
 import { refineQuad } from "@/lib/refine";
 import { cornerCheckOf, hasUnknown, isUncertain, provenanceDiagnostic, type CornerCheck } from "@/lib/corner-check";
 import { FireTimeline, phasesBefore, type TimelineMarks } from "@/lib/fire-timeline";
+import { cameraChanged, passStillCurrent, type PassTicket } from "@/lib/pass-ticket";
 import type { CornerPoints } from "@/lib/flatten";
 import {
   demoteDetectLane,
@@ -155,6 +156,9 @@ import {
   STILL_MAX,
   STILL_WINDOW_MS,
   settledOn,
+  settledSince,
+  lastMovedAt,
+  coveredDirection,
   autoFrameAgeMax,
   readingsAgree,
   toVisible,
@@ -169,7 +173,7 @@ import type { DiagnosticsSink } from "@/lib/diagnostics-events";
 import { ringOffset } from "@/lib/capture-layout";
 import {
   clearArea,
-  cornerUnderSpot,
+  spotUnderCorner,
   frameBoxFor,
   sameRegion,
   spotsInFrame,
@@ -639,6 +643,13 @@ interface Runtime {
   confirmedAt: number | null;
   /** A pass said the page may not be where the brackets are (its frame time); cleared by a confirming pass on a later frame. */
   suspectAt: number | null;
+  /**
+   * When motion was last seen on the locked page: a camera-watch trip (its
+   * time), a pass that lost the page, readings that moved (their frame
+   * time). Auto-capture's motion epoch: only a frame read after it confirms
+   * a fire, with stillness and quiet gathered after it (`AutoCapture`).
+   */
+  motionAt: number | null;
   /** The newest confirming pass's readings say still, on enough of them ({@link READY_MIN_READINGS}). */
   readyVerdict: boolean;
   /** The newest confirming pass's readings say settled: still over the short window the countdown starts on (`SETTLE_WINDOW_MS`). */
@@ -774,6 +785,7 @@ function freshRuntime(): Runtime {
     dropFast: false,
     firedLuma: null,
     confirmedAt: null,
+    motionAt: null,
     suspectAt: null,
     readyVerdict: false,
     settledVerdict: false,
@@ -871,6 +883,7 @@ function clearTracking(runtime: Runtime, overlay: LiveOverlayRefs): void {
   runtime.countdownStart = null;
   runtime.timeline.reset();
   runtime.confirmedAt = null;
+  runtime.motionAt = null;
   runtime.suspectAt = null;
   runtime.readyVerdict = false;
   runtime.settledVerdict = false;
@@ -891,6 +904,23 @@ function clearTracking(runtime: Runtime, overlay: LiveOverlayRefs): void {
   const nudge = overlay.nudge?.current ?? null;
   if (nudge !== null) nudge.dataset.direction = "";
   paintRing(overlay.ring.current, null);
+}
+
+/**
+ * The camera changed under the loop (the detection lane restarted or was
+ * demoted, a pass's answer arrived across a lane or stream change): the
+ * brackets may stay, but nothing confirmed before stands for the ready cue or
+ * auto-capture — footing, readings, the watch's baseline — and the motion
+ * epoch starts again at `now`.
+ */
+function invalidateConfirmation(runtime: Runtime, now: number): void {
+  runtime.confirmedAt = null;
+  runtime.sheetReadings = [];
+  runtime.readyVerdict = false;
+  runtime.settledVerdict = false;
+  runtime.watchBase = null;
+  runtime.watchMoved = false;
+  runtime.motionAt = now;
 }
 
 /** The countdown ring (see {@link LiveOverlayRefs.ring}) at a progress, or empty. */
@@ -1413,6 +1443,8 @@ export function useLiveDetect({
     const videoSize = videoSizeRef.current;
     if (videoSize !== null && (videoSize.width !== video.videoWidth || videoSize.height !== video.videoHeight)) {
       clearTracking(runtimeRef.current, overlay);
+      // …and a pass still out on the old stream answers nobody (`PassTicket`).
+      runtimeRef.current.mlEpoch += 1;
     }
     videoSizeRef.current = { width: video.videoWidth, height: video.videoHeight };
     // Nothing of the frame on screen (a stage scrolled or pinched away):
@@ -1954,6 +1986,8 @@ export function useLiveDetect({
         runtime.laneGeneration = detectLaneGeneration();
         runtime.workerTimeouts = 0;
         runtime.workerGrabFailures = 0;
+        // Nothing the old lane confirmed carries over to auto-capture.
+        invalidateConfirmation(runtime, performance.now());
         if (lane === "main") {
           runtime.mlWarmUpStarted = false;
           hintRef.current = { at: Number.NEGATIVE_INFINITY };
@@ -1981,7 +2015,7 @@ export function useLiveDetect({
       const profile = PASS_PROFILES[source];
       // The question this pass answers: a capture or a restart that moves it
       // on while the pass is out makes the answer nobody's.
-      const epoch = runtime.mlEpoch;
+      const ticket: PassTicket = { epoch: runtime.mlEpoch, lane: runtime.laneGeneration, width: video.videoWidth, height: video.videoHeight };
       runtime.detecting = true;
       // The watch's probe of the very frame this pass is about to read — the
       // ready cue's footing if the pass finds the sheet where it was.
@@ -1996,7 +2030,14 @@ export function useLiveDetect({
       if (cancelled) return null;
       const elapsed = performance.now() - started;
       if (outcome === null) return runtime.intervalMs;
-      if (runtime.mlEpoch !== epoch || runtime.capturing) return runtime.intervalMs;
+      // An answer from before a loop restart, a capture, a lane change or a
+      // stream change describes another camera: dropped, and what was
+      // confirmed on the old camera with it.
+      const now: PassTicket = { epoch: runtime.mlEpoch, lane: detectLaneGeneration(), width: video.videoWidth, height: video.videoHeight };
+      if (!passStillCurrent(ticket, now) || runtime.capturing) {
+        if (cameraChanged(ticket, now)) invalidateConfirmation(runtime, performance.now());
+        return runtime.intervalMs;
+      }
       if (lane === "worker") {
         // The worker runs one job at a time, so a pass it did not answer in
         // time is a pass behind another job (a capture's), not two
@@ -2185,6 +2226,7 @@ export function useLiveDetect({
         runtime.glare = null;
         runtime.openHits = 0;
       }
+      if (holdBroken) runtime.motionAt = Math.max(runtime.motionAt ?? outcome.frameAt, outcome.frameAt);
       const detection = outcome.detection;
       const confirmed = accepted && runtime.locked && !holdBroken && runtime.shown !== null;
       if (confirmed && runtime.shown !== null) {
@@ -2197,6 +2239,9 @@ export function useLiveDetect({
         }
         // The ready cue's footing: this frame, found where it was.
         runtime.confirmedAt = Math.max(runtime.confirmedAt ?? outcome.frameAt, outcome.frameAt);
+        // A reading that moved from the one before it starts a new motion epoch.
+        const moved = lastMovedAt(readings, visibleAspect());
+        if (moved !== null) runtime.motionAt = Math.max(runtime.motionAt ?? moved, moved);
         if (runtime.suspectAt !== null && outcome.frameAt > runtime.suspectAt) runtime.suspectAt = null;
         if (watch !== null || runtime.watchBase === null) {
           runtime.watchBase = watch;
@@ -2215,6 +2260,7 @@ export function useLiveDetect({
           (motionScore ?? 0) < HELD_RELEASE_MOTION;
         if (!neutral) {
           runtime.suspectAt = Math.max(runtime.suspectAt ?? outcome.frameAt, outcome.frameAt);
+          runtime.motionAt = Math.max(runtime.motionAt ?? outcome.frameAt, outcome.frameAt);
           runtime.readyVerdict = false;
           runtime.settledVerdict = false;
         }
@@ -2598,6 +2644,7 @@ export function useLiveDetect({
       const height = canvas.height;
       const now = performance.now();
       const epoch = runtime.mlEpoch;
+      const stream = { width: video.videoWidth, height: video.videoHeight };
       runtime.mlWarmUpStarted = true;
       void detectOnCanvasMl(canvas, ML_WARM_UP_BUDGET_MS, assetsRef.current).then((detection) => {
         // A pass that ran long describes a frame that has gone, and one that
@@ -2605,7 +2652,7 @@ export function useLiveDetect({
         // withdrawn; either way all it leaves behind is a warm session.
         if (cancelled || runtime.mlEpoch !== epoch) return;
         if (!isMlResultFresh(now, performance.now())) return;
-        if (video.videoWidth === 0) return;
+        if (video.videoWidth === 0 || video.videoWidth !== stream.width || video.videoHeight !== stream.height) return;
         const { accepted, rejected } = accept(detection, width, height, now, null);
         runtime.answer = passAnswer(detection, rejected, null);
         const ms = performance.now() - now;
@@ -2737,10 +2784,11 @@ export function useLiveDetect({
       runtime.fill = sheet === null ? null : fillShare(sheet);
       // A corner under a control drawn over the picture is a corner the
       // person cannot see: the page is cut off to them, as at an edge.
-      const covered =
-        sheetFrame !== null &&
-        spotsRef.current.length > 0 &&
-        cornerUnderSpot([sheetFrame.topLeft, sheetFrame.topRight, sheetFrame.bottomRight, sheetFrame.bottomLeft], spotsRef.current);
+      const coveredBy =
+        sheetFrame === null || spotsRef.current.length === 0
+          ? null
+          : spotUnderCorner([sheetFrame.topLeft, sheetFrame.topRight, sheetFrame.bottomRight, sheetFrame.bottomLeft], spotsRef.current);
+      const covered = coveredBy !== null;
       // The hint's window over the found sheet's readings (a trembling hand)
       // — at least 2.5 of the loop's interval, which a slow phone stretches.
       const shakeWindow = Math.max(SHAKE_WINDOW_MS, 2.5 * runtime.intervalMs);
@@ -2884,6 +2932,8 @@ export function useLiveDetect({
           agree: tracking && readingsAgree(runtime.sheetReadings, aspect),
           frameAgeMax: autoFrameAgeMax(runtime.intervalMs),
           lockedSince: tracking ? runtime.timeline.since("lock") : null,
+          motionAt: runtime.motionAt,
+          stillSinceMotion: tracking && settledSince(runtime.sheetReadings, aspect, runtime.motionAt),
         });
         runtime.countdown = auto.countdown;
         runtime.countdownStart = auto.countdown === null ? null : (auto.start ?? null);
@@ -2900,7 +2950,9 @@ export function useLiveDetect({
                   ? `auto: holding (${runtime.stillWhy ?? "wobble"})`
                   : guidance.ready.onSince === null
                     ? "auto: waiting for the cue"
-                    : "auto: waiting for a fresh pass";
+                    : runtime.motionAt !== null && (runtime.confirmedAt === null || runtime.confirmedAt <= runtime.motionAt)
+                      ? "auto: waiting for a frame after the motion"
+                      : "auto: waiting for a fresh, quiet frame";
         }
         // One last look at the camera, at the instant of the photo — and,
         // whatever the cue said, never on an uncertain page (owner rule: a
@@ -2937,7 +2989,16 @@ export function useLiveDetect({
         else if (guidance.auto.armed) runtime.firedLuma = null;
       }
       // "Mova o celular": which way, kept while the hint shows (`DirectionLatch`).
-      const direction = guidance.direction.update(shown === "move-phone" && sheet !== null ? moveDirection(sheet, guidance.direction.value) : null, now);
+      // A corner under a control is uncovered by moving towards the control,
+      // whatever the page's centre says (`coveredDirection`).
+      const direction = guidance.direction.update(
+        shown === "move-phone" && sheet !== null
+          ? coveredBy !== null
+            ? coveredDirection(coveredBy, visible)
+            : moveDirection(sheet, guidance.direction.value)
+          : null,
+        now,
+      );
       runtime.nudge = direction;
       paintNudge(direction);
       if (direction !== announcedDirection) {
@@ -3023,7 +3084,11 @@ export function useLiveDetect({
       const seen = watchProbe(video);
       const score = seen === null ? null : frameMotionScore(base, seen);
       runtime.watchScore = score;
-      if (score !== null && score >= WATCH_MOVED) runtime.watchMoved = true;
+      if (score !== null && score >= WATCH_MOVED) {
+        runtime.watchMoved = true;
+        // A new motion epoch: auto-capture wants a frame read after this, fresh stillness and quiet (`AutoCapture`).
+        runtime.motionAt = Math.max(runtime.motionAt ?? now, now);
+      }
       return !runtime.watchMoved;
     }
 

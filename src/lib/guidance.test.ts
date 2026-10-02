@@ -14,6 +14,10 @@ import {
   readingsAgree,
   settledOn,
   AUTO_MIN_DWELL_MS,
+  AUTO_QUIET_MS,
+  coveredDirection,
+  lastMovedAt,
+  settledSince,
   shakeMotion,
   SHAKY_ENTER,
   SETTLE_WINDOW_MS,
@@ -41,7 +45,6 @@ import {
   READY_EXIT_MS,
   ReadyCue,
   ReadyTick,
-  REARM_AFTER_MS,
   REARM_GONE_MS,
   TICK_REARM_MS,
   toVisible,
@@ -325,9 +328,9 @@ test("auto-capture counts down on a ready page and fires once per page", () => {
   for (let t = 4000; t < 9000; t += 100) assert.equal(step(t, 4000).fire, false);
 });
 
-test("auto-capture re-arms on another page, a page gone, or time and motion", () => {
+test("auto-capture re-arms on another page, a page gone, or a changed scene — never on time and motion over the same page", () => {
   const elsewhere = rect(0.35, 0.3, 0.95, 0.85);
-  const fire = (auto: AutoCapture, at: number) => auto.update({ now: at + AUTO_FIRE_MS, readyOnSince: at, sheet: page, moving: false, aspect: 1.5, confirmedAt: at + AUTO_FIRE_MS }).fire;
+  const fire = (auto: AutoCapture, at: number) => auto.update({ now: at + AUTO_FIRE_MS, readyOnSince: at, sheet: page, moving: false, aspect: 1.5, confirmedAt: at + AUTO_FIRE_MS - AUTO_QUIET_MS }).fire;
 
   const moved = new AutoCapture();
   assert.equal(fire(moved, 0), true);
@@ -343,12 +346,12 @@ test("auto-capture re-arms on another page, a page gone, or time and motion", ()
   gone.update({ now: 1600 + REARM_GONE_MS, readyOnSince: null, sheet: null, moving: false, aspect: 1.5 });
   assert.equal(gone.armed, true);
 
+  // The phone moving over the same page (or a corner's reading jittering, which reads as moving), for as long as it
+  // likes: still the page that was taken (bench present-auto: second fires 5–7 s after the first).
   const shaken = new AutoCapture();
   assert.equal(fire(shaken, 0), true);
-  shaken.update({ now: 1000, readyOnSince: null, sheet: page, moving: true, aspect: 1.5 });
+  for (let t = 1000; t <= 9000; t += 100) shaken.update({ now: t, readyOnSince: null, sheet: page, moving: t % 300 === 0, aspect: 1.5 });
   assert.equal(shaken.armed, false);
-  shaken.update({ now: AUTO_FIRE_MS + REARM_AFTER_MS, readyOnSince: null, sheet: page, moving: false, aspect: 1.5 });
-  assert.equal(shaken.armed, true);
   const swapped = new AutoCapture();
   assert.equal(fire(swapped, 0), true);
   swapped.update({ now: 3000, readyOnSince: null, sheet: page, moving: false, aspect: 1.5, sceneChange: 0.04 });
@@ -356,8 +359,7 @@ test("auto-capture re-arms on another page, a page gone, or time and motion", ()
   swapped.update({ now: 3100, readyOnSince: null, sheet: page, moving: false, aspect: 1.5, sceneChange: 0.2 });
   assert.equal(swapped.armed, true);
   // A ready cue that was already on counts from the re-arm, not from before it.
-  const now = AUTO_FIRE_MS + REARM_AFTER_MS + 10;
-  assert.equal(shaken.update({ now, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: now }).fire, false);
+  assert.equal(swapped.update({ now: 3110, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: 3100 }).fire, false);
 });
 
 test("auto-capture's final look runs during the countdown: a frame read well into it, fresh at the fire (R3)", () => {
@@ -391,14 +393,20 @@ test("auto-capture: the countdown starts on a settled page, but the fire waits f
   assert.equal(at(AUTO_FIRE_MS + 120, true, true).fire, true);
 });
 
-test("auto-capture: a page held very still gets the short countdown, kept for that countdown", () => {
-  const fast = new AutoCapture();
+test("auto-capture: a page held very still gets the short countdown, for as long as its readings agree", () => {
   const step = (auto: AutoCapture, now: number, agree: boolean) =>
-    auto.update({ now, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: now - 10, agree });
+    auto.update({ now, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: Math.max(AUTO_CONFIRM_AFTER_MS, now - AUTO_QUIET_MS), agree });
+  const fast = new AutoCapture();
   assert.equal(step(fast, 100, true).countdown, 100 / AUTO_FIRE_FAST_MS);
-  // The agreement wobbling later does not stretch it again.
-  assert.equal(step(fast, 200, false).end, AUTO_FIRE_FAST_MS);
-  assert.equal(step(fast, AUTO_FIRE_FAST_MS, false).fire, true);
+  assert.equal(step(fast, 200, true).end, AUTO_FIRE_FAST_MS);
+  assert.equal(step(fast, AUTO_FIRE_FAST_MS, true).fire, true);
+  // The readings stop agreeing during it: the full wait, and it is not earned back in this countdown.
+  const wobbly = new AutoCapture();
+  assert.equal(step(wobbly, 100, true).end, AUTO_FIRE_FAST_MS);
+  assert.equal(step(wobbly, 200, false).end, AUTO_FIRE_MS);
+  assert.equal(step(wobbly, AUTO_FIRE_FAST_MS, true).fire, false);
+  assert.equal(step(wobbly, AUTO_FIRE_FAST_MS + 10, true).end, AUTO_FIRE_MS);
+  assert.equal(step(wobbly, AUTO_FIRE_MS, true).fire, true);
   // Without the agreement: the full countdown.
   const slow = new AutoCapture();
   assert.equal(step(slow, AUTO_FIRE_FAST_MS, false).fire, false);
@@ -419,25 +427,25 @@ test("readings agree: the newest three within the tight tolerance", () => {
 test("after the confirm screen, re-arming counts from the viewfinder's return", () => {
   // A 3 s confirm screen, then the page relocks slowly (1.1 s) — the same page.
   const slow = new AutoCapture();
-  assert.equal(slow.update({ now: 500, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: 500 }).fire, true);
+  assert.equal(slow.update({ now: 500, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: 300 }).fire, true);
   slow.pause();
   slow.resume(3500);
   for (let t = 3500; t < 4600; t += 50) slow.update({ now: t, readyOnSince: null, sheet: null, moving: false, aspect: 1.5 });
   slow.update({ now: 4600, readyOnSince: null, sheet: page, moving: false, aspect: 1.5 });
   assert.equal(slow.armed, false);
-  // One jostle right after the confirm screen: not two seconds of it.
+  // A jostle after the confirm screen, then the same page for seconds: not another page.
   const jostled = new AutoCapture();
-  jostled.update({ now: 500, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: 500 });
+  assert.equal(jostled.update({ now: 500, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: 300 }).fire, true);
   jostled.pause();
   jostled.resume(3500);
   jostled.update({ now: 3600, readyOnSince: null, sheet: page, moving: true, aspect: 1.5 });
   jostled.update({ now: 3700, readyOnSince: null, sheet: page, moving: false, aspect: 1.5 });
   assert.equal(jostled.armed, false);
-  jostled.update({ now: 3500 + REARM_AFTER_MS, readyOnSince: null, sheet: page, moving: false, aspect: 1.5 });
-  assert.equal(jostled.armed, true);
+  jostled.update({ now: 3500 + 5000, readyOnSince: null, sheet: page, moving: false, aspect: 1.5 });
+  assert.equal(jostled.armed, false);
   // Switching auto-capture off and on again does not forget the page taken.
   const toggled = new AutoCapture();
-  toggled.update({ now: 500, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: 500 });
+  assert.equal(toggled.update({ now: 500, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: 300 }).fire, true);
   toggled.enable(600);
   assert.equal(toggled.armed, false);
 });
@@ -687,30 +695,93 @@ test("hold still: the move a framing hint asked for is not shaking — the readi
   assert.ok((shakeMotion(shaking, 1.5, 600, 1000) ?? 0) > SHAKY_ENTER);
 });
 
-test("auto-capture: a fire vetoed at its instant is not the page's one fire — the same countdown fires on the next fresh frame", () => {
+test("auto-capture: a fire vetoed at its instant is not the page's one fire — but the next one waits for fresh evidence after the veto", () => {
   const auto = new AutoCapture();
-  const step = (now: number, confirmedAt: number) => auto.update({ now, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, steady: true, confirmedAt });
+  const step = (now: number, confirmedAt: number, motionAt: number | null = null, stillSinceMotion = true) =>
+    auto.update({ now, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, steady: true, confirmedAt, motionAt, stillSinceMotion });
+  step(300, 280);
   assert.equal(step(AUTO_FIRE_MS, AUTO_FIRE_MS - 20).fire, true);
-  // The live loop's last look at the camera said it moved: not taken.
+  // The live loop's last look at the camera said it moved (a watch trip: a new motion epoch at 500): not taken.
   auto.retract();
   assert.equal(auto.armed, true);
-  // The next pass on a later frame: fires at once, the countdown not run again.
-  assert.deepEqual(cf(step(AUTO_FIRE_MS + 150, AUTO_FIRE_MS + 120)), { countdown: 1, fire: true });
+  const trip = AUTO_FIRE_MS;
+  // The frames read before the trip no longer count, however fresh.
+  assert.deepEqual(cf(step(trip + 30, trip - 10, trip)), { countdown: 1, fire: false });
+  // A frame after it, but the stillness since the trip not gathered yet: holds.
+  assert.deepEqual(cf(step(trip + 200, trip + 120, trip, false)), { countdown: 1, fire: false });
+  // Stillness since the trip, but not yet quiet for AUTO_QUIET_MS since the first frame after it: holds.
+  assert.deepEqual(cf(step(trip + 260, trip + 240, trip)), { countdown: 1, fire: false });
+  // Quiet long enough, on a fresh frame: fires — the countdown, done, is not run again.
+  assert.deepEqual(cf(step(trip + 120 + AUTO_QUIET_MS, trip + 240, trip)), { countdown: 1, fire: true });
   // Taken now: once per page, as ever.
-  assert.equal(step(AUTO_FIRE_MS + 400, AUTO_FIRE_MS + 380).fire, false);
+  assert.equal(step(trip + 800, trip + 780, trip).fire, false);
 });
 
-test("auto-capture: never sooner than the minimum dwell after the page was found — the countdown spans the wait", () => {
+test("auto-capture: the quiet before the shutter — the camera seen still for AUTO_QUIET_MS since a qualifying frame, restarted by any motion", () => {
   const auto = new AutoCapture();
-  const step = (now: number) => auto.update({ now, readyOnSince: 200, sheet: page, moving: false, aspect: 1.5, steady: true, confirmedAt: now - 20, lockedSince: 0 });
+  const step = (now: number, confirmedAt: number, motionAt: number | null = null) =>
+    auto.update({ now, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, steady: true, confirmedAt, motionAt });
+  // The first frame that qualifies lands at the countdown's end: the fire waits AUTO_QUIET_MS from it, on fresh frames.
+  assert.equal(step(AUTO_FIRE_MS, AUTO_FIRE_MS - 5).fire, false);
+  assert.equal(step(AUTO_FIRE_MS + 100, AUTO_FIRE_MS + 90).fire, false);
+  // Motion seen (a watch trip at +120): the quiet starts again from a frame after it.
+  assert.equal(step(AUTO_FIRE_MS + AUTO_QUIET_MS, AUTO_FIRE_MS + 90, AUTO_FIRE_MS + 120).fire, false);
+  assert.equal(step(AUTO_FIRE_MS + 250, AUTO_FIRE_MS + 200, AUTO_FIRE_MS + 120).fire, false);
+  assert.equal(step(AUTO_FIRE_MS + 200 + AUTO_QUIET_MS - 1, AUTO_FIRE_MS + 330, AUTO_FIRE_MS + 120).fire, false);
+  assert.equal(step(AUTO_FIRE_MS + 200 + AUTO_QUIET_MS, AUTO_FIRE_MS + 330, AUTO_FIRE_MS + 120).fire, true);
+  assert.ok(AUTO_QUIET_MS >= 100);
+});
+
+test("auto-capture: never sooner than the minimum dwell after the page was found, and only on a frame read after it", () => {
+  const auto = new AutoCapture();
+  const step = (now: number, confirmedAt = now - 20) => auto.update({ now, readyOnSince: 200, sheet: page, moving: false, aspect: 1.5, steady: true, confirmedAt, lockedSince: 0 });
   // Settled at 200: the 500 ms countdown alone would end at 700; the dwell holds it to 1200, drawn over 200…1200.
   const half = step(700);
   assert.equal(half.fire, false);
   assert.ok(half.countdown !== null && Math.abs(half.countdown - 0.5) < 1e-9);
   assert.equal(half.end, AUTO_MIN_DWELL_MS);
   assert.equal(step(AUTO_MIN_DWELL_MS - 1).fire, false);
-  assert.equal(step(AUTO_MIN_DWELL_MS).fire, true);
+  // The dwell is over, but the freshest frame was read before it ended (the review's S25 case: read at 980, 220 ms
+  // old at 1200 — inside the age bound, after the countdown's start): no fire on it.
+  assert.equal(step(AUTO_MIN_DWELL_MS, 980).fire, false);
+  assert.equal(step(AUTO_MIN_DWELL_MS + 100, AUTO_MIN_DWELL_MS - 1).fire, false);
+  // A frame read after the dwell, then the quiet: fires.
+  assert.equal(step(AUTO_MIN_DWELL_MS + 120, AUTO_MIN_DWELL_MS + 10).fire, false);
+  assert.equal(step(AUTO_MIN_DWELL_MS + 10 + AUTO_QUIET_MS, AUTO_MIN_DWELL_MS + 130).fire, true);
   // No lock: no countdown to finish.
   const lost = new AutoCapture();
   assert.equal(lost.update({ now: 5000, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, steady: true, confirmedAt: 4990, lockedSince: null }).fire, false);
+});
+
+test("auto-capture's motion epoch: when the readings last moved, and stillness gathered after it", () => {
+  const at = (t: number, dx: number) => ({ at: t, quad: rect(0.2 + dx, 0.2, 0.8 + dx, 0.75) });
+  const still = [at(0, 0), at(120, 0.001), at(240, 0), at(360, 0.001)];
+  assert.equal(lastMovedAt(still, 1.5), null);
+  // A step of 4 % between two readings: motion at the later one's frame.
+  const moved = [at(0, 0), at(120, 0.04), at(240, 0.041), at(360, 0.041), at(480, 0.04)];
+  assert.equal(lastMovedAt(moved, 1.5), 120);
+  // Stillness from before the motion does not count; after it, three readings over the settle window do.
+  assert.equal(settledOn(moved, 1.5), true);
+  assert.equal(settledSince(moved.slice(0, 4), 1.5, 240), false);
+  assert.equal(settledSince(moved, 1.5, 120), true);
+  assert.equal(settledSince(moved, 1.5, 240), false);
+  assert.equal(settledSince(still, 1.5, null), true);
+});
+
+test("'Mova o celular' with a corner under a control: towards the control, not by the page's centre", () => {
+  const view = { x: 0, y: 0, width: 1, height: 1 };
+  // The review's case: a page centred a little high (centre would say "up") whose lower-left corner lies under the
+  // bottom bar — "up" would push it further under; "down" moves the picture up, off the bar.
+  const high = rect(0.2, 0.05, 0.8, 0.9);
+  assert.equal(moveDirection(high), "up");
+  const bottomBar = { x: 0, y: 0.86, width: 1, height: 0.14 };
+  assert.equal(coveredDirection(bottomBar, view), "down");
+  // A control at the top, at the left or right side.
+  assert.equal(coveredDirection({ x: 0.1, y: 0, width: 0.8, height: 0.08 }, view), "up");
+  assert.equal(coveredDirection({ x: 0.88, y: 0.3, width: 0.12, height: 0.4 }, view), "right");
+  assert.equal(coveredDirection({ x: 0, y: 0.3, width: 0.12, height: 0.4 }, view), "left");
+  // Against the visible crop, not the whole frame: a bar at the crop's bottom inside a taller frame.
+  const crop = { x: 0, y: 0.1, width: 1, height: 0.7 };
+  assert.equal(coveredDirection({ x: 0.3, y: 0.72, width: 0.4, height: 0.08 }, crop), "down");
+  assert.equal(coveredDirection({ x: 0.3, y: 0.1, width: 0.4, height: 0.08 }, crop), "up");
 });

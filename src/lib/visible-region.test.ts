@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   clearArea,
   cornerUnderSpot,
+  spotUnderCorner,
   spotsInFrame,
   frameBoxFor,
   MAX_CROP_PER_SIDE,
@@ -144,4 +145,7 @@ test("spots: a control over the picture, in frame fractions; a corner under one 
   // Just past the button's edge, inside the pad: still hidden.
   assert.equal(cornerUnderSpot([{ x: 0.155, y: 0.05 }], spots), true);
   assert.equal(cornerUnderSpot([{ x: 0.155, y: 0.05 }], spots, 0), false);
+  // Which control: the one a corner lies under (the hint's direction is towards it).
+  assert.equal(spotUnderCorner(page, spots), spots.find((s) => cornerUnderSpot(page, [s])) ?? null);
+  assert.equal(spotUnderCorner(page.map((p) => ({ x: p.x, y: p.y + 0.1 })), spots), null);
 });

@@ -62,11 +62,11 @@
  * have held {@link AUTO_FIRE_MS} — and a detection pass on a frame sampled
  * after that has found the page where it was — it fires, once per
  * page. After a fire it waits for the page to change (a sheet somewhere
- * else, no sheet for a second, or the scene changed) or for two seconds and
- * the phone moving, all counted from when the viewfinder came back from the
- * confirm screen, before it may fire again. It goes through the same capture
- * as a tap — capture priority, refinement, the confirm screen — and never
- * replaces the shutter.
+ * else, no sheet for a second, or the scene changed), counted from when the
+ * viewfinder came back from the confirm screen, before it may fire again —
+ * the phone moving over the same page is not another page. It goes through
+ * the same capture as a tap — capture priority, refinement, the confirm
+ * screen — and never replaces the shutter.
  *
  * Pure: no DOM, no clock of its own (every call is given `now`); tested in
  * `guidance.test.ts`. Thresholds were set on the bench's guidance sessions
@@ -304,6 +304,41 @@ export const AUTO_CONFIRM_AFTER_MS = 150;
  */
 export const AUTO_FRAME_AGE_MS = 250;
 export const AUTO_FRAME_AGE_MAX_MS = 600;
+/**
+ * …and the camera seen quiet for at least this long since the first frame
+ * that qualified (read after the countdown's start, after the minimum dwell
+ * and after the last motion seen — a camera-watch trip, a pass that lost the
+ * page, readings that moved): the passes and the watch (every 100 ms, and
+ * once more at the instant) looked at frames newer than that one and saw
+ * nothing move. A motion they see starts a new epoch, and the wait with it.
+ * A motion that starts after the newest frame the app has cannot be seen by
+ * any look at the frames: this narrows that window, it cannot close it.
+ */
+export const AUTO_QUIET_MS = 150;
+
+/**
+ * When the readings (frame time, quad in the visible crop) last showed the
+ * page moving: the frame time of the newest reading more than
+ * {@link STILL_MAX} (share of the diagonal, any corner) from the one before
+ * it; null when none was. Auto-capture's motion epoch (`motionAt`): only a
+ * frame read after it confirms a fire.
+ */
+export function lastMovedAt(readings: readonly { at: number; quad: NormalizedQuad }[], aspect: number): number | null {
+  const diagonal = Math.hypot(1, aspect);
+  for (let i = readings.length - 1; i > 0; i -= 1) {
+    const a = readings[i - 1].quad;
+    const b = readings[i].quad;
+    for (const key of CORNER_KEYS) {
+      if (Math.hypot(b[key].x - a[key].x, (b[key].y - a[key].y) * aspect) / diagonal > STILL_MAX) return readings[i].at;
+    }
+  }
+  return null;
+}
+
+/** Settled ({@link settledOn}) on the readings read after `motionAt` alone (null: all of them) — stillness that is not from before the motion. */
+export function settledSince(readings: readonly { at: number; quad: NormalizedQuad }[], aspect: number, motionAt: number | null): boolean {
+  return settledOn(motionAt === null ? readings : readings.filter((r) => r.at > motionAt), aspect);
+}
 
 /** The frame-age bound of the fire's final look for a loop reading every `intervalMs`. */
 export function autoFrameAgeMax(intervalMs: number): number {
@@ -335,8 +370,6 @@ export function readingsAgree(readings: readonly { at: number; quad: NormalizedQ
 export const REARM_JUMP = 0.08;
 /** …or no sheet for this long while the viewfinder was live… */
 export const REARM_GONE_MS = 1000;
-/** …or this long since the fire and the phone moved in between… */
-export const REARM_AFTER_MS = 2000;
 /**
  * …or the scene itself changed since the fire (a page swapped in at much
  * the same place while the confirm screen was up): the viewfinder's 24×24
@@ -732,6 +765,22 @@ export function moveDirection(sheet: NormalizedQuad, current: MoveDirection | nu
 }
 
 /**
+ * Which way to move the phone to bring a corner out from under a control
+ * drawn over the picture (`spot`, the control's region, in the same frame
+ * fractions as `visible`, the visible crop): towards the control's side of
+ * the view — the camera moving that way moves the picture away from it.
+ * The page's own centre ({@link moveDirection}) says nothing about this: a
+ * page centred a little high whose lower corner lies under the bottom bar
+ * would be told "up", pushing that corner further under the bar.
+ */
+export function coveredDirection(spot: VisibleRect, visible: VisibleRect): MoveDirection {
+  const dx = (spot.x + spot.width / 2 - (visible.x + visible.width / 2)) / Math.max(1e-6, visible.width);
+  const dy = (spot.y + spot.height / 2 - (visible.y + visible.height / 2)) / Math.max(1e-6, visible.height);
+  if (Math.abs(dx) > Math.abs(dy)) return dx < 0 ? "left" : "right";
+  return dy < 0 ? "up" : "down";
+}
+
+/**
  * The direction "Mova o celular" says, under the hint's own rules: chosen when
  * the hint appears and kept while it shows — another direction replaces it
  * only once it has been the answer {@link HINT_APPEAR_MS} and the one showing
@@ -968,9 +1017,12 @@ export class AutoCapture {
   private fired: { quad: NormalizedQuad; at: number } | null = null;
   /** When it was last armed: a ready cue older than that counts from here. */
   private armedAt = Number.NEGATIVE_INFINITY;
-  /** The countdown (by its start) that earned the short wait: kept for that countdown. */
+  /** The countdown (by its start) that earned the short wait, while its readings agree. */
   private fastFor: number | null = null;
-  private movedSinceFire = false;
+  /** The countdown (by its start) whose readings stopped agreeing: the full wait, for good. */
+  private slowFor: number | null = null;
+  /** The first frame that qualified for the final look, in the current motion epoch: the quiet counts from it. */
+  private quietFrom: number | null = null;
   private seenSinceFire = false;
   private goneSince: number | null = null;
 
@@ -984,11 +1036,13 @@ export class AutoCapture {
    * conditions came on — the page settled (null: off; the live loop's
    * settling {@link ReadyCue}, `onSince`); `sheet` the found sheet in the
    * visible crop (null: none); `moving` the phone moving (the hold-still
-   * threshold crossed); `confirmedAt` the time of the frame of the newest
-   * detection pass that found the page where it was (null: none). The
-   * countdown completes, but it fires only on a confirmed frame read at
-   * least {@link AUTO_CONFIRM_AFTER_MS} into it and no older than
-   * `frameAgeMax` now: the brackets alone are no proof the page is still in
+   * threshold crossed — not, on its own, another page); `confirmedAt` the
+   * time of the frame of the newest detection pass that found the page where
+   * it was (null: none). The countdown completes, but it fires only on a
+   * confirmed frame read at least {@link AUTO_CONFIRM_AFTER_MS} into it,
+   * after the minimum dwell and after the last motion (`motionAt`), no older
+   * than `frameAgeMax` now, and with the camera seen quiet for
+   * {@link AUTO_QUIET_MS} since the first such frame: the brackets alone are no proof the page is still in
    * front of the camera, and a camera whipped off the page between two
    * passes is caught by the next one (or by the watch,
    * `hooks/useLiveDetect.ts`) rather than photographed.
@@ -1009,8 +1063,17 @@ export class AutoCapture {
     agree?: boolean;
     /** The fire's frame-age bound ({@link autoFrameAgeMax}); absent: {@link AUTO_FRAME_AGE_MS}. */
     frameAgeMax?: number;
-    /** When the page was found (the lock, held since): no fire before {@link AUTO_MIN_DWELL_MS} after it. Absent: not checked. */
+    /** When the page was found (the lock, held since): no fire before {@link AUTO_MIN_DWELL_MS} after it — on a frame read after it, too. Absent: not checked. */
     lockedSince?: number | null;
+    /**
+     * When motion was last seen (a camera-watch trip, a pass that lost the
+     * page, readings that moved; frame time): only a frame read after it
+     * confirms, and the quiet ({@link AUTO_QUIET_MS}) counts from such a
+     * frame. Null: none since the lock.
+     */
+    motionAt?: number | null;
+    /** The readings since {@link motionAt} alone are settled ({@link settledOn}): fresh stillness, not stillness from before the motion. Absent: not checked. */
+    stillSinceMotion?: boolean;
   }): AutoCaptureState {
     const { now, readyOnSince, sheet } = input;
     if (this.fired !== null) {
@@ -1019,25 +1082,43 @@ export class AutoCapture {
     }
     if (this.fired !== null || readyOnSince === null || sheet === null) {
       this.fastFor = null;
+      this.quietFrom = null;
       return { countdown: null, fire: false };
     }
     const start = Math.max(readyOnSince, this.armedAt);
-    if (this.fastFor !== start) this.fastFor = input.agree === true ? start : null;
+    // The short wait is earned by readings that agree tightly, and lost —
+    // for this countdown — the moment they stop agreeing.
+    if (this.fastFor === start && input.agree === false) {
+      this.fastFor = null;
+      this.slowFor = start;
+    } else if (this.fastFor !== start && this.slowFor !== start) this.fastFor = input.agree === true ? start : null;
     const duration = this.fastFor === start ? AUTO_FIRE_FAST_MS : AUTO_FIRE_MS;
     const lockedSince = input.lockedSince;
     const dwellEnd = lockedSince === undefined ? Number.NEGATIVE_INFINITY : lockedSince === null ? Number.POSITIVE_INFINITY : lockedSince + AUTO_MIN_DWELL_MS;
     const end = Math.max(start + duration, dwellEnd);
-    if (!Number.isFinite(end)) return { countdown: 0, fire: false, start, end: null };
+    if (!Number.isFinite(end)) {
+      this.quietFrom = null;
+      return { countdown: 0, fire: false, start, end: null };
+    }
+    // The final look (R3): a frame read well into the countdown, after the
+    // minimum dwell and after the last motion seen; the first such frame
+    // starts the quiet the fire waits out ({@link AUTO_QUIET_MS}).
+    const motionAt = input.motionAt ?? null;
+    const confirmedAt = input.confirmedAt ?? null;
+    const confirmFrom = Math.max(start + Math.min(AUTO_CONFIRM_AFTER_MS, duration), dwellEnd);
+    const qualifies = (at: number | null): at is number => at !== null && at >= confirmFrom && (motionAt === null || at > motionAt);
+    if (!qualifies(this.quietFrom)) this.quietFrom = null;
+    if (this.quietFrom === null && qualifies(confirmedAt)) this.quietFrom = confirmedAt;
     const progress = Math.min(1, (now - start) / (end - start));
     if (progress < 1) return { countdown: progress, fire: false, start, end };
     if (input.steady === false || (input.ready ?? input.steady) === false) return { countdown: 1, fire: false, start, end };
-    const confirmedAt = input.confirmedAt ?? null;
     const ageMax = input.frameAgeMax ?? AUTO_FRAME_AGE_MS;
-    if (confirmedAt === null || confirmedAt < start + Math.min(AUTO_CONFIRM_AFTER_MS, duration) || now - confirmedAt > ageMax) {
+    if (!qualifies(confirmedAt) || now - confirmedAt > ageMax || input.stillSinceMotion === false) {
       return { countdown: 1, fire: false, start, end };
     }
+    if (this.quietFrom === null || now - this.quietFrom < AUTO_QUIET_MS) return { countdown: 1, fire: false, start, end };
     this.fired = { quad: sheet, at: now };
-    this.movedSinceFire = false;
+    this.quietFrom = null;
     this.seenSinceFire = false;
     this.goneSince = null;
     return { countdown: 1, fire: true, start, end };
@@ -1047,13 +1128,16 @@ export class AutoCapture {
    * The fire this moment's {@link update} answered was not taken (the live
    * loop's last look at the camera, or a corner turned uncertain, vetoed it
    * at its instant): the page is not taken, and the same countdown — done —
-   * fires on the next moment the cue and a fresh frame allow. Without this
+   * fires once the cue, a frame read after the veto and its quiet allow. Without this
    * a vetoed fire counted as the page's one fire: auto-capture then waited
    * for "another page", and re-armed only once the phone moved — a fire
    * seconds later on the same page.
    */
   retract(): void {
     this.fired = null;
+    // Whatever vetoed it, the quiet is owed again from a frame after it
+    // (a camera-watch trip is also a new motion epoch, `motionAt`).
+    this.quietFrom = null;
   }
 
   /**
@@ -1064,7 +1148,6 @@ export class AutoCapture {
   took(now: number, sheet: NormalizedQuad | null): void {
     if (sheet === null) return;
     this.fired = { quad: sheet, at: now };
-    this.movedSinceFire = false;
     this.seenSinceFire = false;
     this.goneSince = null;
   }
@@ -1086,13 +1169,11 @@ export class AutoCapture {
   /**
    * The viewfinder is back (the confirm screen closed) at `now`: whatever
    * says "another page" is counted from here — the time behind the confirm
-   * screen is not time the page was gone, the phone moving while it was up
-   * is not the phone moving over the page, and the page has to be seen again
+   * screen is not time the page was gone, and the page has to be seen again
    * before its absence means anything.
    */
   resume(now: number): void {
     if (this.fired !== null) this.fired = { ...this.fired, at: now };
-    this.movedSinceFire = false;
     this.seenSinceFire = false;
     this.goneSince = null;
   }
@@ -1102,17 +1183,26 @@ export class AutoCapture {
     this.fired = null;
     this.armedAt = Number.NEGATIVE_INFINITY;
     this.fastFor = null;
+    this.slowFor = null;
+    this.quietFrom = null;
     this.goneSince = null;
   }
 
-  private watchForAnotherPage({ now, sheet, moving, aspect, sceneChange }: { now: number; sheet: NormalizedQuad | null; moving: boolean; aspect: number; sceneChange?: number | null }): void {
+  /**
+   * Another page, after a fire: a sheet somewhere else, the page gone for
+   * {@link REARM_GONE_MS}, or the scene changed. The phone moving over the
+   * same page — or a corner's reading jittering, which reads as moving — is
+   * not another page however long it lasts: until 5b that plus two seconds
+   * re-armed, and a page held through the confirm screen was taken twice
+   * (bench present-auto, 5–7 s after the first fire).
+   */
+  private watchForAnotherPage({ now, sheet, aspect, sceneChange }: { now: number; sheet: NormalizedQuad | null; aspect: number; sceneChange?: number | null }): void {
     const fired = this.fired;
     if (fired === null) return;
     if (sceneChange !== undefined && sceneChange !== null && sceneChange >= REARM_SCENE_CHANGE) {
       this.fired = null;
       return;
     }
-    if (moving) this.movedSinceFire = true;
     if (sheet !== null) {
       this.seenSinceFire = true;
       this.goneSince = null;
@@ -1126,6 +1216,5 @@ export class AutoCapture {
       this.goneSince ??= now;
       if (now - this.goneSince >= REARM_GONE_MS) this.fired = null;
     }
-    if (this.fired !== null && this.movedSinceFire && now - fired.at >= REARM_AFTER_MS) this.fired = null;
   }
 }

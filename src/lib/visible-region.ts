@@ -224,7 +224,16 @@ export function cornerUnderSpot(
   spots: readonly FrameRegion[],
   pad = 0.01,
 ): boolean {
-  return corners.some((p) =>
-    spots.some((s) => p.x >= s.x - pad && p.x <= s.x + s.width + pad && p.y >= s.y - pad && p.y <= s.y + s.height + pad),
+  return spotUnderCorner(corners, spots, pad) !== null;
+}
+
+/** The first spot (as {@link cornerUnderSpot}) any of the corners lies under; null: none. */
+export function spotUnderCorner(
+  corners: readonly { x: number; y: number }[],
+  spots: readonly FrameRegion[],
+  pad = 0.01,
+): FrameRegion | null {
+  return (
+    spots.find((s) => corners.some((p) => p.x >= s.x - pad && p.x <= s.x + s.width + pad && p.y >= s.y - pad && p.y <= s.y + s.height + pad)) ?? null
   );
 }
