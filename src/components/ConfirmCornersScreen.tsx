@@ -527,8 +527,8 @@ export function ConfirmCornersScreen({
 /**
  * Mark the editor's handles whose corner the capture could not see
  * (inferred or unknown, `lib/corner-check.ts`): `data-scan-estimated` (the
- * stylesheet draws it hollow and dashed, with the badge word from
- * `data-scan-estimated-label`) and an accessible name that says so. The
+ * stylesheet draws it hollow and dashed), a badge word under it, and an
+ * accessible name that says so. The
  * editor may hand its handles back in another order than the quad it was
  * seeded with, so each handle takes the provenance of the seed corner nearest
  * it. Moving a handle (pointer or keys) takes its mark away; `onCleared`
@@ -552,12 +552,17 @@ function markEstimatedHandles(
     const key = handle.dataset.corner as CornerHandleKey | undefined;
     if (key === undefined || !(key in labels) || provenance[key] === undefined || provenance[key] === "seen") continue;
     handle.setAttribute("data-scan-estimated", provenance[key]);
-    handle.setAttribute("data-scan-estimated-label", words.estimatedBadge);
     handle.setAttribute("aria-label", words.estimatedHandle(labels[key]));
+    // The word under the puck (a child: the handle's ::after is scanic's hit area).
+    const badge = document.createElement("span");
+    badge.setAttribute("data-scan-estimated-badge", "");
+    badge.setAttribute("aria-hidden", "true");
+    badge.textContent = words.estimatedBadge;
+    handle.appendChild(badge);
     const clear = () => {
       if (!handle.hasAttribute("data-scan-estimated")) return;
       handle.removeAttribute("data-scan-estimated");
-      handle.removeAttribute("data-scan-estimated-label");
+      badge.remove();
       handle.setAttribute("aria-label", labels[key]);
       if (host.querySelector("[data-scan-estimated]") === null) onCleared();
     };
