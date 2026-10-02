@@ -35,6 +35,11 @@ export class FireTimeline {
     }
   }
 
+  /** When `key` last came true and has held since (null: false right now). */
+  since(key: TimelineCondition): number | null {
+    return this.marks[key];
+  }
+
   /** A copy of the marks now. */
   snapshot(): TimelineMarks {
     return { ...this.marks };

@@ -258,7 +258,14 @@ const CADENCE: Record<DetectLaneKind, Record<DetectionSource, CadenceProfile>> =
  * worker (the main thread's time is the user's), only for those seconds:
  * after the fire, or with no page, it is back to {@link CADENCE}.
  */
-const BOOST_DUTY = 0.6;
+const BOOST_DUTY = 0.8;
+/**
+ * …and while a hint asks the person to move the phone on a page already
+ * found (most fires start with an "Aproxime"), for at most this long after
+ * the lock: at a slow phone's 0.35 the hint clears (and the readings the cue
+ * needs start) one ~600 ms pass after the person got there.
+ */
+const BOOST_FRAMING_MS = 6000;
 
 /**
  * Time constant of the drawn quad's glide toward the filter's answer: a
@@ -2853,7 +2860,13 @@ export function useLiveDetect({
       if (guidance.tick.update(isReady, tracking, now)) setReadyTick((n) => n + 1);
       let fire = false;
       runtime.countdown = null;
-      runtime.boost = autoCaptureRef.current && tracking && runtime.locked && guidance.auto.armed && (raw === null || raw === "hold-still");
+      const lockedSince = runtime.timeline.since("lock");
+      runtime.boost =
+        autoCaptureRef.current &&
+        tracking &&
+        runtime.locked &&
+        guidance.auto.armed &&
+        (raw === null || raw === "hold-still" || (FRAMING_HINTS.has(raw) && lockedSince !== null && now - lockedSince <= BOOST_FRAMING_MS));
       if (autoCaptureRef.current) {
         const latest = runtime.motionHistory[runtime.motionHistory.length - 1]?.luma ?? null;
         // Back from the confirm screen, the scene is compared with itself as it was then.
