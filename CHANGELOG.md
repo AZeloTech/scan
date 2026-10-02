@@ -6,6 +6,16 @@ freezes at 1.0.
 
 ## [Unreleased]
 
+### Changed
+- **"Mova o celular para cima" instead of "Centralize a folha".** A page at
+  the edge of the view that would fit if re-aimed is told which way to move
+  the phone — up, down, left or right (en: "Move the phone up"), one way at a
+  time, toward the side it is cut on — with a small arrow at that edge of the
+  viewfinder (it nudges the way; not under reduced motion). The way is
+  chosen when the hint appears and changes only under the hint's own
+  minimum-show rules. `onDiagnostics`: hint id `move-phone` with a
+  `direction`.
+
 ### Added
 - **A covered corner is placed where its edges meet, and the app knows it
   is estimated.** A sheet lying over a corner of the page (a leaflet, the

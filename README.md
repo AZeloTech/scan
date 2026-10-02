@@ -51,7 +51,7 @@ the person holding the phone — can make.
 
 | | |
 |---|---|
-| **Capture** | The camera opens, a neural corner detector finds the page in the frame and guides the aim — one short hint at a time ("Aproxime", "Afaste um pouco", "Centralize a folha", "Pouca luz", "Reflexo — incline o celular", "Segure firme"), a ready cue on the corner brackets, the torch where the phone has one — and a person confirms or drags the four corners. The shutter always works. Auto-capture (taking the photo once the page has been ready for a moment, still through the corner confirmation) is experimental: the default capture screen offers it as a MANUAL · AUTOMÁTICO (BETA) switch that starts on MANUAL in every flow, and a host can hide it (`experimentalAutoCapture={false}`). "Já tenho a foto" picks a photo already on the device. No camera? It falls back to picking image files on its own. |
+| **Capture** | The camera opens, a neural corner detector finds the page in the frame and guides the aim — one short hint at a time ("Aproxime", "Afaste um pouco", "Mova o celular para cima", "Pouca luz", "Reflexo — incline o celular", "Segure firme"), a ready cue on the corner brackets, the torch where the phone has one — and a person confirms or drags the four corners. The shutter always works. Auto-capture (taking the photo once the page has been ready for a moment, still through the corner confirmation) is experimental: the default capture screen offers it as a MANUAL · AUTOMÁTICO (BETA) switch that starts on MANUAL in every flow, and a host can hide it (`experimentalAutoCapture={false}`). "Já tenho a foto" picks a photo already on the device. No camera? It falls back to picking image files on its own. |
 | **Flatten** | A Rust/WebAssembly dewarp straightens curved paper — the bend of a page held in one hand — and falls back gracefully when the geometry is not trustworthy. |
 | **Review** | Pages as thumbnails: reorder, retake, remove. Blur and small-text warnings before it is too late to re-shoot. Its primary button is "Gerar PDF": it starts the build straight from the page list. |
 | **Build** | One PDF, assembled in the browser, with a progress bar and a cancel (which returns to the page list). Given `maxBytes`, quality steps down a fixed ladder until the exact size fits — and refuses rather than exceed it. A build that fails or does not fit shows why, with every page still there, the file name and a second "Gerar PDF". |
@@ -177,7 +177,12 @@ evidence's verdict and the fill),
 the visible region, hints shown and for how long and the ready cue on and
 off (each with `fill`, the page's reach across the viewfinder at that moment),
 auto-capture's countdown, cancellations (with the reason), fires (time from a
-steady page) and re-arming, each capture (manual or automatic, the photo as
+steady page) and re-arming — the ready cue coming on, the countdown and the
+fire carry `phases`: how many ms before the event each of the cue's
+conditions (a found sheet, no hint owed, the hint slot empty, still, corners
+certain, a fresh pass) last came true, and for the fire the settling, the cue,
+the countdown's start and end, the final confirming frame and the loop's
+interval — numbers only; a `move-phone` hint carries its `direction`, each capture (manual or automatic, the photo as
 it arrived, the size it was asked for, the stream size, the part of the photo
 kept as the preview's field of view, whether the still or the preview became
 the page and — when it was the preview — why (`stillReason`), the page's
@@ -329,7 +334,10 @@ was showing stays — no ping-pong); a page nearly there (60 % or more when
 the hint appears) reads "Aproxime mais um pouco". It asks only while the
 page has room to come closer: a page held off the middle that already
 reaches the edge of the view at 65 % or more is taken as framed, and one at
-the edge that would fit if it were centred hears "Centralize a folha" —
+the edge that would fit if it were centred hears which way to move the
+phone — "Mova o celular para cima / para baixo / para a esquerda / para a
+direita", one way at a time, toward the side the page is cut on, with a
+small arrow at that edge of the viewfinder —
 "Afaste um pouco" is only for a page already as big as asked (a corner
 within 1.5 % of the edge), too big to fit, or whose paper runs on past the
 edge. The ready cue — and so auto-capture — waits for it; the shutter
