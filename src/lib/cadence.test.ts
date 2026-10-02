@@ -46,3 +46,17 @@ test("nonsense costs are ignored; a reset forgets", () => {
   assert.equal(cadence.averageCostMs, null);
   assert.equal(cadence.intervalMs, 300);
 });
+
+test("a burst at a higher duty reads faster on the same cost, never slower, within bounds", () => {
+  const cadence = new CadenceController(worker, false);
+  assert.equal(cadence.intervalAt(0.6), 120);
+  cadence.record(105);
+  assert.ok(Math.abs(cadence.intervalMs - 300) < 1e-9);
+  assert.ok(Math.abs(cadence.intervalAt(0.6) - 175) < 1e-9);
+  // A lower duty is never slower than the beat already set.
+  assert.equal(cadence.intervalAt(0.1), cadence.intervalMs);
+  // The floor still holds.
+  const fast = new CadenceController(worker, false);
+  fast.record(20);
+  assert.equal(fast.intervalAt(0.9), 120);
+});

@@ -298,7 +298,8 @@ export interface ScanDiagnosticsCorners {
  * `slot` the hint slot empty (a hint shown keeps its minimum time);
  * `still` the page still on enough readings and the frame sharp; `check` its
  * corners measured and certain; `footing` a fresh pass found it where it was.
- * An auto-capture's fire adds `strict` (all of those together), `ready` (the
+ * An auto-capture's fire adds `settled` (the page still on a short window: the
+ * countdown may start), `strict` (all of those together), `ready` (the
  * cue on), `countdown` (its start), `end` (the countdown's end) and `confirm`
  * (the frame the final fresh pass read). `intervalMs` is the loop's interval.
  */
@@ -309,6 +310,7 @@ export interface ScanDiagnosticsPhases {
   still: number | null;
   check: number | null;
   footing: number | null;
+  settled?: number | null;
   strict?: number | null;
   ready?: number | null;
   countdown?: number | null;

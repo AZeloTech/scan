@@ -77,6 +77,16 @@ export class CadenceController {
     return this.interval;
   }
 
+  /**
+   * The interval at another duty (a short burst of faster reading — never
+   * slower than the current one): `clamp(cost / duty, min, max)` on the same
+   * smoothed cost. Before anything is measured, the current interval.
+   */
+  intervalAt(duty: number): number {
+    if (this.costMs === null) return this.interval;
+    return Math.min(this.interval, cadenceInterval(this.costMs, { ...this.profile, targetDuty: duty }));
+  }
+
   /** A new detector or a new lane: its costs start from nothing. */
   reset(profile: CadenceProfile = this.profile): void {
     this.profile = profile;

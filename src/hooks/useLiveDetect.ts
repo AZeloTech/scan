@@ -152,6 +152,9 @@ import {
   readingSpacing,
   STILL_MAX,
   STILL_WINDOW_MS,
+  SETTLE_WINDOW_MS,
+  autoFrameAgeMax,
+  readingsAgree,
   toVisible,
   WHOLE_FRAME,
   type HintKey,
@@ -244,6 +247,16 @@ const CADENCE: Record<DetectLaneKind, Record<DetectionSource, CadenceProfile>> =
     classical: { targetDuty: 0.25, minMs: 125, maxMs: 1000, initialMs: 125 },
   },
 };
+
+/**
+ * While auto-capture is on and armed and a found page is framed (no hint
+ * owed but "Segure firme"), the worker lane may spend up to this share of its
+ * thread reading — ~0.6 s of readings is what the fire waits on, and on a
+ * phone that reads every 280 ms at 0.35 it is most of the wait. Only on the
+ * worker (the main thread's time is the user's), only for those seconds:
+ * after the fire, or with no page, it is back to {@link CADENCE}.
+ */
+const BOOST_DUTY = 0.6;
 
 /**
  * Time constant of the drawn quad's glide toward the filter's answer: a
@@ -619,6 +632,10 @@ interface Runtime {
   suspectAt: number | null;
   /** The newest confirming pass's readings say still, on enough of them ({@link READY_MIN_READINGS}). */
   readyVerdict: boolean;
+  /** The newest confirming pass's readings say settled: still over the short window the countdown starts on (`SETTLE_WINDOW_MS`). */
+  settledVerdict: boolean;
+  /** Auto-capture is near a fire on this page: the worker lane reads faster for now ({@link BOOST_DUTY}). */
+  boost: boolean;
   /**
    * A photo is being taken (from the tap or the auto fire to the end of the
    * capture): the overlay stays frozen on the quad it showed, no pass runs or
@@ -677,6 +694,8 @@ interface Runtime {
  * time of the newest pass that found the page where it was).
  */
 export type FireMarks = TimelineMarks & {
+  /** When the page settled (the countdown's start condition, `SETTLE_WINDOW_MS`). */
+  settled: number | null;
   strict: number | null;
   ready: number | null;
   countdown: number | null;
@@ -746,6 +765,8 @@ function freshRuntime(): Runtime {
     confirmedAt: null,
     suspectAt: null,
     readyVerdict: false,
+    settledVerdict: false,
+    boost: false,
     capturing: false,
     stillWhy: null,
     blockWhy: null,
@@ -840,6 +861,8 @@ function clearTracking(runtime: Runtime, overlay: LiveOverlayRefs): void {
   runtime.confirmedAt = null;
   runtime.suspectAt = null;
   runtime.readyVerdict = false;
+  runtime.settledVerdict = false;
+  runtime.boost = false;
   runtime.stillWhy = null;
   runtime.watchBase = null;
   runtime.watchMoved = false;
@@ -1184,6 +1207,8 @@ export function useLiveDetect({
     hints: new HintDebounce(),
     direction: new DirectionLatch(),
     ready: new ReadyCue(),
+    /** The page settled — what auto-capture's countdown starts on (the cue's conditions, on a short stillness window). */
+    settled: new ReadyCue(),
     tick: new ReadyTick(),
     auto: new AutoCapture(),
   });
@@ -1454,6 +1479,7 @@ export function useLiveDetect({
     guidance.hints.reset();
     guidance.direction.reset();
     guidance.ready.reset();
+    guidance.settled.reset();
     // The next cue is another page's (or this one retaken): it ticks.
     guidance.tick.reset();
     guidance.auto.pause();
@@ -1661,7 +1687,10 @@ export function useLiveDetect({
         runtime.warmupLeft -= 1;
         return true;
       }
-      runtime.intervalMs = runtime.cadence.record(costMs);
+      runtime.cadence.record(costMs);
+      // Auto-capture near a fire on the worker lane: read faster for these
+      // few seconds — the fire waits on readings (`BOOST_DUTY`).
+      runtime.intervalMs = runtime.boost && runtime.passLane === "worker" ? runtime.cadence.intervalAt(BOOST_DUTY) : runtime.cadence.intervalMs;
       runtime.averageMs =
         runtime.averageMs === null
           ? detectMs
@@ -2108,6 +2137,19 @@ export function useLiveDetect({
     }
 
     /**
+     * Settled, what auto-capture's countdown starts on: still over the last
+     * {@link SETTLE_WINDOW_MS} (at least 1.2 of the loop's interval) — the
+     * ready cue's full stillness and drift are then gathered during the
+     * countdown, and the fire waits for them.
+     */
+    function settledEnough(): boolean {
+      const readings = runtime.sheetReadings;
+      const period = Math.max(runtime.intervalMs, readingSpacing(readings));
+      const stillness = motionOf(readings, visibleAspect(), Math.max(SETTLE_WINDOW_MS, 1.2 * period));
+      return stillness !== null && stillness <= STILL_MAX;
+    }
+
+    /**
      * What a pass tells the guidance (`lib/guidance.ts`): the found sheet's
      * reading (its motion) and its glare, or — no sheet found — a page
      * suspected too far away or cut off by the viewfinder's edge
@@ -2145,6 +2187,7 @@ export function useLiveDetect({
           runtime.watchMoved = false;
         }
         runtime.readyVerdict = stillEnough(outcome.frameAt);
+        runtime.settledVerdict = settledEnough();
       } else {
         // A miss on a still scene with the held sheet still paper where it
         // was is the flicker the hold is for: it changes nothing. Anything
@@ -2157,6 +2200,7 @@ export function useLiveDetect({
         if (!neutral) {
           runtime.suspectAt = Math.max(runtime.suspectAt ?? outcome.frameAt, outcome.frameAt);
           runtime.readyVerdict = false;
+          runtime.settledVerdict = false;
         }
       }
       // A suspected page: only while nothing is found.
@@ -2743,6 +2787,11 @@ export function useLiveDetect({
       // nor a corner that something lies over.
       const keep = footing && !covered && !uncertain && shown === null && raw === null;
       const isReady = guidance.ready.update(strict, keep, now);
+      // Settled: the same, on the short stillness window — auto-capture's
+      // countdown starts here, and the cue's full stillness is gathered while
+      // it runs (the fire waits for the cue).
+      const settledStrict = footing && !covered && !uncertain && raw === null && shown === null && runtime.settledVerdict && reading?.sharp !== false;
+      guidance.settled.update(settledStrict, keep, now);
       runtime.timeline.update(now, {
         lock: tracking,
         hint: raw === null && !covered,
@@ -2782,23 +2831,27 @@ export function useLiveDetect({
       if (guidance.tick.update(isReady, tracking, now)) setReadyTick((n) => n + 1);
       let fire = false;
       runtime.countdown = null;
+      runtime.boost = autoCaptureRef.current && tracking && runtime.locked && guidance.auto.armed && (raw === null || raw === "hold-still");
       if (autoCaptureRef.current) {
         const latest = runtime.motionHistory[runtime.motionHistory.length - 1]?.luma ?? null;
         // Back from the confirm screen, the scene is compared with itself as it was then.
         if (!guidance.auto.armed && runtime.firedLuma === null) runtime.firedLuma = latest;
         const auto = guidance.auto.update({
           now,
-          readyOnSince: guidance.ready.onSince,
+          readyOnSince: guidance.settled.onSince,
           sheet: tracking ? sheet : null,
           moving: motion !== null && motion > SHAKY_ENTER,
           aspect,
           sceneChange: runtime.firedLuma === null || latest === null ? null : frameMotionScore(runtime.firedLuma, latest),
           confirmedAt: runtime.confirmedAt,
           steady: guidance.ready.steady,
+          ready: guidance.ready.onSince !== null,
+          agree: tracking && readingsAgree(runtime.sheetReadings, aspect),
+          frameAgeMax: autoFrameAgeMax(runtime.intervalMs),
         });
         runtime.countdown = auto.countdown;
         runtime.countdownStart = auto.countdown === null ? null : (auto.start ?? null);
-        if (isReady && !auto.fire) {
+        if ((isReady || auto.countdown !== null) && !auto.fire) {
           runtime.blockWhy = !guidance.auto.armed
             ? "auto: waiting for another page"
             : auto.countdown === null
@@ -2809,7 +2862,9 @@ export function useLiveDetect({
                 ? `auto: countdown ${Math.round(auto.countdown * 100)} %`
                 : !guidance.ready.steady
                   ? `auto: holding (${runtime.stillWhy ?? "wobble"})`
-                  : "auto: waiting for a fresh pass";
+                  : guidance.ready.onSince === null
+                    ? "auto: waiting for the cue"
+                    : "auto: waiting for a fresh pass";
         }
         // One last look at the camera, at the instant of the photo — and,
         // whatever the cue said, never on an uncertain page (owner rule: a
@@ -2834,6 +2889,7 @@ export function useLiveDetect({
               ...runtime.timeline.snapshot(),
               strict: guidance.ready.since,
               ready: guidance.ready.onSince,
+              settled: guidance.settled.onSince,
               countdown: auto.start ?? null,
               end: auto.end ?? null,
               confirm: runtime.confirmedAt,

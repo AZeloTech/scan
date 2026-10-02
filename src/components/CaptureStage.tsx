@@ -1561,8 +1561,11 @@ export function CaptureStage({
                   holds 17.5:1 against a dark scene. The weight says it too,
                   for anyone who cannot tell the two apart. A change of the
                   marks themselves, never a new shape round the page. The
-                  countdown (auto-capture) only runs while ready: it grows
-                  along the marks from each corner as a white line inside the
+                  countdown (auto-capture) runs from the moment the page has
+                  settled: it grows along the marks from each corner — a
+                  graphite line inside the white mark until the cue comes on
+                  (the cue's full stillness is gathered while it runs, and the
+                  photo waits for the cue), then a white line inside the
                   graphite core (12.2:1 against it) — a white mark heavier
                   than the core would sink into the light halo. No
                   transition under reduced motion. */}
@@ -1614,7 +1617,7 @@ export function CaptureStage({
               <path
                 ref={detect.overlay.countdown}
                 d=""
-                className="fill-none stroke-warm"
+                className={clsx("fill-none", detect.ready ? "stroke-warm" : "stroke-ready")}
                 strokeWidth={2.5}
                 strokeLinecap="round"
                 vectorEffect="non-scaling-stroke"

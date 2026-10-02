@@ -250,8 +250,63 @@ export const READY_DENSE_READINGS = 6;
  * them.
  */
 export const READY_MIN_READINGS = 5;
-/** Auto-capture: the ready cue held for this long. */
+/**
+ * Auto-capture's countdown: this long from the page settling
+ * ({@link AutoCapture})…
+ */
 export const AUTO_FIRE_MS = 500;
+/**
+ * …or this long when the newest {@link AUTO_AGREE_READINGS} confirming
+ * readings agree within {@link AUTO_AGREE_MAX} (share of the diagonal) — a
+ * page held that still needs no extra wait; any other hold keeps the full one.
+ */
+export const AUTO_FIRE_FAST_MS = 300;
+export const AUTO_AGREE_READINGS = 3;
+export const AUTO_AGREE_MAX = 0.6 / 100;
+/**
+ * The countdown starts once the page has *settled*: everything the ready cue
+ * asks for, but still over the last {@link SETTLE_WINDOW_MS} (at least 1.2 of
+ * the loop's interval) instead of the cue's full window and drift. The
+ * stillness the cue asks for is then gathered DURING the countdown — the fire
+ * still needs the cue's full conditions, on, at that moment.
+ */
+export const SETTLE_WINDOW_MS = 200;
+/**
+ * The fire's final look (R3): the newest pass that found the page where it
+ * was must have read a frame at least this far into the countdown…
+ */
+export const AUTO_CONFIRM_AFTER_MS = 150;
+/**
+ * …no older than this at the fire (or 1.5 of the loop's interval when that
+ * is longer, never more than {@link AUTO_FRAME_AGE_MAX_MS}); the live loop
+ * also looks at the camera at the fire, against that frame (no motion since).
+ */
+export const AUTO_FRAME_AGE_MS = 250;
+export const AUTO_FRAME_AGE_MAX_MS = 600;
+
+/** The frame-age bound of the fire's final look for a loop reading every `intervalMs`. */
+export function autoFrameAgeMax(intervalMs: number): number {
+  return Math.min(AUTO_FRAME_AGE_MAX_MS, Math.max(AUTO_FRAME_AGE_MS, 1.5 * intervalMs));
+}
+
+/**
+ * The newest {@link AUTO_AGREE_READINGS} readings (frame time, quad in the
+ * visible crop) agree within {@link AUTO_AGREE_MAX} of the view's diagonal —
+ * every corner of each within that of the newest one's.
+ */
+export function readingsAgree(readings: readonly { at: number; quad: NormalizedQuad }[], aspect: number): boolean {
+  if (readings.length < AUTO_AGREE_READINGS) return false;
+  const recent = readings.slice(-AUTO_AGREE_READINGS);
+  const newest = recent[recent.length - 1];
+  const diagonal = Math.hypot(1, aspect);
+  for (const reading of recent) {
+    for (const key of CORNER_KEYS) {
+      const move = Math.hypot(newest.quad[key].x - reading.quad[key].x, (newest.quad[key].y - reading.quad[key].y) * aspect);
+      if (move / diagonal > AUTO_AGREE_MAX) return false;
+    }
+  }
+  return true;
+}
 /**
  * After a fire: another page is a sheet at least this far (share of the
  * diagonal) from the one taken — the live loop's own jump threshold — …
@@ -857,15 +912,22 @@ export interface AutoCaptureState {
 }
 
 /**
- * Opt-in auto-capture: fires when the ready cue has held {@link AUTO_FIRE_MS},
- * once per page. Its memory of the last fire outlives the viewfinder pausing
- * behind the confirm screen — that pause is exactly when it must not forget
- * which page it just took.
+ * Opt-in auto-capture, once per page: a countdown from the page settling
+ * ({@link AUTO_FIRE_MS}, or {@link AUTO_FIRE_FAST_MS} for a page held very
+ * still), and at its end a fire — but only with the ready cue's full
+ * conditions holding and the cue on, on a frame read well into the countdown
+ * ({@link AUTO_CONFIRM_AFTER_MS}), no older than its bound
+ * ({@link autoFrameAgeMax}). The final look runs during the countdown, not
+ * after it: a frame that qualifies has usually landed by the end. Its memory
+ * of the last fire outlives the viewfinder pausing behind the confirm screen
+ * — that pause is exactly when it must not forget which page it just took.
  */
 export class AutoCapture {
   private fired: { quad: NormalizedQuad; at: number } | null = null;
   /** When it was last armed: a ready cue older than that counts from here. */
   private armedAt = Number.NEGATIVE_INFINITY;
+  /** The countdown (by its start) that earned the short wait: kept for that countdown. */
+  private fastFor: number | null = null;
   private movedSinceFire = false;
   private seenSinceFire = false;
   private goneSince: number | null = null;
@@ -876,16 +938,18 @@ export class AutoCapture {
   }
 
   /**
-   * One moment of a live viewfinder. `readyOnSince` is when the strict ready
-   * conditions came on (null: off — {@link ReadyCue.onSince}); `sheet` the
-   * found sheet in the visible crop (null: none); `moving` the phone moving
-   * (the hold-still threshold crossed); `confirmedAt` the time of the frame
-   * of the newest detection pass that found the page where it was (null:
-   * none) — the countdown completes, but it fires only once a frame sampled
-   * after it completed has been confirmed, the moment that pass lands: the
-   * brackets alone are no proof the page is still in front of the camera, and
-   * a camera whipped off the page between two passes is caught by the next
-   * one (or by the watch, `hooks/useLiveDetect.ts`) rather than photographed.
+   * One moment of a live viewfinder. `readyOnSince` is when the countdown's
+   * conditions came on — the page settled (null: off; the live loop's
+   * settling {@link ReadyCue}, `onSince`); `sheet` the found sheet in the
+   * visible crop (null: none); `moving` the phone moving (the hold-still
+   * threshold crossed); `confirmedAt` the time of the frame of the newest
+   * detection pass that found the page where it was (null: none). The
+   * countdown completes, but it fires only on a confirmed frame read at
+   * least {@link AUTO_CONFIRM_AFTER_MS} into it and no older than
+   * `frameAgeMax` now: the brackets alone are no proof the page is still in
+   * front of the camera, and a camera whipped off the page between two
+   * passes is caught by the next one (or by the watch,
+   * `hooks/useLiveDetect.ts`) rather than photographed.
    */
   update(input: {
     now: number;
@@ -895,22 +959,36 @@ export class AutoCapture {
     aspect: number;
     sceneChange?: number | null;
     confirmedAt?: number | null;
-    /** The ready conditions hold right now ({@link ReadyCue.steady}); false: a wobble the cue rides out — no fire until it passes. */
+    /** The ready cue's full conditions hold right now ({@link ReadyCue.steady}); false: no fire until they do. */
     steady?: boolean;
+    /** The ready cue is on ({@link ReadyCue.onSince} set); false: no fire until it is. Absent: as `steady`. */
+    ready?: boolean;
+    /** The newest readings agree tightly ({@link readingsAgree}): this countdown may be the short one. */
+    agree?: boolean;
+    /** The fire's frame-age bound ({@link autoFrameAgeMax}); absent: {@link AUTO_FRAME_AGE_MS}. */
+    frameAgeMax?: number;
   }): AutoCaptureState {
     const { now, readyOnSince, sheet } = input;
     if (this.fired !== null) {
       this.watchForAnotherPage(input);
       if (this.fired === null) this.armedAt = now;
     }
-    if (this.fired !== null || readyOnSince === null || sheet === null) return { countdown: null, fire: false };
+    if (this.fired !== null || readyOnSince === null || sheet === null) {
+      this.fastFor = null;
+      return { countdown: null, fire: false };
+    }
     const start = Math.max(readyOnSince, this.armedAt);
-    const progress = Math.min(1, (now - start) / AUTO_FIRE_MS);
-    const end = start + AUTO_FIRE_MS;
+    if (this.fastFor !== start) this.fastFor = input.agree === true ? start : null;
+    const duration = this.fastFor === start ? AUTO_FIRE_FAST_MS : AUTO_FIRE_MS;
+    const progress = Math.min(1, (now - start) / duration);
+    const end = start + duration;
     if (progress < 1) return { countdown: progress, fire: false, start, end };
-    if (input.steady === false) return { countdown: 1, fire: false, start, end };
+    if (input.steady === false || (input.ready ?? input.steady) === false) return { countdown: 1, fire: false, start, end };
     const confirmedAt = input.confirmedAt ?? null;
-    if (confirmedAt === null || confirmedAt < end) return { countdown: 1, fire: false, start, end };
+    const ageMax = input.frameAgeMax ?? AUTO_FRAME_AGE_MS;
+    if (confirmedAt === null || confirmedAt < start + Math.min(AUTO_CONFIRM_AFTER_MS, duration) || now - confirmedAt > ageMax) {
+      return { countdown: 1, fire: false, start, end };
+    }
     this.fired = { quad: sheet, at: now };
     this.movedSinceFire = false;
     this.seenSinceFire = false;
@@ -963,6 +1041,7 @@ export class AutoCapture {
   reset(): void {
     this.fired = null;
     this.armedAt = Number.NEGATIVE_INFINITY;
+    this.fastFor = null;
     this.goneSince = null;
   }
 

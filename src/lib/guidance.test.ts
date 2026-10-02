@@ -3,8 +3,16 @@ import test from "node:test";
 
 import {
   areaShare,
+  AUTO_AGREE_MAX,
+  AUTO_CONFIRM_AFTER_MS,
+  AUTO_FIRE_FAST_MS,
   AUTO_FIRE_MS,
+  AUTO_FRAME_AGE_MAX_MS,
+  AUTO_FRAME_AGE_MS,
+  autoFrameAgeMax,
   AutoCapture,
+  readingsAgree,
+  STILL_MAX,
   borderMargin,
   BORDER_ENTER,
   FILL_ENTER,
@@ -347,13 +355,60 @@ test("auto-capture re-arms on another page, a page gone, or time and motion", ()
   assert.equal(shaken.update({ now, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: now }).fire, false);
 });
 
-test("auto-capture fires only once a frame sampled after the countdown found the page", () => {
+test("auto-capture's final look runs during the countdown: a frame read well into it, fresh at the fire (R3)", () => {
+  const at = (auto: AutoCapture, now: number, confirmedAt: number | null, frameAgeMax?: number) =>
+    auto.update({ now, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt, frameAgeMax });
+  // A frame read 300 ms into the countdown, landed before its end: fires AT the end, not a pass later.
+  assert.equal(at(new AutoCapture(), AUTO_FIRE_MS, 300).fire, true);
+  // A frame from before the countdown's minimum dwell does not count, however fresh the pass that read it landed.
+  assert.deepEqual(cf(at(new AutoCapture(), AUTO_FIRE_MS, AUTO_CONFIRM_AFTER_MS - 10)), { countdown: 1, fire: false });
+  // No frame at all, or one older than the bound at the fire: wait for the next pass.
+  assert.deepEqual(cf(at(new AutoCapture(), AUTO_FIRE_MS + 100, null)), { countdown: 1, fire: false });
+  assert.deepEqual(cf(at(new AutoCapture(), AUTO_FIRE_MS + 100, AUTO_FIRE_MS + 100 - AUTO_FRAME_AGE_MS - 1)), { countdown: 1, fire: false });
+  // The bound follows a slow loop's interval (1.5 of it), within its ceiling.
+  assert.equal(autoFrameAgeMax(100), AUTO_FRAME_AGE_MS);
+  assert.equal(autoFrameAgeMax(300), 450);
+  assert.equal(autoFrameAgeMax(2000), AUTO_FRAME_AGE_MAX_MS);
+  assert.equal(at(new AutoCapture(), AUTO_FIRE_MS + 300, AUTO_FIRE_MS - 100, autoFrameAgeMax(300)).fire, true);
+});
+
+test("auto-capture: the countdown starts on a settled page, but the fire waits for the full ready cue", () => {
   const auto = new AutoCapture();
-  const at = (now: number, confirmedAt: number | null) => auto.update({ now, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt });
-  // The countdown is done, but the newest confirmed frame is from before its end.
-  assert.deepEqual(cf(at(AUTO_FIRE_MS, AUTO_FIRE_MS - 80)), { countdown: 1, fire: false });
-  assert.deepEqual(cf(at(AUTO_FIRE_MS + 100, null)), { countdown: 1, fire: false });
-  assert.equal(at(AUTO_FIRE_MS + 200, AUTO_FIRE_MS + 20).fire, true);
+  const at = (now: number, steady: boolean, ready: boolean) =>
+    auto.update({ now, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: now - 20, steady, ready });
+  // Counting from the settling, before the cue is on.
+  assert.equal(at(200, false, false).countdown, 200 / AUTO_FIRE_MS);
+  // Done counting; the cue's full stillness not gathered yet: holds at the end.
+  assert.deepEqual(cf(at(AUTO_FIRE_MS + 10, false, false)), { countdown: 1, fire: false });
+  // Steady but the cue not yet on (its dwell): still holds.
+  assert.deepEqual(cf(at(AUTO_FIRE_MS + 60, true, false)), { countdown: 1, fire: false });
+  // Both: fires.
+  assert.equal(at(AUTO_FIRE_MS + 120, true, true).fire, true);
+});
+
+test("auto-capture: a page held very still gets the short countdown, kept for that countdown", () => {
+  const fast = new AutoCapture();
+  const step = (auto: AutoCapture, now: number, agree: boolean) =>
+    auto.update({ now, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt: now - 10, agree });
+  assert.equal(step(fast, 100, true).countdown, 100 / AUTO_FIRE_FAST_MS);
+  // The agreement wobbling later does not stretch it again.
+  assert.equal(step(fast, 200, false).end, AUTO_FIRE_FAST_MS);
+  assert.equal(step(fast, AUTO_FIRE_FAST_MS, false).fire, true);
+  // Without the agreement: the full countdown.
+  const slow = new AutoCapture();
+  assert.equal(step(slow, AUTO_FIRE_FAST_MS, false).fire, false);
+  assert.equal(step(slow, AUTO_FIRE_MS, false).fire, true);
+  assert.ok(AUTO_FIRE_FAST_MS >= 300);
+});
+
+test("readings agree: the newest three within the tight tolerance", () => {
+  const shifted = (d: number) => rect(0.2 + d, 0.2, 0.8 + d, 0.75);
+  const still = [0, 1, 2].map((i) => ({ at: i * 120, quad: shifted(0.001 * i) }));
+  assert.equal(readingsAgree(still, 1.5), true);
+  const drifting = [0, 1, 2].map((i) => ({ at: i * 120, quad: shifted(0.01 * i) }));
+  assert.equal(readingsAgree(drifting, 1.5), false);
+  assert.equal(readingsAgree(still.slice(0, 2), 1.5), false);
+  assert.ok(AUTO_AGREE_MAX < STILL_MAX);
 });
 
 test("after the confirm screen, re-arming counts from the viewfinder's return", () => {
