@@ -2669,3 +2669,60 @@ registerSession({
     };
   },
 });
+
+/* ── 5d+ phase B: a covered corner, the phone moving ─────────────────────── */
+
+/**
+ * The first F8 seed at or after `from` that samples `setting` (F8 cycles its
+ * settings by seed).
+ */
+function f8Seed(setting, from) {
+  for (let s = Math.max(1, from); s < from + 600; s += 1) if (buildScene("F8", s).setting === setting) return s;
+  throw new Error(`no F8 seed samples ${setting}`);
+}
+
+registerSession({
+  id: "covered-corner-auto",
+  title: "a leaflet over the page's corner, the phone moving",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "the owner's field case (F8 owner-case: a white leaflet over the top-left corner of a stacked imaging report on a leather mat, phone tilted 30–45°): the camera comes in from further off over 1.5 s, holds with a hand's tremor, drifts 4 % aside and back at 4.5 s; auto-capture on — the covered corner can only be estimated, so no automatic capture is owed at all and none may fire; the shutter at 8 s still works (confirm screen marks the corner)",
+  build(rng, { seed, size }) {
+    const scene = buildScene("F8", f8Seed("owner-case", 1 + 6 * (seed - 1)), { size });
+    const found = pageOf(scene);
+    const rest = withMargin(scene.camera, scene.frame, found.layer, 0.05);
+    scene.camera = rest;
+    const far = farPose(rng.fork("far"), rest, { distance: [1.25, 1.45], off: [20, 50] });
+    const drift = rng.fork("drift");
+    const bearing = drift.range(0, Math.PI * 2);
+    const by = 0.04 * Math.max(...found.layer.size);
+    const aside = { ...rest, target: [rest.target[0] + Math.cos(bearing) * by, rest.target[1] + Math.sin(bearing) * by] };
+    return {
+      scene,
+      duration: 9600,
+      autoCapture: true,
+      camera: [
+        { t: 0, pose: far },
+        { t: 300, pose: far },
+        { t: 1800, pose: rest },
+        { t: 4500, pose: rest },
+        { t: 5200, pose: aside },
+        { t: 5900, pose: rest },
+      ],
+      tremor: [
+        { t: 0, amplitude: 0.008 },
+        { t: 1800, amplitude: 0.004 },
+      ],
+      actions: [{ at: 8000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        ...NO_GUIDANCE,
+        tapAt: 8000,
+        stable: [1800, 5900],
+        // Covered the whole time: an automatic capture anywhere is one the owner's rule forbids.
+        noFire: [{ name: "covered corner", from: 0, to: 9600 }],
+        covered: true,
+      },
+    };
+  },
+});

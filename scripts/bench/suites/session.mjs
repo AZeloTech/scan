@@ -238,6 +238,32 @@ function render(results) {
       }
       out.push("");
     }
+    // 5d+ phase B: what lies over the page, against auto-capture and the hints.
+    const covered = Object.entries(results.summary).filter(
+      ([, { all: a }]) => a.guidance && (a.guidance.firesOnCovered > 0 || a.guidance.firesUncertain > 0 || Object.values(a.guidance.occlusion ?? {}).some((v) => v > 0)),
+    );
+    if (covered.length > 0) {
+      out.push("## Covered corners");
+      out.push("");
+      out.push(
+        "Auto-capture never fires on an uncertain page (a corner inferred or unknown, or two sheets overlapping). **Fires uncertain**: automatic " +
+          "captures the app itself had called uncertain (must be 0); **on covered**: automatic captures in a session whose page has a covered corner " +
+          "throughout (`marks.covered`; must be 0). **Corner state**: time some corner was unknown / inferred / two sheets, from the overlay. " +
+          "**\"Canto coberto\"**: time shown while a corner was unknown (owed after 700 ms) / while none was (wrong); **\"Separe as folhas\"**: time shown.",
+      );
+      out.push("");
+      out.push("| session | fires: all / uncertain / on covered | unknown / inferred / two sheets ms | Canto coberto: right / wrong ms | Separe as folhas ms |");
+      out.push("|---|---:|---:|---:|---:|");
+      for (const [session, { all: a }] of covered) {
+        const g = a.guidance;
+        const o = g.occlusion;
+        out.push(
+          `| ${session} | ${g.fires} / ${g.firesUncertain} / ${g.firesOnCovered} | ${ms(o.unknownMs)} / ${ms(o.inferredMs)} / ${ms(o.separateMs)} | ` +
+            `${ms(o.coveredHintRightMs)} / ${ms(o.coveredHintWrongMs)} | ${ms(o.separateHintMs)} |`,
+        );
+      }
+      out.push("");
+    }
     const seen = results.rows.filter((row) => row.score.visibility);
     if (seen.length > 0) {
       out.push("## Visible region");
@@ -735,6 +761,9 @@ export function summarize(rows) {
         firesDuringTremor: 0,
         firesInNoFire: 0,
         firesInHintWindow: 0,
+        firesUncertain: 0,
+        firesOnCovered: 0,
+        occlusion: { unknownMs: 0, inferredMs: 0, separateMs: 0, coveredHintRightMs: 0, coveredHintWrongMs: 0, separateHintMs: 0 },
         pages: 0,
         pagesFired: 0,
         repeatFires: 0,
@@ -847,6 +876,9 @@ export function summarize(rows) {
       G.firesDuringTremor += g.auto.firesDuringTremor;
       G.firesInNoFire += g.auto.firesInNoFire ?? 0;
       G.firesInHintWindow += g.auto.firesInHintWindow ?? 0;
+      G.firesUncertain += g.auto.firesUncertain ?? 0;
+      G.firesOnCovered += g.auto.firesOnCovered ?? 0;
+      for (const k of Object.keys(G.occlusion)) G.occlusion[k] += g.occlusion?.[k] ?? 0;
       G.pages += g.auto.pages;
       G.pagesFired += g.auto.pagesFired;
       G.repeatFires += g.auto.repeatFires;
@@ -1002,6 +1034,9 @@ function summarizeGuidance(G) {
     firesDuringTremor: G.firesDuringTremor,
     firesInNoFire: G.firesInNoFire,
     firesInHintWindow: G.firesInHintWindow,
+    firesUncertain: G.firesUncertain,
+    firesOnCovered: G.firesOnCovered,
+    occlusion: G.occlusion,
     fireLatencyP50: latencies.length > 0 ? percentile(latencies, 50) : null,
     fireLatencies: latencies,
     pages: G.pages,

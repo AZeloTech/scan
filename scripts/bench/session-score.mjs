@@ -1001,11 +1001,23 @@ export function scoreGuidance(script, record, gtAt, captures) {
   // and where a hint is owed (the hint windows): no capture is owed there.
   const noFire = marks.noFire ?? [];
   const hinted = marks.hints ?? [];
+  // What the app said the page's corners were at each fire (5d+ phase B,
+  // `auto-fire` probe): auto-capture never fires on an uncertain page.
+  const fireProbes = record.events.filter((e) => e.type === "auto-fire");
+  const uncertainAt = (tapAt) => {
+    const probeAt = [...fireProbes].reverse().find((e) => e.t - t0 <= tapAt + 50);
+    if (probeAt === undefined) return null;
+    return probeAt.separate === true || (probeAt.corners !== null && Object.values(probeAt.corners).some((p) => p !== "seen"));
+  };
   const fires = captures
     .filter((c) => c.trigger === "auto")
     .map((c) => {
       const since = stable.filter((s) => s <= c.tapAt).pop();
       return {
+        // The app called a corner inferred / unknown, or two sheets, at the fire (must never be true); null: not reported.
+        uncertain: uncertainAt(c.tapAt),
+        // The script's page had a covered corner (`marks.covered`) at the fire.
+        covered: marks.covered === true,
         tapAt: c.tapAt,
         page: pageAt(script, c.tapAt),
         verdict: c.verdict,
@@ -1052,12 +1064,43 @@ export function scoreGuidance(script, record, gtAt, captures) {
       firesDuringTremor: fires.filter((f) => f.inTremor).length,
       firesInNoFire: fires.filter((f) => f.inNoFire !== null).length,
       firesInHintWindow: fires.filter((f) => f.inHintWindow !== null).length,
+      firesUncertain: fires.filter((f) => f.uncertain === true).length,
+      firesOnCovered: fires.filter((f) => f.covered).length,
       pages,
       pagesFired: firedPages.size,
       repeatFires: Math.max(0, fires.filter((f) => !f.falseFire).length - firedPages.size),
     },
     layout: { samples: boxes.length, shifts, maxShiftPx: shiftPx },
+    occlusion: occlusionHints(record, series, liveFrom, liveTo),
   };
+}
+
+/**
+ * The occlusion hints against what the app said about the corners (5d+
+ * phase B): time "Canto coberto" was up while a corner was unknown (right)
+ * or while none was (wrong); time some corner was unknown (it is owed after
+ * 700 ms of that); time "Separe as folhas" was up; time a corner was inferred
+ * (the dashed bracket, no hint) — all from the overlay's samples.
+ */
+function occlusionHints(record, series, liveFrom, liveTo) {
+  const samples = record.events.filter((e) => e.type === "overlay" && e.t >= liveFrom && e.t <= liveTo);
+  const out = { unknownMs: 0, inferredMs: 0, separateMs: 0, coveredHintRightMs: 0, coveredHintWrongMs: 0, separateHintMs: 0 };
+  for (let i = 0; i < samples.length - 1; i += 1) {
+    const span = Math.min(samples[i + 1].t - samples[i].t, 400);
+    const corners = samples[i].corners ?? null;
+    const unknown = corners !== null && Object.values(corners).includes("unknown");
+    const inferred = corners !== null && Object.values(corners).includes("inferred");
+    if (unknown) out.unknownMs += span;
+    if (inferred) out.inferredMs += span;
+    if (samples[i].separate === true) out.separateMs += span;
+    const key = hintAt(series, samples[i].t);
+    if (key === "corner-covered") {
+      if (unknown) out.coveredHintRightMs += span;
+      else out.coveredHintWrongMs += span;
+    }
+    if (key === "separate-sheets") out.separateHintMs += span;
+  }
+  return out;
 }
 
 /* ── the visible region: what the person can see (Phase 5a) ─────────────── */

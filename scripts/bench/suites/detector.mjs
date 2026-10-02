@@ -11,7 +11,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { scoreDetection } from "../metrics.mjs";
 import { renderDetectorReport, summarizeDetector } from "../report.mjs";
-import { renderOcclusionSection, scoreOcclusion } from "./detector-occlusion.mjs";
+import { renderOcclusionSection, scoreOcclusion, scoreProvenance } from "./detector-occlusion.mjs";
 
 /** Tiles per contact sheet. */
 const SHEET_TILES = 30;
@@ -105,6 +105,12 @@ export async function runDetectorSuite({ page, throttle, options, outDir, log, e
           ...(() => {
             const occlusion = scoreOcclusion(verdictQuad, gt);
             return occlusion === null ? {} : { occlusion };
+          })(),
+          // Corner provenance (5d+ phase B), wherever the variant refined its answer.
+          ...(() => {
+            const refined = det.refine ?? det.liveRefine ?? null;
+            const provenance = scoreProvenance(verdictQuad, gt, refined?.corners ?? null, refined?.separate ?? false);
+            return provenance === null ? {} : { provenance };
           })(),
         });
       }

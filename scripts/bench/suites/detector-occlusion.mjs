@@ -47,6 +47,9 @@ export const NEAR_FEATURE = 0.015;
 /** The target for the occluded corner (5d+): its error p50 at most this (fraction of the diagonal). */
 export const OCCLUDED_CORNER_TARGET_P50 = 0.015;
 
+/** The owner's gate (2026-10-02): a covered corner more than this far off (fraction of the diagonal) in at most 10 % of covered corners. */
+export const OCCLUDED_CORNER_GATE = 0.03;
+
 function framePolygon(frame) {
   return [
     [0, 0],
@@ -179,6 +182,70 @@ export function scoreOcclusion(quad, gt) {
   };
 }
 
+/**
+ * The answer's corner provenance (`lib/refine.ts`: each corner `seen`,
+ * `inferred` or `unknown`, in the answer's own corner order) against the
+ * truth: per true corner in frame, whether it is covered (`gt.pages[i].occluded`)
+ * and whether the answer flagged it (inferred or unknown). `refused`: the
+ * answer would hold auto-capture (a flagged corner, or `separate`).
+ * `null` without a page, an answer or provenance.
+ */
+export function scoreProvenance(quad, gt, provenance, separate = false) {
+  if (quad === null || provenance === null || provenance === undefined || gt.quad === null || gt.primary === null) return null;
+  const primary = gt.pages[gt.primary];
+  const det = toPixels(quad, gt.frame);
+  const truth = toPixels(gt.quad, gt.frame);
+  const { shift, reversed } = matchCorners(det, truth);
+  const covered = primary.occluded ?? [];
+  const corners = [0, 1, 2, 3].map((i) => {
+    const j = reversed ? 3 - ((i + shift) % 4) : (i + shift) % 4;
+    return { inFrame: primary.inFrame[i], covered: covered.includes(i), flagged: provenance[j] !== "seen", provenance: provenance[j] };
+  });
+  return { corners, refused: separate === true || provenance.some((p) => p !== "seen"), separate: separate === true };
+}
+
+/** Precision / recall of the provenance flags over rows carrying `provenance` (in-frame corners only). */
+export function summarizeProvenance(rows) {
+  let tp = 0;
+  let fn = 0;
+  let fp = 0;
+  let seen = 0;
+  let inferred = 0;
+  let unknown = 0;
+  let refused = 0;
+  let separate = 0;
+  let scored = 0;
+  for (const r of rows) {
+    if (r.provenance == null) continue;
+    scored += 1;
+    if (r.provenance.refused) refused += 1;
+    if (r.provenance.separate) separate += 1;
+    for (const c of r.provenance.corners) {
+      if (!c.inFrame) continue;
+      if (c.provenance === "inferred") inferred += 1;
+      if (c.provenance === "unknown") unknown += 1;
+      if (c.covered) c.flagged ? (tp += 1) : (fn += 1);
+      else {
+        seen += 1;
+        if (c.flagged) fp += 1;
+      }
+    }
+  }
+  return {
+    scenes: scored,
+    covered: tp + fn,
+    recall: tp + fn === 0 ? null : tp / (tp + fn),
+    precision: tp + fp === 0 ? null : tp / (tp + fp),
+    falseFlags: fp,
+    seenCorners: seen,
+    falseFlagRate: seen === 0 ? null : fp / seen,
+    inferred,
+    unknown,
+    refusedRate: scored === 0 ? null : refused / scored,
+    separateRate: scored === 0 ? null : separate / scored,
+  };
+}
+
 const MODES = ["true-corner", "occluder-tip", "edge-crossing", "on-occluder", "inside-page", "elsewhere", "lost"];
 
 /** One variant over a group of rows carrying `occlusion`: the numbers the occlusion table prints. */
@@ -204,7 +271,16 @@ export function summarizeOcclusionGroup(rows) {
     severeRate: rate(accepted.filter((r) => r.score.severe === true).length, scored.length),
     contentClippedRate: contentJudged.length === 0 ? null : rate(contentJudged.filter((r) => r.score.contentClipped).length, contentJudged.length),
     occludedCornerErrorP50: percentile(withCovered.map((r) => r.occlusion.occludedCornerError), 50),
+    occludedCornerErrorP90: percentile(withCovered.map((r) => r.occlusion.occludedCornerError), 90),
     occludedCornerErrorP95: percentile(withCovered.map((r) => r.occlusion.occludedCornerError), 95),
+    // The owner's gate (2026-10-02): covered corners more than 3 % of the diagonal off, over all covered scenes (a lost page counts as off).
+    occludedOver3Rate:
+      scored.filter((r) => r.occlusion.occludedCorners.length > 0).length === 0
+        ? null
+        : rate(
+            scored.filter((r) => r.occlusion.occludedCorners.length > 0 && (!r.score.detected || r.occlusion.occludedCornerError > OCCLUDED_CORNER_GATE)).length,
+            scored.filter((r) => r.occlusion.occludedCorners.length > 0).length,
+          ),
     visibleCornerErrorP50: percentile(accepted.map((r) => r.occlusion.visibleCornerError).filter((v) => v !== null), 50),
     occluderIncludedRate: judgedInclusion.length === 0 ? null : rate(judgedInclusion.filter((r) => r.occlusion.occluderIncluded).length, judgedInclusion.length),
     modes,
@@ -237,10 +313,61 @@ export function summarizeOcclusion(rows) {
 const pct = (v) => (v === null || v === undefined ? "–" : `${(v * 100).toFixed(1)} %`);
 const diag = (v) => (v === null || v === undefined ? "–" : (v * 100).toFixed(2));
 
+/** `{ key: { variant: summary } }` of {@link summarizeProvenance} per family, per F8 setting, and over F1–F7 together. */
+export function provenanceByGroup(rows) {
+  const scored = rows.filter((r) => r.provenance != null);
+  const out = {};
+  const keyed = (key, member) => {
+    const group = {};
+    for (const variant of [...new Set(scored.map((r) => r.variant))]) {
+      const these = scored.filter((r) => member(r) && r.variant === variant);
+      if (these.length > 0) group[variant] = summarizeProvenance(these);
+    }
+    if (Object.keys(group).length > 0) out[key] = group;
+  };
+  const families = [...new Set(scored.map((r) => r.family))];
+  if (families.some((f) => f !== "F8")) keyed("F1–F7", (r) => r.family !== "F8");
+  for (const family of families) {
+    keyed(family, (r) => r.family === family);
+    if (family !== "F8") continue;
+    for (const setting of [...new Set(scored.filter((r) => r.family === family && r.setting != null).map((r) => r.setting))]) {
+      keyed(`${family}/${setting}`, (r) => r.family === family && r.setting === setting);
+    }
+  }
+  return out;
+}
+
+/** The Markdown section on corner provenance ("" when no row carries it). */
+export function renderProvenanceSection(rows) {
+  const groups = provenanceByGroup(rows);
+  if (Object.keys(groups).length === 0) return "";
+  const out = [
+    "",
+    "## Corner provenance (5d+ phase B)",
+    "",
+    "Per true corner in frame: **flagged** = the answer called it `inferred` or `unknown`. **recall** = covered corners flagged; " +
+      "**precision** = flagged corners that are covered; **false** = seen corners flagged (count / rate); **refused** = scenes where " +
+      "auto-capture would hold (a flagged corner, or another sheet overlapping: `separate`).",
+    "",
+    "| group | variant | scenes | covered | recall | precision | false | inferred / unknown | refused | separate |",
+    "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+  ];
+  for (const [key, byVariant] of Object.entries(groups)) {
+    for (const [variant, s] of Object.entries(byVariant)) {
+      out.push(
+        `| ${key} | ${variant} | ${s.scenes} | ${s.covered} | ${pct(s.recall)} | ${pct(s.precision)} | ${s.falseFlags} / ${s.seenCorners} (${pct(s.falseFlagRate)}) | ` +
+          `${s.inferred} / ${s.unknown} | ${pct(s.refusedRate)} | ${pct(s.separateRate)} |`,
+      );
+    }
+  }
+  out.push("");
+  return out.join("\n");
+}
+
 /** The Markdown section the detector report gets when any row was scored for occlusion ("" otherwise). */
 export function renderOcclusionSection(rows) {
   const summary = summarizeOcclusion(rows);
-  if (Object.keys(summary).length === 0) return "";
+  if (Object.keys(summary).length === 0) return renderProvenanceSection(rows);
   const out = [
     "",
     "## Occluded corners (5d+)",
@@ -252,18 +379,18 @@ export function renderOcclusionSection(rows) {
   ];
   for (const [key, byVariant] of Object.entries(summary)) {
     out.push(`### ${key}`, "");
-    out.push("| variant | scenes | covered | miss | wrong | severe | content clipped | occl. err p50 / p95 | visible err p50 | incl. | modes T/tip/cross/on/in/else/lost | accepted by | refine moved |");
-    out.push("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|");
+    out.push("| variant | scenes | covered | miss | wrong | severe | content clipped | occl. err p50 / p90 / p95 | occl. > 3 % | visible err p50 | incl. | modes T/tip/cross/on/in/else/lost | accepted by | refine moved |");
+    out.push("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|");
     for (const [variant, s] of Object.entries(byVariant)) {
       const m = s.modes;
       const sources = Object.entries(s.sources).map(([k, v]) => `${k} ${v}`).join(", ") || "–";
       out.push(
         `| ${variant} | ${s.scenes} | ${s.covered} | ${pct(s.missRate)} | ${pct(s.wrongRate)} | ${pct(s.severeRate)} | ${pct(s.contentClippedRate)} | ` +
-          `${diag(s.occludedCornerErrorP50)} / ${diag(s.occludedCornerErrorP95)} | ${diag(s.visibleCornerErrorP50)} | ${pct(s.occluderIncludedRate)} | ` +
+          `${diag(s.occludedCornerErrorP50)} / ${diag(s.occludedCornerErrorP90)} / ${diag(s.occludedCornerErrorP95)} | ${pct(s.occludedOver3Rate)} | ${diag(s.visibleCornerErrorP50)} | ${pct(s.occluderIncludedRate)} | ` +
           `${m["true-corner"]}/${m["occluder-tip"]}/${m["edge-crossing"]}/${m["on-occluder"]}/${m["inside-page"]}/${m.elsewhere}/${m.lost} | ${sources} | ${s.refineChanged} |`,
       );
     }
     out.push("");
   }
-  return out.join("\n");
+  return out.join("\n") + renderProvenanceSection(rows);
 }

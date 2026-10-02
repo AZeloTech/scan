@@ -544,7 +544,21 @@ occluder past the page by more than 0.5 % of the page's area — the union of
 page and sheet) and the **mode** — where the covered corner went: the true
 corner (within 1.5 % of the diagonal), the occluder's own corner on the
 page (`occluder-tip`), where its edge crosses the page's (`edge-crossing`),
-out on the occluder, inside the page, elsewhere, or lost.
+out on the occluder, inside the page, elsewhere, or lost. The owner's gate
+(2026-10-02) is on the tail: **occl. > 3 %** is the share of covered
+scenes whose covered corner is more than 3 % of the diagonal off (a lost
+page counts), at most 10 %, with p90 ≤ 3 %.
+
+Wherever a variant refined its answer (`refined`, `ml+refine`, `ml+live`),
+every row also carries the answer's **corner provenance**
+(`src/lib/refine.ts`: each corner `seen`, `inferred` or `unknown`, and
+`separate` when another sheet overlaps the page) scored against the truth
+in its own report section, per family, per F8 setting and over F1–F7
+together: **recall** = covered corners flagged (inferred or unknown),
+**precision** = flagged corners that are covered, **false** = seen corners
+flagged (count and rate; the gate is ≤ 1 % over F1–F7), **refused** =
+scenes where auto-capture would hold (a flagged corner or `separate`) —
+how F8's `two-sheets` is scored.
 
 To grow it, register — nothing in the runner changes:
 
@@ -640,6 +654,7 @@ moving) — scored as "not owed" fires:
 | `dim-page-auto`, `dim-desk-auto` | a page (exposure ×0.12–0.26), and an F6 desk with none (×0.15–0.3, page-less), held still 9 s |
 | `glare-sweep-auto` | a lamp's hot spot on the page from the start, sliding off it by 7.5 s — `noFire` while it is on the page |
 | `hover-far`, `hover-edge`, `hover-light` | the page's size, its corner margin and the exposure swinging across the too-far, cut-off and low-light thresholds — the hint's churn |
+| `covered-corner-auto` | 5d+ phase B: the field case (F8 `owner-case`: a white leaflet over the top-left corner of a stacked imaging report on a leather mat, tilted 30–45°): comes in over 1.5 s, holds with a tremor, drifts 4 % aside and back; the covered corner can only be estimated, so no automatic capture is owed at all (`marks.covered`); the shutter at 8 s works. Its report section, **Covered corners**: automatic captures the app had itself called uncertain (`auto-fire` probe; must be 0) and fires on a covered page (must be 0), the time some corner was unknown / inferred / two sheets on the overlay, and "Canto coberto" shown while a corner was unknown (right) or not (wrong) |
 | `whip-off-auto` | six times: held on the page 0.9–1.9 s (the countdown under way), then whipped off to bare desk in 200 ms and kept off 1.5 s — a capture off the page, or on the way, is a false fire |
 
 The report's **Guidance** table gives, per session: each hint window's share

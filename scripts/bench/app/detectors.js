@@ -109,6 +109,9 @@ function refineRow(event) {
         ms: event.ms,
         input: toPoints(event.input),
         sides: event.sides,
+        // Each corner's provenance (seen / inferred / unknown), TL, TR, BR, BL of the answer, and the overlap verdict.
+        corners: event.corners?.map((c) => c.provenance) ?? null,
+        separate: event.occlusion?.separate ?? null,
       };
 }
 
@@ -170,7 +173,12 @@ export const VARIANTS = {
       const pass = await livePass(frame, (sample) => detectOnCanvasMl(sample, ML_CALL_BUDGET_MS, urls));
       if (!pass.accepted) return pass;
       const refined = refineOnSample(frame, pass.quad);
-      return { ...pass, quad: refined.quad, ms: pass.ms + refined.ms, liveRefine: { changed: refined.changed, ms: refined.ms, modes: refined.modes } };
+      return {
+        ...pass,
+        quad: refined.quad,
+        ms: pass.ms + refined.ms,
+        liveRefine: { changed: refined.changed, ms: refined.ms, modes: refined.modes, corners: refined.corners, separate: refined.separate },
+      };
     },
   },
   "ml+refine": {
@@ -259,5 +267,13 @@ export function refineOnSample(frame, points, mode = "full") {
     bottomLeft: { x: points[3][0], y: points[3][1] },
   };
   const result = refineQuad(image, quad, { mode });
-  return { quad: toPoints(result.quad), changed: result.changed, ms: result.ms, reason: result.reason, modes: result.sides.map((side) => side.mode) };
+  return {
+    quad: toPoints(result.quad),
+    changed: result.changed,
+    ms: result.ms,
+    reason: result.reason,
+    modes: result.sides.map((side) => side.mode),
+    corners: result.corners.map((c) => c.provenance),
+    separate: result.occlusion.separate,
+  };
 }
