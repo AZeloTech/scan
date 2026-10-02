@@ -651,7 +651,28 @@ export function rawHint(input: GuidanceInput, current: HintKey | null, rules: Fr
 }
 
 /** The hints that ask the person to move the phone. */
-const FRAMING_HINTS: ReadonlySet<HintKey | null> = new Set<HintKey | null>(["move-closer", "move-back", "move-phone"]);
+export const FRAMING_HINTS: ReadonlySet<HintKey | null> = new Set<HintKey | null>(["move-closer", "move-back", "move-phone"]);
+
+/**
+ * The hold-still hint's motion ({@link motionOf} over `windowMs`) on the
+ * readings since `framedAt` — when a hint asking the person to move the phone
+ * last left the slot (null: never). The move the person made because they
+ * were asked to is not a shaking hand: without this, the end of an
+ * "Aproxime", still in the window when its hint clears, put "Segure firme" up
+ * for its whole minimum show on a phone already held still (bench
+ * `present-auto`, cpu 4). A hand still shaking after the clear is caught as
+ * soon as the readings since span {@link MOTION_MIN_SPAN_MS}. The ready cue's
+ * own stillness and drift are not affected.
+ */
+export function shakeMotion(
+  readings: readonly { at: number; quad: NormalizedQuad }[],
+  aspect: number,
+  windowMs: number,
+  framedAt: number | null,
+): number | null {
+  const since = framedAt === null ? readings : readings.filter((r) => r.at >= framedAt);
+  return motionOf(since, aspect, windowMs);
+}
 
 /** Which way to move the phone (relative to the phone held as the screen shows it). */
 export type MoveDirection = "up" | "down" | "left" | "right";

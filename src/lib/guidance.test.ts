@@ -13,6 +13,8 @@ import {
   AutoCapture,
   readingsAgree,
   settledOn,
+  shakeMotion,
+  SHAKY_ENTER,
   SETTLE_WINDOW_MS,
   STILL_MAX,
   borderMargin,
@@ -662,4 +664,24 @@ test("settled: the newest three readings still, over at least the settle window,
   assert.equal(settledOn(at(SETTLE_WINDOW_MS / 2 - 10, 0.001), 1.5), false);
   assert.equal(settledOn(at(125, 0.02), 1.5), false);
   assert.equal(settledOn(at(125, 0).slice(0, 2), 1.5), false);
+});
+
+test("hold still: the move a framing hint asked for is not shaking — the readings count from its clear", () => {
+  // An "Aproxime" followed: the page grows 1 % of its width per 100 ms reading until t = 1000, then is held still.
+  const readings = Array.from({ length: 16 }, (_, i) => {
+    const t = i * 100;
+    const grow = Math.min(t, 1000) / 100 * 0.01;
+    return { at: t, quad: rect(0.25 - grow, 0.25 - grow, 0.75 + grow, 0.75 + grow) };
+  });
+  const upTo = (t: number) => readings.filter((r) => r.at <= t);
+  // Measured over the whole window the approach's tail reads as shaking…
+  assert.ok((motionOf(upTo(1200), 1.5, 600) ?? 0) > SHAKY_ENTER);
+  // …from the hint's clear (at 1000) it is unknown, then still.
+  assert.equal(shakeMotion(upTo(1150), 1.5, 600, 1000), null);
+  assert.ok((shakeMotion(upTo(1300), 1.5, 600, 1000) ?? 1) < SHAKY_ENTER);
+  // No hint cleared: the whole window, as before.
+  assert.equal(shakeMotion(upTo(1200), 1.5, 600, null), motionOf(upTo(1200), 1.5, 600));
+  // A hand still shaking after the clear is caught once the readings since span the minimum.
+  const shaking = [1000, 1100, 1200, 1300].map((t, i) => ({ at: t, quad: rect(0.25 + (i % 2) * 0.08, 0.25, 0.75 + (i % 2) * 0.08, 0.75) }));
+  assert.ok((shakeMotion(shaking, 1.5, 600, 1000) ?? 0) > SHAKY_ENTER);
 });

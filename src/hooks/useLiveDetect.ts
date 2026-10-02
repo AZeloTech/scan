@@ -136,6 +136,8 @@ import {
   fillShare,
   HintDebounce,
   motionOf,
+  shakeMotion,
+  FRAMING_HINTS,
   OCCLUSION_HINT_AFTER_MS,
   rawHint,
   ReadyCue,
@@ -636,6 +638,8 @@ interface Runtime {
   settledVerdict: boolean;
   /** Auto-capture is near a fire on this page: the worker lane reads faster for now ({@link BOOST_DUTY}). */
   boost: boolean;
+  /** When a hint asking the person to move the phone last left the slot (`shakeMotion`), or null. */
+  framedAt: number | null;
   /**
    * A photo is being taken (from the tap or the auto fire to the end of the
    * capture): the overlay stays frozen on the quad it showed, no pass runs or
@@ -767,6 +771,7 @@ function freshRuntime(): Runtime {
     readyVerdict: false,
     settledVerdict: false,
     boost: false,
+    framedAt: null,
     capturing: false,
     stillWhy: null,
     blockWhy: null,
@@ -2118,8 +2123,14 @@ export function useLiveDetect({
       const stillWindow = Math.max(STILL_WINDOW_MS, 1.2 * period);
       const stillness = motionOf(readings, aspect, stillWindow);
       const since = guidanceRef.current.ready.since;
-      // At least READY_MIN_READINGS readings' worth of time, however slowly the loop reads.
-      const driftWindow = Math.max((since === null ? 0 : at - since) + stillWindow, (READY_MIN_READINGS - 0.5) * period);
+      // At least READY_MIN_READINGS readings' worth of time, however slowly
+      // the loop reads — and, when the readings came unevenly, the span of
+      // the newest READY_MIN_READINGS of them (up to one interval more): five
+      // readings held still are five readings, not "4 of 5" because one gap
+      // ran over the median. A wider window only adds readings to the drift.
+      const fifth = readings[readings.length - READY_MIN_READINGS]?.at ?? null;
+      const spanOfMin = fifth === null ? 0 : Math.min(at - fifth, (READY_MIN_READINGS + 0.5) * period);
+      const driftWindow = Math.max((since === null ? 0 : at - since) + stillWindow, (READY_MIN_READINGS - 0.5) * period, spanOfMin);
       const drift = motionOf(readings, aspect, driftWindow);
       const newest = readings[readings.length - 1]?.at ?? at;
       const seen = readings.filter((r) => newest - r.at <= driftWindow).length;
@@ -2725,7 +2736,11 @@ export function useLiveDetect({
         cornerUnderSpot([sheetFrame.topLeft, sheetFrame.topRight, sheetFrame.bottomRight, sheetFrame.bottomLeft], spotsRef.current);
       // The hint's window over the found sheet's readings (a trembling hand)
       // — at least 2.5 of the loop's interval, which a slow phone stretches.
-      const motion = tracking ? motionOf(runtime.sheetReadings, aspect, Math.max(SHAKE_WINDOW_MS, 2.5 * runtime.intervalMs)) : null;
+      const shakeWindow = Math.max(SHAKE_WINDOW_MS, 2.5 * runtime.intervalMs);
+      const motion = tracking ? motionOf(runtime.sheetReadings, aspect, shakeWindow) : null;
+      // …the hint's own on the readings since a framing hint left the slot:
+      // the move it asked for is not shaking.
+      const shake = tracking ? shakeMotion(runtime.sheetReadings, aspect, shakeWindow, runtime.framedAt) : null;
       const reading = runtime.reading !== null && now - runtime.reading.at <= READING_FRESH_MS ? runtime.reading : null;
       // What lies over the page (`lib/corner-check.ts`). An uncertain page —
       // a corner inferred or unknown, another sheet over it — is never ready
@@ -2756,7 +2771,7 @@ export function useLiveDetect({
           cutOff: tracking ? runtime.openHits >= OPEN_READINGS : convincing && candidate.cutOff,
           covered,
           aspect,
-          motion,
+          motion: shake,
           sharp: reading?.sharp ?? null,
           bright: reading?.bright ?? null,
           glare: tracking ? runtime.glare : null,
@@ -2779,7 +2794,9 @@ export function useLiveDetect({
       // once the slot has emptied (at its own pace — a hint snatched away the
       // moment it appeared is the flicker the debounce exists to prevent),
       // and while the cue is on the slot stays empty.
+      const before = guidance.hints.current;
       const shown = announcedReady ? guidance.hints.value : guidance.hints.update(raw, now);
+      if (FRAMING_HINTS.has(before) && !FRAMING_HINTS.has(guidance.hints.current)) runtime.framedAt = now;
       const strict = footing && !covered && !uncertain && raw === null && shown === null && runtime.readyVerdict && reading?.sharp !== false;
       // A wobble keeps the cue; shaking (the hold-still hint owed) does not —
       // nor a corner that something lies over.
