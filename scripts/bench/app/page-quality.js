@@ -3,7 +3,8 @@
  *
  * `window.__quality` for `scripts/bench/quality.mjs`:
  *
- *   flow({ sensor, stream, still, maxBytes }) — mount the real `<ScanFlow>` on a fake
+ *   flow({ sensor, stream, still, maxBytes, pages, restore, capZoom, forceCap, settleMs, pageWidth, ruled })
+ *                                    — mount the real `<ScanFlow>` on a fake
  *     camera, take one page with the shutter, confirm it, open step 2, tap
  *     "Gerar PDF", and hand back the PDF (base64) and every diagnostics event.
  *   edits({ sensor, stream })        — the real render pipeline, through the
@@ -23,6 +24,10 @@
  *               Galaxy S25 Ultra's 3648×1704 for any request);
  *   "hang"    — never answers (the budget has to run out);
  *   "none"    — no `ImageCapture` at all (Safari).
+ *
+ * `capZoom`: the capped stream (1080×1920) shows a field of view this many
+ * times tighter than the native one — the Galaxy S25 Ultra's capped mode
+ * registered at 1.256 in the field. `forceCap` turns the (shipped-off) cap on.
  */
 
 import { createElement } from "react";
@@ -62,6 +67,15 @@ function button(match) {
 /** The page, as fractions of the preview's field of view (upright). */
 const PAGE = { x: 0.14, y: 0.16, width: 0.72 };
 
+/** Centre the page at `width` of the preview's width instead (`flow`'s `pageWidth`). */
+function placePage(width) {
+  PAGE.width = width;
+  PAGE.x = (1 - width) / 2;
+}
+
+/** The ruled lines' pitch, as a share of the page's height (`flow`'s `lineEvery`; sparser print reads as paper at any size). */
+let lineEvery = 0.022;
+
 /** The preview's field of view inside the upright sensor: its centre crop at the stream's aspect. */
 function previewFov(sensor, stream) {
   const aspect = stream.width / stream.height;
@@ -98,7 +112,7 @@ function drawScene(ctx, w, h, sensor, stream, view) {
   ctx.fillStyle = "#1f2430";
   const m = page.width * 0.08;
   ctx.fillRect(page.x + m, page.y + m, page.width * 0.5, page.width * 0.045);
-  const line = page.height * 0.022;
+  const line = page.height * lineEvery;
   for (let i = 0, y = page.y + m * 2.2; y < page.y + page.height - m; i += 1, y += line) {
     const full = i % 6 !== 5;
     ctx.fillRect(page.x + m, y, (page.width - 2 * m) * (full ? 1 : 0.5), Math.max(1, line * 0.22));
@@ -118,8 +132,16 @@ let pump = 0;
 /** Every size the app asked the fake stream for (`applyConstraints`). */
 let streamSizes = [];
 
-function installCamera({ sensor, stream, still, restore = "ok" }) {
+function installCamera({ sensor, stream, still, restore = "ok", capZoom = 1 }) {
   const fov = previewFov(sensor, stream);
+  // A capped mode that is not a scaled native one: the S25 Ultra's 1080×1920
+  // stream shows a field of view `capZoom` times tighter (its own centre crop).
+  const tight = {
+    x: fov.x + (fov.width - fov.width / capZoom) / 2,
+    y: fov.y + (fov.height - fov.height / capZoom) / 2,
+    width: fov.width / capZoom,
+    height: fov.height / capZoom,
+  };
   const media = navigator.mediaDevices;
   const getUserMedia = async () => {
     cameraCanvas = document.createElement("canvas");
@@ -147,7 +169,7 @@ function installCamera({ sensor, stream, still, restore = "ok" }) {
         await sleep(150);
         cameraCanvas.width = short;
         cameraCanvas.height = long;
-        drawScene(cameraCanvas.getContext("2d"), short, long, sensor, stream, fov);
+        drawScene(cameraCanvas.getContext("2d"), short, long, sensor, stream, long <= 1920 ? tight : fov);
         track.requestFrame?.();
       },
     });
@@ -249,9 +271,16 @@ function blobToBase64(blob) {
 
 /* ── the flow ───────────────────────────────────────────────────────────── */
 
-async function flow({ sensor, stream, still = "ok", pages = 1, restore = "ok", maxBytes = null }) {
-  const camera = installCamera({ sensor, stream, still, restore });
+async function flow({ sensor, stream, still = "ok", pages = 1, restore = "ok", maxBytes = null, capZoom = 1, settleMs = 2500, pageWidth = 0.72, ruled = 0.022, forceCap = false }) {
+  placePage(pageWidth);
+  lineEvery = ruled;
+  // Bench build only (`lib/stream-cap.ts` streamCapEnabled): the cap switched
+  // on to prove the live loop and the restore path survive a capped stream.
+  globalThis.__scanBenchStreamCap = forceCap;
+  const camera = installCamera({ sensor, stream, still, restore, capZoom });
   const events = [];
+  // Live, for a driver that reads the stream while the flow runs (the visible region, the passes).
+  window.__qualityEvents = events;
   let completed = null;
   const host = document.getElementById("root");
   const root = createRoot(host);
@@ -278,7 +307,8 @@ async function flow({ sensor, stream, still = "ok", pages = 1, restore = "ok", m
   for (let n = 1; n <= pages; n += 1) {
     // Let the preview settle (and any cap change land) and the detector see the page.
     await waitFor(() => button((_, aria) => aria.startsWith(shutterPrefix)));
-    await sleep(2500);
+    step(`live ${n}`);
+    await sleep(settleMs);
     const shutters = [...document.querySelectorAll("button")].filter((b) => !b.disabled && (b.getAttribute("aria-label") ?? "").startsWith(shutterPrefix));
     if (shutters.length === 0) throw new Error(`no shutter for page ${n}`);
     shutters[shutters.length - 1].click();

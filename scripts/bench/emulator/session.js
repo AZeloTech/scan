@@ -265,7 +265,7 @@ function keyedPose(script, t) {
  * numbers to the source.
  */
 export const FOLLOW_RULES = {
-  fill: { kind: "fill", enter: 0.78, exit: 0.83 },
+  fill: { kind: "fill", enter: 0.7, exit: 0.75 },
   area: { kind: "area", enter: 0.14, exit: 0.17 },
 };
 
@@ -287,13 +287,18 @@ export const NATURAL_FILL = [0.55, 0.72];
 export function parseFollow(text) {
   if (text === undefined || text === null || text === "") return DEFAULT_FOLLOW;
   if (text === "off") return null;
-  const [kind, enter, exit] = text.split(":");
+  // `…@E`: an imperfect person, who aims the page off the middle by up to E of the view (each axis).
+  const [ruleText, aimText] = text.split("@");
+  const aimError = aimText === undefined ? 0 : Number(aimText);
+  if (!(aimError >= 0 && aimError < 0.3)) throw new Error(`--follow ${text}: expected an aim error 0 ≤ E < 0.3 after @`);
+  const withAim = (rule) => (aimError > 0 ? { ...rule, aimError } : rule);
+  const [kind, enter, exit] = ruleText.split(":");
   const base = FOLLOW_RULES[kind];
-  if (base === undefined) throw new Error(`--follow ${text}: expected fill, area or off (optionally kind:enter:exit)`);
-  if (enter === undefined) return base;
+  if (base === undefined) throw new Error(`--follow ${text}: expected fill, area or off (optionally kind:enter:exit, and @aim-error)`);
+  if (enter === undefined) return withAim(base);
   const rule = { kind, enter: Number(enter), exit: Number(exit ?? enter) };
   if (!(rule.enter > 0 && rule.exit >= rule.enter && rule.exit < 1)) throw new Error(`--follow ${text}: expected 0 < enter <= exit < 1`);
-  return rule;
+  return withAim(rule);
 }
 
 /** A rule's measure of a page (`points`: its corners in fractions of the visible region): its fill (bounding box, clipped) or its clipped area. */
@@ -396,7 +401,7 @@ function followedPose(script, t, keyed) {
     const progress = followProgress(segment, t);
     if (progress <= 0) continue;
     const layer = layerAt(script.scene.layers[segment.layer], segment.layer, script, t);
-    return correctedPose(pose, script.frame, layer, follow.aim ?? follow.region, segment.scale, progress);
+    return correctedPose(pose, script.frame, layer, segment.aim ?? follow.aim ?? follow.region, segment.scale, progress);
   }
   return pose;
 }
@@ -510,7 +515,13 @@ export function followHint(script, rule, region) {
       return;
     }
     const target = rule.kind === "fill" ? Math.min(0.92, rule.exit * overshoot) : rule.exit * overshoot;
-    const pointsAt = (scale) => inRegion(correctedPose(pose, frame, layer, aim, scale, 1), frame, layer, view);
+    // An imperfect person (`rule.aimError`) re-centres on a point off the middle, per hold.
+    const err = rule.aimError ?? 0;
+    const holdAim =
+      err > 0
+        ? { ...aim, x: aim.x + rng.range(-err, err) * aim.width, y: aim.y + rng.range(-err, err) * aim.height }
+        : aim;
+    const pointsAt = (scale) => inRegion(correctedPose(pose, frame, layer, holdAim, scale, 1), frame, layer, view);
     const measureAt = (scale) => framingMeasure(rule.kind, pointsAt(scale));
     const room = roomAt(arriveAt);
     const scale = Math.min(1, Math.max(boundary((k) => measureAt(k) <= target), boundary((k) => roomy(pointsAt(k), room))));
@@ -521,7 +532,7 @@ export function followHint(script, rule, region) {
     const next = spans[index + 1];
     const releaseFrom = practised ? span.leaveAt : next === undefined ? FOREVER : span.to;
     const releaseTo = practised ? span.leaveAt + 200 : next === undefined ? FOREVER : Math.max(span.to + 1, next.from - 1);
-    segments.push({ layer: pageIndex, reactAt, arriveAt, releaseFrom, releaseTo, scale });
+    segments.push({ layer: pageIndex, reactAt, arriveAt, releaseFrom, releaseTo, scale, ...(holdAim === aim ? {} : { aim: holdAim }) });
     record.push({ ...base, approached: true, reactAt, arriveAt, target, after: measureAt(scale), practised });
   });
   const moved = (t) => {

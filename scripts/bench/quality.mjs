@@ -20,7 +20,14 @@
  *
  * Synthetic only: the scene is drawn in code. Output under `.bench-out/`.
  *
- *   node scripts/bench/quality.mjs [--case s25|50mp|safari|timeout|closest …] [--budget x0.97,x0.7,250000 …] [--no-ladder] [--headed]
+ * The live stream's cap is off as shipped (`lib/stream-cap.ts`): the `cap` case
+ * proves the stream stays native; `cap-fov`, `cap-fail` and `cap-stuck` force
+ * it on (bench build only) to prove the live loop and the restore path
+ * survive a capped stream — `cap-fov` one whose mode sees a tighter field of
+ * view, as the Galaxy S25 Ultra's does: found share, ready cue and fill on the
+ * capped page against the native one.
+ *
+ *   node scripts/bench/quality.mjs [--case s25|50mp|safari|timeout|closest|cap|cap-fov|cap-fail|cap-stuck …] [--budget x0.97,x0.7,250000 …] [--no-ladder] [--headed]
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -75,20 +82,37 @@ const CASES = {
     expect: [{ source: "preview", reason: "aspect-mismatch", frame: STREAM }],
   },
   cap: {
-    title: "two pages: the stream is capped after a still proves itself; page 2 still at full size",
+    title: "two pages: the stream stays native after a still proves itself (the cap is off, lib/stream-cap.ts)",
     sensor: S12,
     still: "ok",
     pages: 2,
+    expect: [
+      { source: "still", streamCapped: false },
+      { source: "still", streamCapped: false, stream: STREAM },
+    ],
+  },
+  "cap-fov": {
+    title: "forced cap whose mode sees a 1.1x tighter field of view (the S25's is 1.256): the live loop finds and readies the page as before",
+    sensor: S12,
+    still: "ok",
+    pages: 2,
+    forceCap: true,
+    capZoom: 1.1,
+    pageWidth: 0.66,
+    ruled: 0.04,
+    settleMs: 5000,
+    live: true,
     expect: [
       { source: "still", streamCapped: false },
       { source: "still", streamCapped: true, stream: CAPPED },
     ],
   },
   "cap-fail": {
-    title: "two pages: page 2's still fails on the capped stream — the native stream is restored for it",
+    title: "forced cap, two pages: page 2's still fails on the capped stream — the native stream is restored for it",
     sensor: S12,
     still: "fail-second",
     pages: 2,
+    forceCap: true,
     expect: [
       { source: "still", streamCapped: false },
       { source: "preview", reason: "take-failed", streamCapped: true, restore: "ok", frame: STREAM },
@@ -100,6 +124,7 @@ const CASES = {
     still: "fail-second",
     restore: "stuck",
     pages: 2,
+    forceCap: true,
     expect: [
       { source: "still", streamCapped: false },
       { source: "preview", reason: "take-failed", streamCapped: true, restore: "timeout", frame: CAPPED, flag: "low-resolution" },
@@ -108,7 +133,7 @@ const CASES = {
 };
 
 /** The page region the fake camera drew, in the canonical's own pixels (`page-quality.js` PAGE). */
-function expectedPage(sensor, source, frame) {
+function expectedPage(sensor, source, frame, pageWidth = 0.72) {
   const aspect = STREAM.width / STREAM.height;
   const fov =
     sensor.width / sensor.height > aspect
@@ -116,7 +141,7 @@ function expectedPage(sensor, source, frame) {
       : { width: sensor.width, height: sensor.width / aspect };
   // The canonical is the FOV at the still's resolution, or the preview frame.
   const scale = source === "still" ? 1 : frame.width / fov.width;
-  const width = 0.72 * fov.width * scale;
+  const width = pageWidth * fov.width * scale;
   return { width, height: width * Math.SQRT2 };
 }
 
@@ -195,6 +220,11 @@ try {
         still: spec.still,
         pages: spec.pages ?? 1,
         restore: spec.restore ?? "ok",
+        forceCap: spec.forceCap ?? false,
+        capZoom: spec.capZoom ?? 1,
+        pageWidth: spec.pageWidth ?? 0.72,
+        ruled: spec.ruled ?? 0.022,
+        settleMs: spec.settleMs ?? 2500,
       });
     } catch (error) {
       await page.screenshot({ path: join(OUT_DIR, `quality-fail-${name}.png`) }).catch(() => undefined);
@@ -215,7 +245,7 @@ try {
       const render = run.events.filter((e) => e.type === "render" && e.page === n).at(-1);
       const build = builds.find((e) => e.page === n);
       const image = pdf[index]?.images[0] ?? null;
-      const expected = expectedPage(spec.sensor, want.source, want.frame ?? STREAM);
+      const expected = expectedPage(spec.sensor, want.source, want.frame ?? STREAM, spec.pageWidth);
       const label = `${name} p${n}`;
       pages.push({
         page: n,
@@ -285,15 +315,56 @@ try {
       );
     }
     // The first page is always taken on the native stream; the cap follows a
-    // still that became a page, and never happens where none did.
+    // still that became a page, and never happens where none did — and, as
+    // shipped, never at all (`lib/stream-cap.ts`, STREAM_CAP_ENABLED).
     check(captures[0]?.streamCapped === false, `${name}: the first page was taken on a capped stream`);
-    if (spec.expect.some((want) => want.source === "still")) {
+    if (!spec.forceCap) {
+      check(!caps.some((e) => e.applied), `${name}: the stream was capped although the cap is off`);
+      check(caps.length > 0 && caps.every((e) => e.reason === "disabled"), `${name}: stream-cap reasons ${caps.map((e) => e.reason).join(",")}, expected disabled`);
+      check(run.streamSizes.length === 0, `${name}: the stream was asked for another size ${JSON.stringify(run.streamSizes)}`);
+    } else if (spec.expect.some((want) => want.source === "still")) {
       check(caps.some((e) => e.applied && e.reason === "still-proven"), `${name}: the stream was never capped after a proven still`);
     } else {
       check(!caps.some((e) => e.applied), `${name}: the stream was capped although no still ever became a page`);
     }
+    // The live loop after a stream change: page by page, from the moment its
+    // preview was up (`live n`) to its shutter, the share of pass samples with
+    // the page found and whether the ready cue came on — the capped page must
+    // match the native one.
+    let live = null;
+    if (spec.live) {
+      live = spec.expect.map((_, index) => {
+        const n = index + 1;
+        const from = run.steps.find((s) => s.what === `live ${n}`)?.at ?? 0;
+        const to = run.steps.find((s) => s.what === `shutter ${n}`)?.at ?? Infinity;
+        const passes = run.events.filter((e) => e.type === "pass" && e.t >= from && e.t <= to);
+        const found = passes.filter((e) => e.found).length;
+        const readyAt = run.events.find((e) => e.type === "ready" && e.on && e.t >= from && e.t <= to)?.t ?? null;
+        const fills = passes.map((e) => e.fill).filter((f) => typeof f === "number");
+        return {
+          page: n,
+          passes: passes.length,
+          foundShare: passes.length === 0 ? 0 : found / passes.length,
+          readyMs: readyAt === null ? null : readyAt - from,
+          fill: fills.length === 0 ? null : fills[fills.length - 1],
+        };
+      });
+      const [before, after] = live;
+      check(before.readyMs !== null, `${name}: the native page never got the ready cue`);
+      check(after.readyMs !== null, `${name}: the page on the capped stream never got the ready cue`);
+      check(after.foundShare >= before.foundShare - 0.15, `${name}: found on ${Math.round(after.foundShare * 100)} % of samples after the cap, ${Math.round(before.foundShare * 100)} % before`);
+      check(after.readyMs === null || before.readyMs === null || after.readyMs <= before.readyMs + 1500, `${name}: ready ${after.readyMs} ms after the cap, ${before.readyMs} ms before`);
+      if (spec.capZoom && before.fill !== null && after.fill !== null) {
+        check(Math.abs(after.fill / before.fill - spec.capZoom) <= 0.05, `${name}: fill ${after.fill} after vs ${before.fill} before is not the ${spec.capZoom}x field of view`);
+      }
+      const registered = captures[1]?.registration?.fovScale ?? null;
+      check(registered !== null && Math.abs(registered - (spec.capZoom ?? 1)) <= 0.03, `${name}: the still registered at fovScale ${registered}, expected ${spec.capZoom}`);
+      for (const p of live) {
+        log(`quality: ${name} p${p.page} live — found ${Math.round(p.foundShare * 100)} % of ${p.passes} samples · ready ${p.readyMs === null ? "never" : `${Math.round(p.readyMs)} ms`} · fill ${p.fill ?? "–"}`);
+      }
+    }
     if (errors.length > 0) failures.push(`${name}: page errors: ${errors.join(" | ")}`);
-    results.push({ case: name, title: spec.title, ms: Date.now() - started, pdfBytes: run.bytes, streamCap: caps, streamSizes: run.streamSizes, takePhotoCalls: run.stillCalls, pages });
+    results.push({ case: name, title: spec.title, ms: Date.now() - started, pdfBytes: run.bytes, streamCap: caps, streamSizes: run.streamSizes, takePhotoCalls: run.stillCalls, pages, live });
     await context.close();
   }
 

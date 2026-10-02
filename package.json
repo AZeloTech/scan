@@ -70,6 +70,7 @@
     "bench:play": "node scripts/bench/play.mjs",
     "bench:webkit": "node scripts/bench/webkit-smoke.mjs",
     "bench:quality": "node scripts/bench/quality.mjs",
+    "bench:framing": "node --import ./scripts/test-alias.mjs scripts/bench/framing-sim.mjs",
     "verify": "npm run guard:pii && npm run typecheck && npm run test && npm run build && npm run guard:dist",
     "build:styles": "tailwindcss --postcss -i src/styles.css -o dist/styles.css --minify"
   },

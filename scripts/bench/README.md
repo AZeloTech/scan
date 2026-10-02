@@ -850,6 +850,27 @@ hint's changes, and for every capture the page's size in the Galaxy S25
 Ultra's still (its 4080×3060 photo cut to the preview's field of view) and
 the dpi that is for A4.
 
+**Imperfect people** (`--follow fill@0.08`, or `fill:E:X@0.08`): on each
+approach the person re-centres the page on a point off the middle of what
+they see by up to that share of it on each axis (seeded per hold) — the
+field's off-centre framing, which made "Aproxime" and "Afaste" take turns
+under the 78/83 rule.
+
+**The framing rules on their own** (`npm run bench:framing`,
+`framing-sim.mjs`): a closed loop in plain Node — no rendering, no
+detector — of simulated people (off-centre ≤ `--off`, turned ≤ `--turn`°,
+A4 / Letter / ID card, presenting at 55–72 % fill, answering whatever hint
+shows after a reaction time, the picture scaling about the camera's optical
+centre as they come closer) against the app's own `rawHint`, `HintDebounce`
+and `ReadyCue`, on the rail layout's visible regions for the field phone
+(384×726) and 412×891 / 440×956 with and without insets. Per cell: ready
+share, median / p90 time to the cue, share within 2.5 s, hint changes per
+second and per hold, "Afaste" shown under the exit line, closer↔back flips,
+"Centralize" shown, fill at the cue and the page's pixels in the S25's still.
+`--guidance <file>` runs another copy of `guidance.ts` (a "before"),
+`--rules fillEnter=…,fillExit=…,roomEnter=…,roomExit=…,fillFloor=…` another
+set of lines, `--period` the loop's cadence, `--json` the rows.
+
 `--stream-scale N` delivers every frame scaled up N× (`--stream 720x1280
 --stream-scale 3` is a 2160×3840 stream, what a 4K phone camera negotiates):
 the scene and its truth are the same; only the pixels the app grabs and
@@ -883,6 +904,13 @@ Then the size ladder: the `s25` page again under a host's `maxBytes` (by
 default 97, 80 and 60 % of its own PDF; `--budget x0.5,300000`, or
 `--no-ladder`): each must fit, a quality rung must embed every pixel of the
 final, and a budget the as-reviewed PDF meets must not step down.
+The live stream's cap is off as shipped (`lib/stream-cap.ts`): `cap` proves
+two pages stay on the native stream (`stream-cap` says `disabled`, no size is
+ever asked for); `cap-fov`, `cap-fail` and `cap-stuck` force it on (bench
+build only, `globalThis.__scanBenchStreamCap`) — `cap-fov` with a capped mode
+that sees a 1.1× tighter field of view (the S25 Ultra's is 1.256), checking
+that the live loop finds the page on as many samples, reaches the ready cue
+as soon, reads the fill 1.1× larger and that the still registers at 1.1.
 `--case s25,50mp`, `--no-edits`, `--headed`. Output: `.bench-out/quality-*/`.
 
 ## WebKit (`npm run bench:webkit`)

@@ -363,3 +363,11 @@ test("the PDF's pixels are the page's edges in the field phone's still", async (
   // A 3:4 stream: the crop is 3060 wide.
   close(fieldPagePixels(page, { width: 960, height: 1280 }).short, Math.min(0.54 * 3060, 0.4 * 4080), 1);
 });
+
+test("follow: an imperfect person's aim error rides on the rule (`--follow fill:E:X@0.08`)", async () => {
+  const { parseFollow, FOLLOW_RULES } = await import("./emulator/session.js");
+  assert.deepEqual(parseFollow("fill"), FOLLOW_RULES.fill);
+  assert.deepEqual(parseFollow("fill@0.08"), { ...FOLLOW_RULES.fill, aimError: 0.08 });
+  assert.deepEqual(parseFollow("fill:0.78:0.83@0.05"), { kind: "fill", enter: 0.78, exit: 0.83, aimError: 0.05 });
+  assert.throws(() => parseFollow("fill@0.5"));
+});
