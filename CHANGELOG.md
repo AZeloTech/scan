@@ -6,7 +6,42 @@ freezes at 1.0.
 
 ## [Unreleased]
 
+### Added
+- **A covered corner is placed where its edges meet, and the app knows it
+  is estimated.** A sheet lying over a corner of the page (a leaflet, the
+  next page of a pile), a clip on a corner or an edge: the edge refinement
+  fits each side on the visible run of its edge and puts the covered corner
+  where two such lines meet — never on the outline of what lies over it —
+  and every corner says whether it was seen, inferred (placed from its
+  edges) or unknown (covered, its edges too short to extend). The live
+  overlay draws an inferred corner's bracket dashed and an unknown one not
+  at all; **auto-capture never fires while a corner is inferred or unknown,
+  or while another sheet overlaps the page** (the ready cue waits too; the
+  shutter always works); "Canto coberto — afaste a folha de cima" comes up
+  once a corner has stayed unknown for 0.7 s, "Separe as folhas" once two
+  sheets have; the confirm screen marks each estimated handle — hollow,
+  dashed, "estimado" under it, its name saying so — until it is moved, and
+  its pill says one corner was estimated. A page on a clipboard is cropped
+  at its own edge under the clip, the board's margin left out. Two sheets
+  overlapping (a page's corner seen lying on another sheet, or the desk
+  inside the answer between two sheets taken for one) hold auto-capture
+  with "Separe as folhas"; a manual capture's confirm screen shows the sheet
+  on top.
+  `onDiagnostics`: `pass`, `capture` and `confirm` carry `corners` (one of
+  `seen` / `inferred` / `unknown` per corner, `tl`/`tr`/`br`/`bl`) and
+  `pass`/`capture` `separate`. On the bench's field-case scenes (F8, 20
+  seeds a setting) the covered corner is within 3 % of the diagonal in
+  100 % of `owner-case` captures (was 60 %) and in 97 % of covered scenes
+  over every setting (was 70 %).
+
 ### Fixed
+- **A page of printed images is found.** An imaging report (near-black
+  ultrasound panels over most of the page, white margins) read as "not
+  paper" to the live loop — its background share and its solid ink are what
+  a laptop or a notebook cover shows — so the viewfinder kept saying "Não
+  achei a folha". A white margin round solid print, as bright as anything on
+  the sheet, is now paper; and the edge refinement reads the page's paper
+  from that margin, which had left every side of such a page unfound.
 - **The PDF gets the camera's full resolution.** Every camera frame and
   picked photo used to be scaled to a 3000 px long edge before anything else
   ran, and on Android the still photo was asked for at that size — which

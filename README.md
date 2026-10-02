@@ -379,6 +379,15 @@ shows on the default `"rail"` layout unless the host passes
 flow keeps the choice while it is open, and the library writes nothing to
 storage for it. Retakes are always manual.
 
+**A corner something lies over.** A sheet over a corner of the page, a clip
+on it: the page's corner is placed where the visible runs of its two edges
+meet, never on the outline of what covers it, and it is marked as
+estimated — a dashed bracket in the viewfinder, a hollow "estimado" handle
+on the confirm screen. Auto-capture never fires on such a page (nor on two
+overlapping sheets: "Separe as folhas"); the shutter does. When the edges
+are not seen far enough to place the corner, the viewfinder says "Canto
+coberto — afaste a folha de cima".
+
 **React.** 18.3 or 19, StrictMode-safe.
 
 **GSAP** is a peer dependency, so install it alongside this package. The motion
