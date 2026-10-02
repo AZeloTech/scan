@@ -381,12 +381,15 @@ storage for it. Retakes are always manual.
 
 **A corner something lies over.** A sheet over a corner of the page, a clip
 on it: the page's corner is placed where the visible runs of its two edges
-meet, never on the outline of what covers it, and it is marked as
+meet rather than on the outline of what covers it, and it is marked as
 estimated — a dashed bracket in the viewfinder, a hollow "estimado" handle
-on the confirm screen. Auto-capture never fires on such a page (nor on two
-overlapping sheets: "Separe as folhas"); the shutter does. When the edges
-are not seen far enough to place the corner, the viewfinder says "Canto
-coberto — afaste a folha de cima".
+on the confirm screen. Auto-capture does not fire on a page with such a
+corner, on two sheets seen overlapping ("Separe as folhas"), or on a page
+whose corners no recent pass has measured; the shutter always works. When
+the edges are not seen far enough to place the corner, the viewfinder says
+"Canto coberto — afaste a folha de cima". A cover the edges do not show at
+all (a white sheet on a white desk) can still read as a seen corner, so the
+confirm screen after every capture remains the check.
 
 **React.** 18.3 or 19, StrictMode-safe.
 

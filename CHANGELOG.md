@@ -11,22 +11,32 @@ freezes at 1.0.
   is estimated.** A sheet lying over a corner of the page (a leaflet, the
   next page of a pile), a clip on a corner or an edge: the edge refinement
   fits each side on the visible run of its edge and puts the covered corner
-  where two such lines meet — never on the outline of what lies over it —
-  and every corner says whether it was seen, inferred (placed from its
+  where two such lines meet rather than on the outline of what lies over
+  it, and every corner says whether it was seen, inferred (placed from its
   edges) or unknown (covered, its edges too short to extend). The live
   overlay draws an inferred corner's bracket dashed and an unknown one not
-  at all; **auto-capture never fires while a corner is inferred or unknown,
-  or while another sheet overlaps the page** (the ready cue waits too; the
-  shutter always works); "Canto coberto — afaste a folha de cima" comes up
+  at all; **auto-capture does not fire while a corner is inferred or
+  unknown, while another sheet is seen overlapping the page, or while no
+  recent pass has measured the corners of the quad on screen** (the ready
+  cue waits too; the shutter always works). A corner is called seen when
+  nothing was found over it — on the bench about one real corner in five
+  rests on no more than that, so a cover the edges do not show (a white
+  sheet on a white desk) can still read as seen. "Canto coberto — afaste a folha de cima" comes up
   once a corner has stayed unknown for 0.7 s, "Separe as folhas" once two
   sheets have; the confirm screen marks each estimated handle — hollow,
-  dashed, "estimado" under it, its name saying so — until it is moved, and
-  its pill says one corner was estimated. A page on a clipboard is cropped
-  at its own edge under the clip, the board's margin left out. Two sheets
-  overlapping (a page's corner seen lying on another sheet, or the desk
-  inside the answer between two sheets taken for one) hold auto-capture
-  with "Separe as folhas"; a manual capture's confirm screen shows the sheet
-  on top.
+  dashed, "estimado" under it, its name saying so — until it is actually
+  moved (a touch that leaves it where it was keeps the mark), and its pill
+  says one corner was estimated, beside the photo's own reason when there
+  is one. A page on a clipboard is mostly cropped at its own edge under the
+  clip, the board's margin left out — not yet on a light board on a light
+  desk, which can still be taken for the page (on the bench, the board is in
+  the crop in about a fifth of clipboard scenes). Two sheets overlapping
+  (a page's corner seen lying on another sheet, the desk inside the answer
+  between two sheets taken for one, or another sheet past two of its sides)
+  hold auto-capture with "Separe as folhas" when the overlap is seen — on
+  the bench in about half of such scenes, with about three in four held
+  for some reason; a manual capture's confirm screen shows the sheet on
+  top.
   `onDiagnostics`: `pass`, `capture` and `confirm` carry `corners` (one of
   `seen` / `inferred` / `unknown` per corner, `tl`/`tr`/`br`/`bl`) and
   `pass`/`capture` `separate`. On the bench's field-case scenes (F8, 20
@@ -35,6 +45,14 @@ freezes at 1.0.
   over every setting (was 70 %).
 
 ### Fixed
+- **A very large photo is read as well as the viewfinder reads it.** The
+  page detector squeezed a 4000 px still to its small input with a
+  medium-quality resample and lost confidence on it, so a manual capture
+  could fall back to a worse outline or to none. Stills over 1920 px are
+  now reduced smoothly for the detector only; the PDF keeps the full still.
+- **"Canto coberto" and "Separe as folhas" are asked before "Aproxime" and
+  "Centralize"** when the page is whole in the view; a page cut off by the
+  view's edge still hears how to frame it first.
 - **A page of printed images is found.** An imaging report (near-black
   ultrasound panels over most of the page, white margins) read as "not
   paper" to the live loop — its background share and its solid ink are what
