@@ -283,6 +283,16 @@ export function settledOn(readings: readonly { at: number; quad: NormalizedQuad 
   return motion !== null && motion <= STILL_MAX;
 }
 /**
+ * …and never sooner than this after the page was found (the live loop's
+ * lock, held since): the minimum dwell (R3). A page that has been in view
+ * for under a second is a page still arriving or about to leave — the
+ * bench's whip-off (held 0.9 s, then pulled away in 200 ms) fired at
+ * 0.9 s on a page the camera was already leaving, the motion not yet in
+ * any frame the app had. The countdown is drawn over the whole wait.
+ */
+export const AUTO_MIN_DWELL_MS = 1200;
+
+/**
  * The fire's final look (R3): the newest pass that found the page where it
  * was must have read a frame at least this far into the countdown…
  */
@@ -999,6 +1009,8 @@ export class AutoCapture {
     agree?: boolean;
     /** The fire's frame-age bound ({@link autoFrameAgeMax}); absent: {@link AUTO_FRAME_AGE_MS}. */
     frameAgeMax?: number;
+    /** When the page was found (the lock, held since): no fire before {@link AUTO_MIN_DWELL_MS} after it. Absent: not checked. */
+    lockedSince?: number | null;
   }): AutoCaptureState {
     const { now, readyOnSince, sheet } = input;
     if (this.fired !== null) {
@@ -1012,8 +1024,11 @@ export class AutoCapture {
     const start = Math.max(readyOnSince, this.armedAt);
     if (this.fastFor !== start) this.fastFor = input.agree === true ? start : null;
     const duration = this.fastFor === start ? AUTO_FIRE_FAST_MS : AUTO_FIRE_MS;
-    const progress = Math.min(1, (now - start) / duration);
-    const end = start + duration;
+    const lockedSince = input.lockedSince;
+    const dwellEnd = lockedSince === undefined ? Number.NEGATIVE_INFINITY : lockedSince === null ? Number.POSITIVE_INFINITY : lockedSince + AUTO_MIN_DWELL_MS;
+    const end = Math.max(start + duration, dwellEnd);
+    if (!Number.isFinite(end)) return { countdown: 0, fire: false, start, end: null };
+    const progress = Math.min(1, (now - start) / (end - start));
     if (progress < 1) return { countdown: progress, fire: false, start, end };
     if (input.steady === false || (input.ready ?? input.steady) === false) return { countdown: 1, fire: false, start, end };
     const confirmedAt = input.confirmedAt ?? null;

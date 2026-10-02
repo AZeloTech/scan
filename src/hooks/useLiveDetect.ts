@@ -2883,6 +2883,7 @@ export function useLiveDetect({
           ready: guidance.ready.onSince !== null,
           agree: tracking && readingsAgree(runtime.sheetReadings, aspect),
           frameAgeMax: autoFrameAgeMax(runtime.intervalMs),
+          lockedSince: tracking ? runtime.timeline.since("lock") : null,
         });
         runtime.countdown = auto.countdown;
         runtime.countdownStart = auto.countdown === null ? null : (auto.start ?? null);

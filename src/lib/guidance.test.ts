@@ -13,6 +13,7 @@ import {
   AutoCapture,
   readingsAgree,
   settledOn,
+  AUTO_MIN_DWELL_MS,
   shakeMotion,
   SHAKY_ENTER,
   SETTLE_WINDOW_MS,
@@ -697,4 +698,19 @@ test("auto-capture: a fire vetoed at its instant is not the page's one fire — 
   assert.deepEqual(cf(step(AUTO_FIRE_MS + 150, AUTO_FIRE_MS + 120)), { countdown: 1, fire: true });
   // Taken now: once per page, as ever.
   assert.equal(step(AUTO_FIRE_MS + 400, AUTO_FIRE_MS + 380).fire, false);
+});
+
+test("auto-capture: never sooner than the minimum dwell after the page was found — the countdown spans the wait", () => {
+  const auto = new AutoCapture();
+  const step = (now: number) => auto.update({ now, readyOnSince: 200, sheet: page, moving: false, aspect: 1.5, steady: true, confirmedAt: now - 20, lockedSince: 0 });
+  // Settled at 200: the 500 ms countdown alone would end at 700; the dwell holds it to 1200, drawn over 200…1200.
+  const half = step(700);
+  assert.equal(half.fire, false);
+  assert.ok(half.countdown !== null && Math.abs(half.countdown - 0.5) < 1e-9);
+  assert.equal(half.end, AUTO_MIN_DWELL_MS);
+  assert.equal(step(AUTO_MIN_DWELL_MS - 1).fire, false);
+  assert.equal(step(AUTO_MIN_DWELL_MS).fire, true);
+  // No lock: no countdown to finish.
+  const lost = new AutoCapture();
+  assert.equal(lost.update({ now: 5000, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, steady: true, confirmedAt: 4990, lockedSince: null }).fire, false);
 });
