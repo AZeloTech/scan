@@ -51,6 +51,7 @@ import { mlDetectorOptions, type AssetUrls } from "@/lib/runtime-config";
 import { denormalizeQuad, normalizeQuad, quadCoverage, type NormalizedQuad } from "@/lib/quad";
 import { probe, probing, type CaptureDetectProbe, type RefineProbe } from "@/lib/probe";
 import { refineOnCanvas } from "@/lib/refine";
+import { cornerCheckOf, type CornerCheck } from "@/lib/corner-check";
 import { demoteDetectLane, detectLane, detectLaneSettled, laneDetect } from "@/lib/detect-lane";
 import type { DetectPlan } from "@/lib/detect-protocol";
 
@@ -155,6 +156,12 @@ export interface QuadDetection {
    * comparison of the two capture policies.
    */
   fellThrough?: boolean;
+  /**
+   * What the refinement said about the corners (`lib/corner-check.ts`):
+   * each seen, inferred or unknown, and whether another sheet overlaps the
+   * page. Absent when the answer was not refined.
+   */
+  check?: CornerCheck;
 }
 
 /**
@@ -362,6 +369,21 @@ export function refineCorners(
   detector: DetectionSource | null,
   from: RefineFrom,
 ): NormalizedQuad {
+  return refineCornersChecked(frame, quad, detector, from).quad;
+}
+
+/**
+ * {@link refineCorners}, with what the refinement says about the corners
+ * (`lib/corner-check.ts`): the capture's word on them, which the confirm
+ * screen marks and the diagnostics carry. The full-resolution still is
+ * authoritative — whatever the live loop said about the same corners.
+ */
+export function refineCornersChecked(
+  frame: HTMLCanvasElement,
+  quad: NormalizedQuad,
+  detector: DetectionSource | null,
+  from: RefineFrom,
+): { quad: NormalizedQuad; check: CornerCheck } {
   const mode = detector === "ml" ? "full" : "local";
   const result = refineOnCanvas(frame, quad, { mode });
   if (probing()) {
@@ -376,12 +398,14 @@ export function refineCorners(
       changed: result.changed,
       reason: result.reason,
       sides: result.sides,
+      corners: result.corners,
+      occlusion: result.occlusion,
       ms: result.ms,
       width: frame.width,
       height: frame.height,
     });
   }
-  return result.quad;
+  return { quad: result.quad, check: cornerCheckOf(result) };
 }
 
 /**
@@ -420,13 +444,13 @@ async function detectHeld(
   const quad = normalizeQuad(corners, source.width, source.height);
   reportCaptureDetect(on, source, started, detection, floor, quad !== null, held);
   if (quad === null) return null;
+  const refined = refine ? refineCornersChecked(source, quad, detection.source, on === "frame" ? "detected" : "canonical") : null;
   return {
-    corners: refine
-      ? refineCorners(source, quad, detection.source, on === "frame" ? "detected" : "canonical")
-      : quad,
+    corners: refined?.quad ?? quad,
     confidence,
     source: detection.source,
     fellThrough: held.fellThrough,
+    ...(refined === null ? {} : { check: refined.check }),
   };
 }
 

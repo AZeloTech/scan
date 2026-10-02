@@ -38,7 +38,8 @@
 
 import type { DetectionSource } from "@/lib/flatten";
 import type { NormalizedQuad } from "@/lib/quad";
-import type { SideReport } from "@/lib/refine";
+import type { CornerReport, OcclusionReport, SideReport } from "@/lib/refine";
+import type { ScanDiagnosticsCorners } from "@/types";
 import type { LaneReason } from "@/lib/detect-protocol";
 import type { PaperEvidence } from "@/lib/paper-evidence";
 import type { FrameReading } from "@/lib/hints";
@@ -136,6 +137,18 @@ export interface OverlayProbe {
   watch?: number | null;
   /** A photo is being taken: the overlay is frozen on the quad of the tap. */
   capturing?: boolean;
+  /** The drawn page's corners as the newest measuring pass said (`lib/corner-check.ts`); null with no page or none measured. */
+  corners?: ScanDiagnosticsCorners | null;
+  /** Another sheet overlaps the drawn page. */
+  separate?: boolean | null;
+}
+
+/** Auto-capture fired: what the page's corners were said to be at that moment. */
+export interface AutoFireProbe {
+  type: "auto-fire";
+  t: number;
+  corners: ScanDiagnosticsCorners | null;
+  separate: boolean | null;
 }
 
 /** A chip or notice over the viewfinder appearing (`shown`) or going away. */
@@ -310,6 +323,9 @@ export interface RefineProbe {
   reason: string;
   /** TL→TR, TR→BR, BR→BL, BL→TL. */
   sides: SideReport[];
+  /** Each corner's provenance, TL, TR, BR, BL (`lib/refine.ts`). */
+  corners: CornerReport[];
+  occlusion: OcclusionReport;
   ms: number;
   /** The image the corners are fractions of. */
   width: number;
@@ -369,6 +385,7 @@ export type ProbeEvent =
   | GrabProbe
   | CaptureDetectProbe
   | RefineProbe
+  | AutoFireProbe
   | StillProbe
   | ConfirmOpenProbe
   | ConfirmDoneProbe

@@ -281,6 +281,14 @@ export type ScanCaptureLayout =
 /** The schema version every {@link ScanDiagnosticsEvent} carries as `v`. */
 export type ScanDiagnosticsVersion = 1;
 
+/** One enum per corner of a page (top-left, top-right, bottom-right, bottom-left): how that corner was placed. */
+export interface ScanDiagnosticsCorners {
+  tl: "seen" | "inferred" | "unknown";
+  tr: "seen" | "inferred" | "unknown";
+  br: "seen" | "inferred" | "unknown";
+  bl: "seen" | "inferred" | "unknown";
+}
+
 /** A size in pixels. */
 export interface ScanDiagnosticsSize {
   width: number;
@@ -348,6 +356,15 @@ export type ScanDiagnosticsPayload =
       paper?: boolean | null;
       /** How much of the visible region the page fills (as for `hint`); null with no page. */
       fill?: number | null;
+      /**
+       * The tracked page's corners as the newest measuring pass said:
+       * `seen`, `inferred` (something lies over it; placed where its edges
+       * meet) or `unknown` (something lies over it; not placed) — an enum per
+       * corner; null with no page or none measured.
+       */
+      corners?: ScanDiagnosticsCorners | null;
+      /** Another sheet overlaps the tracked page; null with no page or none measured. */
+      separate?: boolean | null;
     }
   /** The part of the frame the person can see changed (fractions of the frame). */
   | { type: "visible"; x: number; y: number; width: number; height: number; fit: string }
@@ -412,6 +429,9 @@ export type ScanDiagnosticsPayload =
       registration: { fovScale: number; shiftX: number; shiftY: number; score: number; overlap: number } | null;
       /** Why the photo's own check asked for a closer look, or null. */
       flag: "no-page" | "corner-outside" | "moved" | "unverified" | "low-resolution" | null;
+      /** The capture's word on the corners it hands to the confirm screen (as for `pass`); null with none or not measured. */
+      corners?: ScanDiagnosticsCorners | null;
+      separate?: boolean | null;
     }
   /**
    * The confirm-corners screen was answered: kept as seeded (`accepted`),
@@ -433,6 +453,8 @@ export type ScanDiagnosticsPayload =
       canonical: { width: number; height: number; bytes: number; quality: number } | null;
       /** True only when the browser's canvas limit made the canonical smaller than its source. */
       capped: boolean | null;
+      /** The seeded corners' provenance (as for `pass`): which handles were marked estimated; null when not measured. */
+      corners?: ScanDiagnosticsCorners | null;
     }
   /**
    * A page's pixels were rendered from its canonical (after the capture, and
