@@ -149,6 +149,14 @@ export interface AutoFireProbe {
   t: number;
   corners: ScanDiagnosticsCorners | null;
   separate: boolean | null;
+  /**
+   * Where the fire's time went (`hooks/useLiveDetect.ts` `FireMarks`):
+   * absolute probe times of each ready condition's last onset, the cue, the
+   * countdown's start and end, and the final confirming frame.
+   */
+  timeline?: Record<string, number | null> | null;
+  /** The loop's interval at the fire. */
+  intervalMs?: number;
 }
 
 /** A chip or notice over the viewfinder appearing (`shown`) or going away. */

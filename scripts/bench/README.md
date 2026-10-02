@@ -653,6 +653,7 @@ it), `marks.tremor` (no automatic capture may fire inside) and, page-less,
 | `shaky-hold` | framed with a 1.5 % tremor for 4.5 s — "Segure firme" owed, no automatic capture; the hand steadies (0.3 %); shutter at 9 s |
 | `tremor-hold-auto` | `tremor-hold` with auto-capture on: none may fire |
 | `page-swap-auto` | `page-swap` with auto-capture on: one automatic capture per page |
+| `present-auto` | the camera starts over the desk beside the page, swings onto it at 1.5–2.1 s and holds 10.4 s, framing it as people do and following the hints; auto-capture on, no shutter — the fire latency session (5b): each fire's `timeline` (when each ready condition last came true, the cue, the countdown's start and end, the final confirming frame), `presentedAt` / `fromPresentedMs` (from the hold's start, before any approach), `stableAt` and `captureMs` |
 | `empty-desk-auto`, `lookalikes-auto`, `desk-hold-auto` | `empty-desk-sweep`, `paper-lookalikes` and `desk-hold` (an F6 desk with no page held still 9 s — not in any group on its own) with auto-capture on: "Procurando documento" / "Não achei a folha" owed, and every automatic capture is a false fire |
 
 **The `breaker` group** — **not in a plain run**; `--session breaker` runs

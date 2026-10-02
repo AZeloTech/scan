@@ -1009,11 +1009,32 @@ export function scoreGuidance(script, record, gtAt, captures) {
     if (probeAt === undefined) return null;
     return probeAt.separate === true || (probeAt.corners !== null && Object.values(probeAt.corners).some((p) => p !== "seen"));
   };
+  // Where each fire's time went (5b, the probe's `timeline`), in camera ms.
+  const fireProbeAt = (tapAt) => [...fireProbes].reverse().find((e) => e.t - t0 <= tapAt + 50) ?? null;
+  const toCamera = (marksAt) =>
+    marksAt === null || marksAt === undefined
+      ? null
+      : Object.fromEntries(Object.entries(marksAt).map(([k, v]) => [k, typeof v === "number" && Number.isFinite(v) ? v - t0 : null]));
+  // When the page was presented: the start of the hold the fire is in (an
+  // approach the scripted user made counts from before it), else its stable mark.
+  const presentedAt = (tapAt) => {
+    const starts = ((marks.follow ?? []).length > 0 ? marks.follow.map((f) => f.from) : (marks.ready ?? []).map((w) => w.from)).filter((v) => v <= tapAt);
+    return starts.length === 0 ? null : Math.max(...starts);
+  };
   const fires = captures
     .filter((c) => c.trigger === "auto")
     .map((c) => {
       const since = stable.filter((s) => s <= c.tapAt).pop();
+      const fp = fireProbeAt(c.tapAt);
+      const presented = presentedAt(c.tapAt);
       return {
+        // 5b: the fire's timeline (camera ms) and the loop's interval then; when the page was presented; the capture's time to its corners.
+        timeline: toCamera(fp?.timeline),
+        intervalMs: fp?.intervalMs ?? null,
+        presentedAt: presented,
+        fromPresentedMs: presented === null ? null : c.tapAt - presented,
+        stableAt: since ?? null,
+        captureMs: c.captureMs ?? null,
         // The app called a corner inferred / unknown, or two sheets, at the fire (must never be true); null: not reported.
         uncertain: uncertainAt(c.tapAt),
         // The script's page had a covered corner (`marks.covered`) at the fire.

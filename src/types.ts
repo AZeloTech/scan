@@ -289,6 +289,34 @@ export interface ScanDiagnosticsCorners {
   bl: "seen" | "inferred" | "unknown";
 }
 
+/**
+ * Where a ready cue's or an auto-capture's time went: for each of the ready
+ * cue's conditions, how many milliseconds before the event it last came true
+ * and stayed true (null: not true then). Numbers only.
+ *
+ * `lock` a found sheet; `hint` no hint owed (framing, light, glare, motion…);
+ * `slot` the hint slot empty (a hint shown keeps its minimum time);
+ * `still` the page still on enough readings and the frame sharp; `check` its
+ * corners measured and certain; `footing` a fresh pass found it where it was.
+ * An auto-capture's fire adds `strict` (all of those together), `ready` (the
+ * cue on), `countdown` (its start), `end` (the countdown's end) and `confirm`
+ * (the frame the final fresh pass read). `intervalMs` is the loop's interval.
+ */
+export interface ScanDiagnosticsPhases {
+  lock: number | null;
+  hint: number | null;
+  slot: number | null;
+  still: number | null;
+  check: number | null;
+  footing: number | null;
+  strict?: number | null;
+  ready?: number | null;
+  countdown?: number | null;
+  end?: number | null;
+  confirm?: number | null;
+  intervalMs?: number | null;
+}
+
 /** A size in pixels. */
 export interface ScanDiagnosticsSize {
   width: number;
@@ -374,14 +402,24 @@ export type ScanDiagnosticsPayload =
    * with no page) — what "Aproxime" is judged on.
    */
   | { type: "hint"; id: string; shown: boolean; ms: number | null; fill: number | null }
-  /** The ready cue came on, or went off after `ms` (with why, when it is known); `fill` as for `hint`. */
-  | { type: "ready"; on: boolean; ms: number | null; why: string | null; fill: number | null }
+  /**
+   * The ready cue came on, or went off after `ms` (with why, when it is
+   * known); `fill` as for `hint`; `phases` (on only) where the time to it went.
+   */
+  | { type: "ready"; on: boolean; ms: number | null; why: string | null; fill: number | null; phases?: ScanDiagnosticsPhases | null }
   /**
    * Auto-capture: its countdown started, was cancelled (`reason`; `ms` into
    * it), fired (`ms` since the page was steady and ready), or re-armed for
    * another page.
    */
-  | { type: "auto"; phase: "countdown" | "cancel" | "fire" | "rearmed"; ms: number | null; reason: string | null }
+  | {
+      type: "auto";
+      phase: "countdown" | "cancel" | "fire" | "rearmed";
+      ms: number | null;
+      reason: string | null;
+      /** At `countdown` and `fire`: where the time to it went ({@link ScanDiagnosticsPhases}). */
+      phases?: ScanDiagnosticsPhases | null;
+    }
   /** A photo was taken and handed to the confirm screen. */
   | {
       type: "capture";

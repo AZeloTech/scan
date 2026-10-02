@@ -748,6 +748,10 @@ export interface AutoCaptureState {
   countdown: number | null;
   /** Fire now (true once per countdown). */
   fire: boolean;
+  /** When the running countdown started (the ready cue's onset, or the arming after it); null when it is not counting. */
+  start?: number | null;
+  /** When the running countdown ends (or ended); null when it is not counting. */
+  end?: number | null;
 }
 
 /**
@@ -800,15 +804,16 @@ export class AutoCapture {
     if (this.fired !== null || readyOnSince === null || sheet === null) return { countdown: null, fire: false };
     const start = Math.max(readyOnSince, this.armedAt);
     const progress = Math.min(1, (now - start) / AUTO_FIRE_MS);
-    if (progress < 1) return { countdown: progress, fire: false };
-    if (input.steady === false) return { countdown: 1, fire: false };
+    const end = start + AUTO_FIRE_MS;
+    if (progress < 1) return { countdown: progress, fire: false, start, end };
+    if (input.steady === false) return { countdown: 1, fire: false, start, end };
     const confirmedAt = input.confirmedAt ?? null;
-    if (confirmedAt === null || confirmedAt < start + AUTO_FIRE_MS) return { countdown: 1, fire: false };
+    if (confirmedAt === null || confirmedAt < end) return { countdown: 1, fire: false, start, end };
     this.fired = { quad: sheet, at: now };
     this.movedSinceFire = false;
     this.seenSinceFire = false;
     this.goneSince = null;
-    return { countdown: 1, fire: true };
+    return { countdown: 1, fire: true, start, end };
   }
 
   /**

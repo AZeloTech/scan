@@ -1979,6 +1979,43 @@ registerSession({
   },
 });
 
+registerSession({
+  id: "present-auto",
+  title: "a page brought into view and held, auto-capture on",
+  inDefault: false,
+  group: "guidance",
+  describe:
+    "the camera starts over the desk beside the page; at 1.5 s it swings onto the page in 0.6 s and the person holds it — framing it as people do and following the hints — for 10.4 s; auto-capture on, no shutter: when it fires and where the time went (5b)",
+  build(rng, { seed, size, family }) {
+    const { scene, found } = roomyScene(seed, size, family, 0.06);
+    const rest = scene.camera;
+    const pan = rng.fork("pan");
+    const bearing = pan.range(0, Math.PI * 2);
+    const away = Math.max(...found.layer.size) * pan.range(1.8, 2.3);
+    const off = { ...rest, target: [rest.target[0] + Math.cos(bearing) * away, rest.target[1] + Math.sin(bearing) * away] };
+    const presentAt = 2100;
+    return {
+      scene,
+      duration: 12600,
+      autoCapture: true,
+      camera: [
+        { t: 0, pose: off },
+        { t: 1500, pose: off },
+        { t: presentAt, pose: rest },
+      ],
+      tremor: [{ t: 0, amplitude: 0.004 }],
+      actions: [],
+      marks: {
+        hints: [],
+        ready: [{ from: presentAt, to: 12500 }],
+        stable: [presentAt],
+        tremor: [],
+        pages: 1,
+      },
+    };
+  },
+});
+
 /** A page-less session with auto-capture on: the hint owed is "searching", and every automatic capture is a false fire. */
 function pagelessAuto(id, base, title, describe) {
   registerSession({

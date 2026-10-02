@@ -57,6 +57,9 @@ function input(overrides: Partial<GuidanceInput> = {}): GuidanceInput {
   };
 }
 
+/** An auto-capture state's countdown and fire, without its times. */
+const cf = ({ countdown, fire }: { countdown: number | null; fire: boolean }) => ({ countdown, fire });
+
 test("geometry: the visible crop, the margin to its edge, the clipped area", () => {
   const v = toVisible(rect(0, 0.075, 1, 0.925), { x: 0, y: 0.075, width: 1, height: 0.85 });
   assert.ok(Math.abs(v.topLeft.y) < 1e-9 && Math.abs(v.bottomRight.y - 1) < 1e-9);
@@ -270,9 +273,9 @@ test("auto-capture: a wobble the cue rides out pauses the fire, it does not rest
   assert.equal(auto.update({ ...base, now: 300, steady: true, confirmedAt: 280 }).countdown, 300 / AUTO_FIRE_MS);
   // Countdown complete, mid-wobble: not fired, still counted.
   const held = auto.update({ ...base, now: AUTO_FIRE_MS + 50, steady: false, confirmedAt: AUTO_FIRE_MS + 40 });
-  assert.deepEqual(held, { countdown: 1, fire: false });
+  assert.deepEqual(cf(held), { countdown: 1, fire: false });
   // Steady again with a fresh confirming pass: fires, without starting over.
-  assert.deepEqual(auto.update({ ...base, now: AUTO_FIRE_MS + 120, steady: true, confirmedAt: AUTO_FIRE_MS + 100 }), { countdown: 1, fire: true });
+  assert.deepEqual(cf(auto.update({ ...base, now: AUTO_FIRE_MS + 120, steady: true, confirmedAt: AUTO_FIRE_MS + 100 })), { countdown: 1, fire: true });
 });
 
 test("the ready tick is once per page, not once per wobble", () => {
@@ -344,8 +347,8 @@ test("auto-capture fires only once a frame sampled after the countdown found the
   const auto = new AutoCapture();
   const at = (now: number, confirmedAt: number | null) => auto.update({ now, readyOnSince: 0, sheet: page, moving: false, aspect: 1.5, confirmedAt });
   // The countdown is done, but the newest confirmed frame is from before its end.
-  assert.deepEqual(at(AUTO_FIRE_MS, AUTO_FIRE_MS - 80), { countdown: 1, fire: false });
-  assert.deepEqual(at(AUTO_FIRE_MS + 100, null), { countdown: 1, fire: false });
+  assert.deepEqual(cf(at(AUTO_FIRE_MS, AUTO_FIRE_MS - 80)), { countdown: 1, fire: false });
+  assert.deepEqual(cf(at(AUTO_FIRE_MS + 100, null)), { countdown: 1, fire: false });
   assert.equal(at(AUTO_FIRE_MS + 200, AUTO_FIRE_MS + 20).fire, true);
 });
 

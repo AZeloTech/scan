@@ -114,6 +114,7 @@ import { CadenceController, type CadenceProfile } from "@/lib/cadence";
 import { classicalQuadSane, PAPER, paperEvidence, paperSurface, type PaperEvidence } from "@/lib/paper-evidence";
 import { refineQuad } from "@/lib/refine";
 import { cornerCheckOf, hasUnknown, isUncertain, provenanceDiagnostic, type CornerCheck } from "@/lib/corner-check";
+import { FireTimeline, phasesBefore, type TimelineMarks } from "@/lib/fire-timeline";
 import type { CornerPoints } from "@/lib/flatten";
 import {
   demoteDetectLane,
@@ -656,7 +657,27 @@ interface Runtime {
   /** Since when (frame time) the tracked page has had an unknown corner / another sheet over it, or null. */
   unknownSince: number | null;
   separateSince: number | null;
+  /** When each of the ready cue's conditions last came true ({@link FireTimeline}): where a fire's time went. */
+  timeline: FireTimeline;
+  /** When the running auto-capture countdown started, or null. */
+  countdownStart: number | null;
+  /** The newest fire's timeline ({@link fireMarks}), for the bench's probe and the diagnostics stream. */
+  lastFire: { at: number; marks: FireMarks } | null;
 }
+
+/**
+ * A fire's timeline, absolute times: each ready condition's last onset
+ * ({@link FireTimeline}), then `strict` (all together), `ready` (the cue on),
+ * `countdown` and `end` (the countdown's start and end), `confirm` (the frame
+ * time of the newest pass that found the page where it was).
+ */
+export type FireMarks = TimelineMarks & {
+  strict: number | null;
+  ready: number | null;
+  countdown: number | null;
+  end: number | null;
+  confirm: number | null;
+};
 
 /**
  * The newest pass, for the diagnostics stream: why a page is or is not found
@@ -735,6 +756,9 @@ function freshRuntime(): Runtime {
     checkQuad: null,
     unknownSince: null,
     separateSince: null,
+    timeline: new FireTimeline(),
+    countdownStart: null,
+    lastFire: null,
   };
 }
 
@@ -805,6 +829,8 @@ function clearTracking(runtime: Runtime, overlay: LiveOverlayRefs): void {
   runtime.glare = null;
   runtime.candidate = null;
   runtime.countdown = null;
+  runtime.countdownStart = null;
+  runtime.timeline.reset();
   runtime.confirmedAt = null;
   runtime.suspectAt = null;
   runtime.readyVerdict = false;
@@ -2663,6 +2689,14 @@ export function useLiveDetect({
       // nor a corner that something lies over.
       const keep = footing && !covered && !uncertain && shown === null && raw === null;
       const isReady = guidance.ready.update(strict, keep, now);
+      runtime.timeline.update(now, {
+        lock: tracking,
+        hint: raw === null && !covered,
+        slot: shown === null,
+        still: runtime.readyVerdict && reading?.sharp !== false,
+        check: tracking && !uncertain,
+        footing,
+      });
       // The HUD's reason: the first condition keeping the cue off.
       runtime.blockWhy = isReady
         ? null
@@ -2709,6 +2743,7 @@ export function useLiveDetect({
           steady: guidance.ready.steady,
         });
         runtime.countdown = auto.countdown;
+        runtime.countdownStart = auto.countdown === null ? null : (auto.start ?? null);
         if (isReady && !auto.fire) {
           runtime.blockWhy = !guidance.auto.armed
             ? "auto: waiting for another page"
@@ -2735,8 +2770,22 @@ export function useLiveDetect({
             : `auto: cancelled, camera moved (watch ${runtime.watchScore === null ? "–" : runtime.watchScore.toFixed(3)})`;
           guidance.ready.update(false, false, now);
           runtime.countdown = null;
+          runtime.countdownStart = null;
         }
-        if (fire) runtime.firedLuma = latest;
+        if (fire) {
+          runtime.firedLuma = latest;
+          runtime.lastFire = {
+            at: now,
+            marks: {
+              ...runtime.timeline.snapshot(),
+              strict: guidance.ready.since,
+              ready: guidance.ready.onSince,
+              countdown: auto.start ?? null,
+              end: auto.end ?? null,
+              confirm: runtime.confirmedAt,
+            },
+          };
+        }
         else if (guidance.auto.armed) runtime.firedLuma = null;
       }
       if (shown !== announcedHint) {
@@ -2767,6 +2816,7 @@ export function useLiveDetect({
           ms: isReady || memo.readyAt === null ? null : now - memo.readyAt,
           why: isReady ? null : runtime.blockWhy,
           fill: runtime.fill,
+          ...(isReady ? { phases: { ...phasesBefore(now, runtime.timeline.snapshot()), intervalMs: Math.round(runtime.intervalMs) } } : {}),
         });
         memo.readyAt = isReady ? now : null;
       }
@@ -2775,11 +2825,24 @@ export function useLiveDetect({
       memo.armed = armed;
       if (fire) {
         const since = guidance.ready.onSince;
-        diag.emit({ type: "auto", phase: "fire", ms: since === null ? null : now - since, reason: null });
+        const marks = runtime.lastFire?.marks ?? null;
+        diag.emit({
+          type: "auto",
+          phase: "fire",
+          ms: since === null ? null : now - since,
+          reason: null,
+          phases: marks === null ? null : { ...phasesBefore(now, marks), intervalMs: Math.round(runtime.intervalMs) },
+        });
         memo.countdownAt = null;
       } else if (runtime.countdown !== null && memo.countdownAt === null) {
         memo.countdownAt = now;
-        diag.emit({ type: "auto", phase: "countdown", ms: null, reason: null });
+        diag.emit({
+          type: "auto",
+          phase: "countdown",
+          ms: null,
+          reason: null,
+          phases: { ...phasesBefore(now, runtime.timeline.snapshot()), intervalMs: Math.round(runtime.intervalMs) },
+        });
       } else if (runtime.countdown === null && memo.countdownAt !== null) {
         diag.emit({
           type: "auto",
@@ -2931,7 +2994,16 @@ export function useLiveDetect({
       if (fire) {
         // What the page's corners were said to be at the fire: never an
         // uncertain page (owner rule) — the bench checks it held.
-        if (probing()) probe({ type: "auto-fire", t: now, corners: provenanceDiagnostic(runtime.check), separate: runtime.check?.separate ?? null });
+        if (probing()) {
+          probe({
+            type: "auto-fire",
+            t: now,
+            corners: provenanceDiagnostic(runtime.check),
+            separate: runtime.check?.separate ?? null,
+            timeline: runtime.lastFire?.marks ?? null,
+            intervalMs: runtime.intervalMs,
+          });
+        }
         // The same capture as a tap: the capture screen's path, which pauses
         // this loop and opens the confirm screen.
         onAutoCaptureRef.current?.();
