@@ -553,6 +553,16 @@ export function rawHint(input: GuidanceInput, current: HintKey | null, rules: Fr
     const quiet = input.now - Math.max(input.since, input.sheetSeenAt ?? input.since);
     return quiet >= NOT_FOUND_AFTER_MS ? "not-found" : quiet >= SEARCHING_AFTER_MS ? "searching" : null;
   }
+  // What lies over the page comes before framing it — unless the page is
+  // clipped by the view (cut off past its edge, a corner under a control, a
+  // corner at or past the view's edge: {@link BORDER_ENTER}, kept to
+  // {@link BORDER_EXIT} while a framing hint is up): two sheets spanned as
+  // one look too big, and "Afaste um pouco" is not what separates them.
+  const edging = current === "move-back" || current === "center";
+  const clipped =
+    input.cutOff === true || input.covered === true || borderMargin(sheet) < (edging ? rules.borderExit : rules.borderEnter);
+  if (!clipped && input.occlusion === "separate") return "separate-sheets";
+  if (!clipped && input.occlusion === "covered") return "corner-covered";
   // A found sheet whose paper runs on past the viewfinder's edge is cut off
   // too, wherever the model drew its corners.
   const framing = framingHint(sheet, input, current, rules);

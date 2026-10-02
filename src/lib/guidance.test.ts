@@ -477,6 +477,21 @@ test("covered corners: a sheet over the page asks after framing and before light
   assert.equal(rawHint(input({ locked: false, sheet: null, occlusion: "covered", sheetSeenAt: null }), null), "not-found");
 });
 
+test("covered corners: a page whole in the view hears what lies over it before how to frame it", () => {
+  // A small page (or two sheets taken for one, off centre): what lies over
+  // it is the ask, not "Aproxime" / "Centralize".
+  const small = rect(0.35, 0.4, 0.65, 0.6);
+  assert.equal(rawHint(input({ sheet: small }), null), "move-closer");
+  assert.equal(rawHint(input({ sheet: small, occlusion: "covered" }), null), "corner-covered");
+  assert.equal(rawHint(input({ sheet: small, occlusion: "separate" }), null), "separate-sheets");
+  // Clipped by the view — a corner at its edge, cut off past it, under a
+  // control: framing first, still.
+  const edge = rect(0.005, 0.2, 0.9, 0.75);
+  assert.equal(rawHint(input({ sheet: edge, occlusion: "separate" }), null), "move-back");
+  assert.equal(rawHint(input({ sheet: small, occlusion: "separate", cutOff: true }), null), "move-back");
+  assert.equal(rawHint(input({ sheet: small, occlusion: "covered", covered: true }), null), "center");
+});
+
 test("covered corners: the hint goes through the slot's debounce like any other — it never flickers", () => {
   const slot = new HintDebounce();
   assert.equal(slot.update("corner-covered", 0), null);
