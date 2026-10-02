@@ -825,7 +825,7 @@ export function hintTimeline(record) {
  * can be scored on the same windows ("sheet-found" and the prose tip are not
  * hints and are ignored).
  */
-export const HINT_KEYS = ["searching", "not-found", "move-back", "move-closer", "center", "low-light", "glare", "hold-still"];
+export const HINT_KEYS = ["searching", "not-found", "move-back", "move-closer", "center", "low-light", "glare", "hold-still", "corner-covered", "separate-sheets"];
 const LEGACY_HINTS = { "aim-at-document": "searching", "edges-not-found": "not-found", "fit-whole-page": "fit-whole-page", "low-light": "low-light" };
 const LEGACY_ORDER = ["low-light", "not-found", "searching", "fit-whole-page"];
 

@@ -402,6 +402,7 @@ const RECIPES = {
     const margin = [kit.range(6, 14), kit.range(4, 12), kit.range(6, 14), kit.range(30, 45)]; // left, bottom, right, top (under the clip)
     const board = {
       name: "clipboard",
+      foreign: "board",
       material: hard
         ? { material: "paper", tint: kit.pick(["#7a5a3a", "#8b6a45", "#6a4c30"]), fibre: kit.range(0.08, 0.15), edge: 0.2, seed: kit.seed32() }
         : {
@@ -603,12 +604,14 @@ const RECIPES = {
     if (scannedUnder) {
       // The asked-for sheet under the other, which covers its corner `c`.
       other.height = paper.height + other.height;
+      paper.foreign = "sheet-under";
       layers = [...(mat === null ? [] : [mat]), paper, other];
       top = other;
     } else {
       // The asked-for sheet on top: the other only peeks out from under it.
       paper.height += other.height;
       other.height = paper.height - 0.1;
+      other.foreign = "sheet-under";
       layers = [...(mat === null ? [] : [mat]), other, paper];
       top = paper;
     }

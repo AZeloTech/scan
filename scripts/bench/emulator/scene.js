@@ -217,11 +217,23 @@ export function groundTruth(params, hidden = null) {
     });
     return [{ layer: index, kind: layer.occluder, polygon: outline }];
   });
+  // What lies under the page and is not it (a clipboard's board, the sheet
+  // beneath the one asked for): crop material all the same when a quad
+  // reaches onto it past the page.
+  const foreign = params.layers.flatMap((layer, index) => {
+    if (!layer.foreign) return [];
+    const outline = layerOutline(layer, layer.curl ? OUTLINE_POINTS_PER_EDGE : 1).map((point) => {
+      const p = project(camera, point);
+      return [p.u / width, p.v / height];
+    });
+    return [{ layer: index, kind: layer.foreign, polygon: outline }];
+  });
   return {
     frame: { width, height },
     pages,
     primary,
     occluders,
+    foreign,
     quad: primary === null ? null : pages[primary].corners,
   };
 }

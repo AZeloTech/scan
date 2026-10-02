@@ -109,7 +109,7 @@ export async function runDetectorSuite({ page, throttle, options, outDir, log, e
           // Corner provenance (5d+ phase B), wherever the variant refined its answer.
           ...(() => {
             const refined = det.refine ?? det.liveRefine ?? null;
-            const provenance = scoreProvenance(verdictQuad, gt, refined?.corners ?? null, refined?.separate ?? false);
+            const provenance = scoreProvenance(verdictQuad, gt, refined?.corners ?? null, refined?.separate ?? false, refined?.basis ?? null);
             return provenance === null ? {} : { provenance };
           })(),
         });

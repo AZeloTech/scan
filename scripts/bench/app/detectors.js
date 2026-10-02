@@ -111,6 +111,7 @@ function refineRow(event) {
         sides: event.sides,
         // Each corner's provenance (seen / inferred / unknown), TL, TR, BR, BL of the answer, and the overlap verdict.
         corners: event.corners?.map((c) => c.provenance) ?? null,
+        basis: event.corners?.map((c) => c.basis ?? null) ?? null,
         separate: event.occlusion?.separate ?? null,
       };
 }
@@ -177,7 +178,7 @@ export const VARIANTS = {
         ...pass,
         quad: refined.quad,
         ms: pass.ms + refined.ms,
-        liveRefine: { changed: refined.changed, ms: refined.ms, modes: refined.modes, corners: refined.corners, separate: refined.separate },
+        liveRefine: { changed: refined.changed, ms: refined.ms, modes: refined.modes, corners: refined.corners, basis: refined.basis, separate: refined.separate },
       };
     },
   },
@@ -274,6 +275,7 @@ export function refineOnSample(frame, points, mode = "full") {
     reason: result.reason,
     modes: result.sides.map((side) => side.mode),
     corners: result.corners.map((c) => c.provenance),
+    basis: result.corners.map((c) => c.basis ?? null),
     separate: result.occlusion.separate,
   };
 }

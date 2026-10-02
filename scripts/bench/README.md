@@ -544,7 +544,12 @@ occluder past the page by more than 0.5 % of the page's area — the union of
 page and sheet) and the **mode** — where the covered corner went: the true
 corner (within 1.5 % of the diagonal), the occluder's own corner on the
 page (`occluder-tip`), where its edge crosses the page's (`edge-crossing`),
-out on the occluder, inside the page, elsewhere, or lost. The owner's gate
+out on the occluder, inside the page, elsewhere, or lost. Where the scene has
+a layer under the page that is not it — a clipboard's board, the sheet
+beneath the one asked for in `two-sheets` (`foreign: kind` on the layer,
+`gt.foreign`) — **foreign** is the same inclusion over every layer that is
+not the page, those under it too: a quad that took the board's outline
+for the page's is counted there even though the board covers nothing. The owner's gate
 (2026-10-02) is on the tail: **occl. > 3 %** is the share of covered
 scenes whose covered corner is more than 3 % of the diagonal off (a lost
 page counts), at most 10 %, with p90 ≤ 3 %.
@@ -563,7 +568,20 @@ folhas" flag itself). A covered corner whose edges are hidden for less
 than 2 % of the diagonal from it (a clip's jaw on the very tip; the
 product calls a corner seen when its edges reach within max(14 px, 1 %)
 of it, nearly 2 % on the 640 px live sample) is **tip only**: counted
-apart, judged neither way.
+apart, judged neither way — and judged after all in **recall / precision
+(all)**, the owner's ≥ 95 % gate on its stated population. An answer the
+refinement never measured (out of time, nothing found to walk: every
+corner's `basis` is `unmeasured`) makes no claim that anything covers a
+corner — the product reads no check from it and holds auto-capture for want
+of one, without a bracket or a hint — so it flags nothing and is counted
+apart as **unmeasured** (it is among the **refused**). Each corner's
+`basis` (what its provenance rests on: `edges`, `rounded`, `on-sheet`,
+`covered`, or short of evidence `short`, `one-edge`, `no-edge`) travels in
+the row's `refine` / `liveRefine`.
+
+F7 cycles 32 settings by seed: a run that is to visit every one of them
+needs `--seeds 32` (or a multiple) — 20 seeds leave twelve settings out,
+`dog-ear` and `stack-offset` among them.
 
 To grow it, register — nothing in the runner changes:
 

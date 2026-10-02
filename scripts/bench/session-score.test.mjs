@@ -578,6 +578,22 @@ test("guidance: the hint over time, one key at a time, legacy chips mapped", () 
   assert.equal(hintWindow(series, { from: 500, to: 900, expect: ["glare"], conditionFrom: 0 }).firstCorrectMs, null);
 });
 
+test("guidance: the occlusion hints are hints too — \"Canto coberto\" and \"Separe as folhas\" are scored, not dropped", () => {
+  const record = {
+    events: [
+      { type: "hint", t: 100, key: "corner-covered", shown: true },
+      { type: "hint", t: 900, key: "corner-covered", shown: false },
+      { type: "hint", t: 900, key: "separate-sheets", shown: true },
+      { type: "hint", t: 1500, key: "separate-sheets", shown: false },
+    ],
+  };
+  assert.deepEqual(hintSeries(record), [
+    { t: 100, key: "corner-covered" },
+    { t: 900, key: "separate-sheets" },
+    { t: 1500, key: null },
+  ]);
+});
+
 test("guidance: one hint replaced by another is one change, not two", () => {
   const record = {
     events: [

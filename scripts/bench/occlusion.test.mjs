@@ -107,3 +107,45 @@ test("provenance: a covered corner is judged by how far its edges are hidden, a 
   assert.equal(summarizeProvenance([{ provenance: scoreProvenance(PAGE, effect, ["seen", "seen", "seen", "seen"]) }]).covered, 1);
   assert.ok(DIAG > 0);
 });
+
+test("foreign material: a quad onto the board under the page is counted, though the board covers nothing", () => {
+  // A clipboard's board, 0.1 past the page all round; a clip over nothing.
+  const BOARD = [
+    [0.1, 0.1],
+    [0.9, 0.1],
+    [0.9, 0.9],
+    [0.1, 0.9],
+  ];
+  const onBoard = {
+    ...GT,
+    pages: [{ ...GT.pages[0], visible: [true, true, true, true], occluded: [] }],
+    occluders: [{ layer: 2, kind: "clipboard-clip", polygon: [[0.45, 0.15], [0.55, 0.15], [0.55, 0.25], [0.45, 0.25]] }],
+    foreign: [{ layer: 0, kind: "board", polygon: BOARD }],
+  };
+  const page = scoreOcclusion(PAGE, onBoard);
+  assert.equal(page.foreignIncluded, false);
+  assert.equal(page.occluderIncluded, false);
+  // The board's outline taken for the page: the clip is barely past the page, the board is all round it.
+  const board = scoreOcclusion(BOARD, onBoard);
+  assert.equal(board.foreignIncluded, true);
+  assert.ok(board.foreignIncludedFraction > 0.5);
+  // Two sheets, the truth the top one: the sheet beneath is foreign too, though nothing is over the answer.
+  const twoSheets = { ...GT, occluders: [], pages: [{ ...GT.pages[0], visible: [true, true, true, true], occluded: [] }], foreign: [{ layer: 0, kind: "sheet-under", polygon: [[0.5, 0.5], [0.95, 0.5], [0.95, 0.95], [0.5, 0.95]] }] };
+  const union = scoreOcclusion([[0.2, 0.2], [0.8, 0.2], [0.95, 0.95], [0.2, 0.8]], twoSheets);
+  assert.equal(union.occluderIncluded, null);
+  assert.equal(union.foreignIncluded, true);
+});
+
+test("provenance: an answer the refinement never measured flags nothing, and is counted apart (auto holds)", () => {
+  const unmeasured = scoreProvenance(PAGE, GT, ["unknown", "unknown", "unknown", "unknown"], false, ["unmeasured", "unmeasured", "unmeasured", "unmeasured"]);
+  const s = summarizeProvenance([{ provenance: unmeasured }]);
+  assert.equal(s.falseFlags, 0);
+  assert.equal(s.recall, 0);
+  assert.equal(s.unmeasuredRate, 1);
+  assert.equal(s.refusedRate, 1);
+  // Tip-only corners counted in: the gate's stated population.
+  const tip = { ...GT, occluders: [{ layer: 2, kind: "binder-clip", polygon: [[0.19, 0.19], [0.21, 0.19], [0.21, 0.21], [0.19, 0.21]] }] };
+  const t = summarizeProvenance([{ provenance: scoreProvenance(PAGE, tip, ["inferred", "seen", "seen", "seen"]) }]);
+  assert.equal(t.recall, null);
+  assert.equal(t.recallAll, 1);
+});

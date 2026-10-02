@@ -117,11 +117,12 @@ const nearest = (p, points) => (points.length === 0 ? Infinity : Math.min(...poi
 export function scoreOcclusion(quad, gt) {
   if (gt.quad === null || gt.primary === null) return null;
   const occluders = gt.occluders ?? [];
+  const foreign = gt.foreign ?? [];
   const primary = gt.pages[gt.primary];
   const occluded = primary.occluded ?? [];
-  if (occluders.length === 0 && occluded.length === 0) return null;
-  const base = { occludedCorners: occluded, occluderKinds: occluders.map((o) => o.kind) };
-  if (quad === null) return { ...base, detected: false, mode: "lost", occludedCornerError: null, occluderIncluded: null };
+  if (occluders.length === 0 && occluded.length === 0 && foreign.length === 0) return null;
+  const base = { occludedCorners: occluded, occluderKinds: occluders.map((o) => o.kind), foreignKinds: foreign.map((o) => o.kind) };
+  if (quad === null) return { ...base, detected: false, mode: "lost", occludedCornerError: null, occluderIncluded: null, foreignIncluded: null };
   const { frame } = gt;
   const diagonal = frameDiagonal(frame);
   const box = framePolygon(frame);
@@ -136,22 +137,31 @@ export function scoreOcclusion(quad, gt) {
   // Area on the occluders outside the page.
   const pageIn = clipPolygon(truth, box);
   const pageArea = pageIn.length < 3 ? 0 : polygonArea(pageIn);
-  let excess = null;
-  if (!isDegenerateQuad(det) && isConvex(det) && pageArea > 0) {
+  // (Each layer's own share: layers may overlap one another, and a layer's
+  // area outside the page counts once per layer — the larger of the two sums
+  // is never smaller than the truth.)
+  const outsidePage = (layers) => {
+    if (isDegenerateQuad(det) || !isConvex(det) || pageArea <= 0) return null;
     const detIn = clipPolygon(det, box);
-    excess = 0;
+    let excess = 0;
     if (detIn.length >= 3) {
-      for (const occluder of occluders) {
-        const poly = toPixels(occluder.polygon, frame);
+      for (const layer of layers) {
+        const poly = toPixels(layer.polygon, frame);
         const onQuad = clipPolygon(poly, detIn);
         if (onQuad.length < 3) continue;
         const onPage = clipPolygon(onQuad, truth);
         excess += polygonArea(onQuad) - (onPage.length < 3 ? 0 : polygonArea(onPage));
       }
     }
-  }
-  const occluderIncludedFraction = excess === null ? null : Math.max(0, excess) / pageArea;
+    return Math.max(0, excess) / pageArea;
+  };
+  const occluderIncludedFraction = occluders.length === 0 ? null : outsidePage(occluders);
   const occluderIncluded = occluderIncludedFraction === null ? null : occluderIncludedFraction > OCCLUDER_INCLUDED_MIN_FRACTION;
+  // Foreign crop material: whatever is not the page and lies over or under
+  // it — the occluders and the layers under the page (a clipboard's board, the
+  // sheet beneath), past the page's own outline.
+  const foreignIncludedFraction = foreign.length === 0 ? null : outsidePage([...occluders, ...foreign]);
+  const foreignIncluded = foreignIncludedFraction === null ? null : foreignIncludedFraction > OCCLUDER_INCLUDED_MIN_FRACTION;
 
   // Where the worst covered corner went.
   let mode = null;
@@ -178,6 +188,8 @@ export function scoreOcclusion(quad, gt) {
     visibleCornerError,
     occluderIncludedFraction,
     occluderIncluded,
+    foreignIncludedFraction,
+    foreignIncluded,
     winding: Math.sign(signedArea(det)),
   };
 }
@@ -221,10 +233,15 @@ export function hiddenReach(gt, i) {
  * `inferred` or `unknown`, in the answer's own corner order) against the
  * truth: per true corner in frame, whether it is covered (`gt.pages[i].occluded`)
  * and whether the answer flagged it (inferred or unknown). `refused`: the
- * answer would hold auto-capture (a flagged corner, or `separate`).
+ * answer would hold auto-capture (a flagged corner, `separate`, or corners
+ * the refinement never measured). A corner whose `basis` is `unmeasured`
+ * (the refinement ran out of time or found nothing to walk) makes no claim
+ * that anything covers it: it is not flagged, and is counted apart — the
+ * product reads no check from such an answer and holds auto-capture for want
+ * of one, without a dashed bracket or a hint.
  * `null` without a page, an answer or provenance.
  */
-export function scoreProvenance(quad, gt, provenance, separate = false) {
+export function scoreProvenance(quad, gt, provenance, separate = false, basis = null) {
   if (quad === null || provenance === null || provenance === undefined || gt.quad === null || gt.primary === null) return null;
   const primary = gt.pages[gt.primary];
   const det = toPixels(quad, gt.frame);
@@ -237,9 +254,11 @@ export function scoreProvenance(quad, gt, provenance, separate = false) {
     const reach = covered.includes(i) ? hiddenReach(gt, i) : null;
     // Covered only at its very tip: not judged (see SHALLOW_COVER).
     const shallow = reach !== null && reach < SHALLOW_COVER * diagonal;
-    return { inFrame: primary.inFrame[i], covered: covered.includes(i), shallow, flagged: provenance[j] !== "seen", provenance: provenance[j] };
+    const unmeasured = basis?.[j] === "unmeasured";
+    return { inFrame: primary.inFrame[i], covered: covered.includes(i), shallow, unmeasured, flagged: !unmeasured && provenance[j] !== "seen", provenance: provenance[j] };
   });
-  return { corners, refused: separate === true || provenance.some((p) => p !== "seen"), separate: separate === true };
+  const unmeasured = corners.some((c) => c.unmeasured);
+  return { corners, refused: separate === true || provenance.some((p) => p !== "seen"), separate: separate === true, unmeasured };
 }
 
 /** Precision / recall of the provenance flags over rows carrying `provenance` (in-frame corners only). */
@@ -255,9 +274,11 @@ export function summarizeProvenance(rows) {
   let scored = 0;
   let shallow = 0;
   let shallowFlagged = 0;
+  let unmeasured = 0;
   for (const r of rows) {
     if (r.provenance == null) continue;
     scored += 1;
+    if (r.provenance.unmeasured) unmeasured += 1;
     if (r.provenance.refused) refused += 1;
     if (r.provenance.separate) separate += 1;
     for (const c of r.provenance.corners) {
@@ -280,6 +301,9 @@ export function summarizeProvenance(rows) {
     shallow,
     shallowFlagged,
     recall: tp + fn === 0 ? null : tp / (tp + fn),
+    // Over every covered corner, tip-only ones too: the owner's gate as stated.
+    recallAll: tp + fn + shallow === 0 ? null : (tp + shallowFlagged) / (tp + fn + shallow),
+    precisionAll: tp + shallowFlagged + fp === 0 ? null : (tp + shallowFlagged) / (tp + shallowFlagged + fp),
     precision: tp + fp === 0 ? null : tp / (tp + fp),
     falseFlags: fp,
     seenCorners: seen,
@@ -287,6 +311,7 @@ export function summarizeProvenance(rows) {
     inferred,
     unknown,
     refusedRate: scored === 0 ? null : refused / scored,
+    unmeasuredRate: scored === 0 ? null : unmeasured / scored,
     separateRate: scored === 0 ? null : separate / scored,
   };
 }
@@ -299,6 +324,7 @@ export function summarizeOcclusionGroup(rows) {
   const accepted = scored.filter((r) => r.score.detected);
   const withCovered = accepted.filter((r) => r.occlusion.occludedCornerError !== null);
   const judgedInclusion = accepted.filter((r) => r.occlusion.occluderIncluded !== null);
+  const judgedForeign = accepted.filter((r) => r.occlusion.foreignIncluded != null);
   const modes = Object.fromEntries(MODES.map((m) => [m, 0]));
   for (const r of scored) {
     if (!r.score.detected) modes.lost += 1;
@@ -328,6 +354,7 @@ export function summarizeOcclusionGroup(rows) {
           ),
     visibleCornerErrorP50: percentile(accepted.map((r) => r.occlusion.visibleCornerError).filter((v) => v !== null), 50),
     occluderIncludedRate: judgedInclusion.length === 0 ? null : rate(judgedInclusion.filter((r) => r.occlusion.occluderIncluded).length, judgedInclusion.length),
+    foreignIncludedRate: judgedForeign.length === 0 ? null : rate(judgedForeign.filter((r) => r.occlusion.foreignIncluded).length, judgedForeign.length),
     modes,
     sources,
     refineChanged: accepted.filter((r) => r.det.refine?.changed).length,
@@ -392,16 +419,18 @@ export function renderProvenanceSection(rows) {
     "",
     "Per true corner in frame: **flagged** = the answer called it `inferred` or `unknown`. **recall** = covered corners flagged; " +
       "**precision** = flagged corners that are covered; **false** = seen corners flagged (count / rate); **refused** = scenes where " +
-      `auto-capture would hold (a flagged corner, or another sheet overlapping: \`separate\`). **tip only** = covered corners whose edges are hidden for less than ${(SHALLOW_COVER * 100).toFixed(0)} % of the diagonal from the corner (a clip's jaw on the very tip), judged neither way (flagged of them).`,
+      `auto-capture would hold (a flagged corner, another sheet overlapping: \`separate\`, or an answer the refinement never measured). **unmeasured** = such answers (out of time, nothing to walk): no claim that anything covers a corner, so never a flag. **tip only** = covered corners whose edges are hidden for less than ${(SHALLOW_COVER * 100).toFixed(0)} % of the diagonal from the corner (a clip's jaw on the very tip), judged neither way (flagged of them).`,
     "",
-    "| group | variant | scenes | covered | recall | precision | false | tip only (flagged) | inferred / unknown | refused | separate |",
-    "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    "**recall / precision (all)** count the tip-only corners as covered: the owner's ≥ 95 % gate on its stated population.",
+    "",
+    "| group | variant | scenes | covered | recall | precision | recall / precision (all) | false | tip only (flagged) | inferred / unknown | refused | separate | unmeasured |",
+    "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
   ];
   for (const [key, byVariant] of Object.entries(groups)) {
     for (const [variant, s] of Object.entries(byVariant)) {
       out.push(
-        `| ${key} | ${variant} | ${s.scenes} | ${s.covered} | ${pct(s.recall)} | ${pct(s.precision)} | ${s.falseFlags} / ${s.seenCorners} (${pct(s.falseFlagRate)}) | ` +
-          `${s.shallow} (${s.shallowFlagged}) | ${s.inferred} / ${s.unknown} | ${pct(s.refusedRate)} | ${pct(s.separateRate)} |`,
+        `| ${key} | ${variant} | ${s.scenes} | ${s.covered} | ${pct(s.recall)} | ${pct(s.precision)} | ${pct(s.recallAll)} / ${pct(s.precisionAll)} | ${s.falseFlags} / ${s.seenCorners} (${pct(s.falseFlagRate)}) | ` +
+          `${s.shallow} (${s.shallowFlagged}) | ${s.inferred} / ${s.unknown} | ${pct(s.refusedRate)} | ${pct(s.separateRate)} | ${pct(s.unmeasuredRate)} |`,
       );
     }
   }
@@ -419,19 +448,20 @@ export function renderOcclusionSection(rows) {
     "",
     `Scenes with an occluder over the page or a covered corner. **occl. err** = the covered corner's error (% of the diagonal; target p50 ≤ ${(OCCLUDED_CORNER_TARGET_P50 * 100).toFixed(1)}); ` +
       `**incl.** = the quad reaches onto an occluder past the page (> ${(OCCLUDER_INCLUDED_MIN_FRACTION * 100).toFixed(1)} % of the page's area); ` +
+      "**foreign** = the same over every layer that is not the page, the ones under it too (a clipboard's board, the sheet beneath), where the scene has such a layer; " +
       "**modes** = where the covered corner went (true corner / the occluder's tip on the page / where its edge crosses the page's / out on the occluder / inside the page / elsewhere / lost).",
     "",
   ];
   for (const [key, byVariant] of Object.entries(summary)) {
     out.push(`### ${key}`, "");
-    out.push("| variant | scenes | covered | miss | wrong | severe | content clipped | occl. err p50 / p90 / p95 | occl. > 3 % | visible err p50 | incl. | modes T/tip/cross/on/in/else/lost | accepted by | refine moved |");
-    out.push("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|");
+    out.push("| variant | scenes | covered | miss | wrong | severe | content clipped | occl. err p50 / p90 / p95 | occl. > 3 % | visible err p50 | incl. | foreign | modes T/tip/cross/on/in/else/lost | accepted by | refine moved |");
+    out.push("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|");
     for (const [variant, s] of Object.entries(byVariant)) {
       const m = s.modes;
       const sources = Object.entries(s.sources).map(([k, v]) => `${k} ${v}`).join(", ") || "–";
       out.push(
         `| ${variant} | ${s.scenes} | ${s.covered} | ${pct(s.missRate)} | ${pct(s.wrongRate)} | ${pct(s.severeRate)} | ${pct(s.contentClippedRate)} | ` +
-          `${diag(s.occludedCornerErrorP50)} / ${diag(s.occludedCornerErrorP90)} / ${diag(s.occludedCornerErrorP95)} | ${pct(s.occludedOver3Rate)} | ${diag(s.visibleCornerErrorP50)} | ${pct(s.occluderIncludedRate)} | ` +
+          `${diag(s.occludedCornerErrorP50)} / ${diag(s.occludedCornerErrorP90)} / ${diag(s.occludedCornerErrorP95)} | ${pct(s.occludedOver3Rate)} | ${diag(s.visibleCornerErrorP50)} | ${pct(s.occluderIncludedRate)} | ${pct(s.foreignIncludedRate)} | ` +
           `${m["true-corner"]}/${m["occluder-tip"]}/${m["edge-crossing"]}/${m["on-occluder"]}/${m["inside-page"]}/${m.elsewhere}/${m.lost} | ${sources} | ${s.refineChanged} |`,
       );
     }
