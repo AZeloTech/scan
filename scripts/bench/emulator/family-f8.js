@@ -31,9 +31,11 @@
  *    page;
  *  - `staple` — a stapled packet: one to three sheets under the page fanned
  *    0.5–3 mm, a staple across a corner 4–10 mm in (the corner itself seen);
- *  - `two-sheets` — two full printed sheets overlapping: the scanned one
+ *  - `two-sheets` — two full printed sheets overlapping: the one asked for
  *    under the other (a corner covered 15–60 % along each edge), or on top
- *    of it with the other peeking out.
+ *    of it with the other peeking out. Either way the truth is the sheet on
+ *    top (the owner's decision: auto refuses with "Separe as folhas", a
+ *    manual capture's confirm screen shows the top sheet).
  *
  * Every layer that lies over the page on purpose carries `occluder` (its
  * kind), so the ground truth lists it with its outline (`gt.occluders`);
@@ -591,28 +593,33 @@ const RECIPES = {
     other.center = placed.center;
     other.rotation = placed.rotation;
     other.size = [...other.size];
+    // The owner's decision (2026-10-02): with two sheets overlapping, the
+    // answer is the sheet on top — whole, the one a person sees — and
+    // auto-capture refuses ("Separe as folhas"). So the truth is the top
+    // sheet in both arrangements, and the camera frames it; the other lies
+    // under it (nothing lies over the answer, so no `occluder`).
     let layers;
-    let primaryPage;
+    let top;
     if (scannedUnder) {
+      // The asked-for sheet under the other, which covers its corner `c`.
       other.height = paper.height + other.height;
-      other.occluder = "page";
       layers = [...(mat === null ? [] : [mat]), paper, other];
-      primaryPage = 0;
+      top = other;
     } else {
-      // The scanned page on top: the other only peeks out from under it.
+      // The asked-for sheet on top: the other only peeks out from under it.
       paper.height += other.height;
       other.height = paper.height - 0.1;
       layers = [...(mat === null ? [] : [mat]), other, paper];
-      primaryPage = 1;
+      top = paper;
     }
     const cameraRng = rng.fork("camera");
-    const camera = framingCamera(cameraRng, frame, paper, { coverage: cameraRng.range(0.3, 0.55), tilt: [0, 40], marginFraction: 0.06 });
+    const camera = framingCamera(cameraRng, frame, top, { coverage: cameraRng.range(0.3, 0.55), tilt: [0, 40], marginFraction: 0.06 });
     return scene(rng, {
       desk,
       camera,
       background,
       layers,
-      primaryPage,
+      primaryPage: 1,
       occlusion: { kind: "page", scannedUnder, corner: scannedUnder ? c : -1, along, phi: geom.phi },
     });
   },

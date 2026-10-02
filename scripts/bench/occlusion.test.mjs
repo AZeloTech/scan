@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { renderOcclusionSection, scoreOcclusion, summarizeOcclusion } from "./suites/detector-occlusion.mjs";
+import { hiddenReach, renderOcclusionSection, scoreOcclusion, scoreProvenance, summarizeOcclusion, summarizeProvenance } from "./suites/detector-occlusion.mjs";
 
 /**
  * A 1000 × 1000 frame, the page the square 0.2–0.8, a sheet over its
@@ -84,4 +84,26 @@ test("the summary and its report section group by family and setting", () => {
   assert.equal(summary.F8.production.modes.lost, 1);
   assert.match(renderOcclusionSection(rows), /### F8\/sheet-over/);
   assert.equal(renderOcclusionSection([]), "");
+});
+
+test("provenance: a covered corner is judged by how far its edges are hidden, a tip-only cover is neither hit nor miss", () => {
+  // The sheet hides 0.1 of the top edge and 0.15 of the left: 150 px of a 1414 px diagonal.
+  assert.equal(Math.round(hiddenReach(GT, 0)), 150);
+  const flagged = scoreProvenance(PAGE, GT, ["inferred", "seen", "seen", "seen"]);
+  const missed = scoreProvenance(PAGE, GT, ["seen", "seen", "seen", "seen"]);
+  assert.deepEqual(
+    [summarizeProvenance([{ provenance: flagged }]).recall, summarizeProvenance([{ provenance: missed }]).recall],
+    [1, 0],
+  );
+  // A clip's jaw over the very tip: 10 px of each edge (under 2 % of the diagonal).
+  const tip = { ...GT, occluders: [{ layer: 2, kind: "binder-clip", polygon: [[0.19, 0.19], [0.21, 0.19], [0.21, 0.21], [0.19, 0.21]] }] };
+  const s = summarizeProvenance([{ provenance: scoreProvenance(PAGE, tip, ["seen", "seen", "seen", "seen"]) }]);
+  assert.equal(s.covered, 0);
+  assert.equal(s.shallow, 1);
+  assert.equal(s.recall, null);
+  // A cover with no outline (an effect's) is judged as covered.
+  const effect = { ...GT, occluders: [] };
+  assert.equal(hiddenReach(effect, 0), null);
+  assert.equal(summarizeProvenance([{ provenance: scoreProvenance(PAGE, effect, ["seen", "seen", "seen", "seen"]) }]).covered, 1);
+  assert.ok(DIAG > 0);
 });

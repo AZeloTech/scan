@@ -183,6 +183,40 @@ export function scoreOcclusion(quad, gt) {
 }
 
 /**
+ * A covered corner is judged by the provenance flags only when what covers
+ * it hides at least this much (fraction of the frame diagonal) of one of its
+ * two edges, from the corner. The product calls a corner whose edges are
+ * seen to within max(14 px, 1 % of the diagonal) of it `seen`
+ * (`REACH_DIAG` in `lib/refine.ts`) — 1 % on a 1200 px capture, nearly 2 %
+ * on the live loop's 640 px sample — and a corner hidden for less than 2 %
+ * is within the 3 % "wrong" bound even when placed on what covers it. So a
+ * clip's jaw over a corner's very tip is neither a miss nor a hit.
+ */
+export const SHALLOW_COVER = 0.02;
+
+/**
+ * How far from corner `i` of the primary page each of its two edges is
+ * hidden under the occluders (px, the larger of the two) — `null` when the
+ * truth has no occluder outline (an effect's cover, F5's finger): judged as
+ * covered, deeply.
+ */
+export function hiddenReach(gt, i) {
+  const occluders = (gt.occluders ?? []).map((o) => toPixels(o.polygon, gt.frame));
+  if (occluders.length === 0) return null;
+  const page = toPixels(gt.pages[gt.primary].corners, gt.frame);
+  const p = page[i];
+  let worst = 0;
+  for (const q of [page[(i + 3) % 4], page[(i + 1) % 4]]) {
+    const length = Math.hypot(q[0] - p[0], q[1] - p[1]);
+    const dir = [(q[0] - p[0]) / length, (q[1] - p[1]) / length];
+    let t = 0;
+    while (t < 0.5 * length && occluders.some((poly) => insidePolygon([p[0] + dir[0] * t, p[1] + dir[1] * t], poly))) t += 0.5;
+    worst = Math.max(worst, t);
+  }
+  return worst;
+}
+
+/**
  * The answer's corner provenance (`lib/refine.ts`: each corner `seen`,
  * `inferred` or `unknown`, in the answer's own corner order) against the
  * truth: per true corner in frame, whether it is covered (`gt.pages[i].occluded`)
@@ -197,9 +231,13 @@ export function scoreProvenance(quad, gt, provenance, separate = false) {
   const truth = toPixels(gt.quad, gt.frame);
   const { shift, reversed } = matchCorners(det, truth);
   const covered = primary.occluded ?? [];
+  const diagonal = frameDiagonal(gt.frame);
   const corners = [0, 1, 2, 3].map((i) => {
     const j = reversed ? 3 - ((i + shift) % 4) : (i + shift) % 4;
-    return { inFrame: primary.inFrame[i], covered: covered.includes(i), flagged: provenance[j] !== "seen", provenance: provenance[j] };
+    const reach = covered.includes(i) ? hiddenReach(gt, i) : null;
+    // Covered only at its very tip: not judged (see SHALLOW_COVER).
+    const shallow = reach !== null && reach < SHALLOW_COVER * diagonal;
+    return { inFrame: primary.inFrame[i], covered: covered.includes(i), shallow, flagged: provenance[j] !== "seen", provenance: provenance[j] };
   });
   return { corners, refused: separate === true || provenance.some((p) => p !== "seen"), separate: separate === true };
 }
@@ -215,6 +253,8 @@ export function summarizeProvenance(rows) {
   let refused = 0;
   let separate = 0;
   let scored = 0;
+  let shallow = 0;
+  let shallowFlagged = 0;
   for (const r of rows) {
     if (r.provenance == null) continue;
     scored += 1;
@@ -224,7 +264,10 @@ export function summarizeProvenance(rows) {
       if (!c.inFrame) continue;
       if (c.provenance === "inferred") inferred += 1;
       if (c.provenance === "unknown") unknown += 1;
-      if (c.covered) c.flagged ? (tp += 1) : (fn += 1);
+      if (c.shallow) {
+        shallow += 1;
+        if (c.flagged) shallowFlagged += 1;
+      } else if (c.covered) c.flagged ? (tp += 1) : (fn += 1);
       else {
         seen += 1;
         if (c.flagged) fp += 1;
@@ -234,6 +277,8 @@ export function summarizeProvenance(rows) {
   return {
     scenes: scored,
     covered: tp + fn,
+    shallow,
+    shallowFlagged,
     recall: tp + fn === 0 ? null : tp / (tp + fn),
     precision: tp + fp === 0 ? null : tp / (tp + fp),
     falseFlags: fp,
@@ -347,16 +392,16 @@ export function renderProvenanceSection(rows) {
     "",
     "Per true corner in frame: **flagged** = the answer called it `inferred` or `unknown`. **recall** = covered corners flagged; " +
       "**precision** = flagged corners that are covered; **false** = seen corners flagged (count / rate); **refused** = scenes where " +
-      "auto-capture would hold (a flagged corner, or another sheet overlapping: `separate`).",
+      `auto-capture would hold (a flagged corner, or another sheet overlapping: \`separate\`). **tip only** = covered corners whose edges are hidden for less than ${(SHALLOW_COVER * 100).toFixed(0)} % of the diagonal from the corner (a clip's jaw on the very tip), judged neither way (flagged of them).`,
     "",
-    "| group | variant | scenes | covered | recall | precision | false | inferred / unknown | refused | separate |",
-    "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    "| group | variant | scenes | covered | recall | precision | false | tip only (flagged) | inferred / unknown | refused | separate |",
+    "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
   ];
   for (const [key, byVariant] of Object.entries(groups)) {
     for (const [variant, s] of Object.entries(byVariant)) {
       out.push(
         `| ${key} | ${variant} | ${s.scenes} | ${s.covered} | ${pct(s.recall)} | ${pct(s.precision)} | ${s.falseFlags} / ${s.seenCorners} (${pct(s.falseFlagRate)}) | ` +
-          `${s.inferred} / ${s.unknown} | ${pct(s.refusedRate)} | ${pct(s.separateRate)} |`,
+          `${s.shallow} (${s.shallowFlagged}) | ${s.inferred} / ${s.unknown} | ${pct(s.refusedRate)} | ${pct(s.separateRate)} |`,
       );
     }
   }

@@ -357,9 +357,14 @@ test("F8 cycles its settings by seed, and its occluders cover what they claim", 
         assert.equal(occlusion.corner, sums.indexOf(Math.min(...sums)), `F8 #${seed}: top-left in the image`);
       }
     }
-    if (params.setting === "two-sheets" && occlusion.scannedUnder) {
-      assert.deepEqual(primary.occluded, [occlusion.corner], `F8 #${seed}: the page on top covers the corner asked for`);
+    if (params.setting === "two-sheets") {
+      // The truth is the sheet on top (the owner's decision): whole, nothing over it.
       assert.equal(gt.pages.length, 2);
+      assert.equal(gt.primary, 1);
+      const [under, over] = gt.pages.map((p) => params.layers[p.layer]);
+      assert.ok(over.height > under.height, `F8 #${seed}: the answer is the sheet on top`);
+      assert.deepEqual(primary.occluded, [], `F8 #${seed}: nothing covers the sheet on top`);
+      assert.deepEqual(gt.occluders, []);
     }
     if (params.setting === "staple") assert.deepEqual(primary.occluded, [], `F8 #${seed}: a staple leaves the corner seen`);
   }
