@@ -315,7 +315,8 @@ export function ConfirmCornersScreen({
         const check = detected === null ? null : (seed?.check ?? null);
         seedCheckRef.current = check;
         if (check !== null && detected !== null && isUncertain(check)) {
-          markEstimatedHandles(host, check, detected, canvas.width, canvas.height, editor.getCorners(), handleLabels, estimatedCopy, () => {
+          const live = editor;
+          markEstimatedHandles(host, check, detected, canvas.width, canvas.height, editor.getCorners(), () => live.getCorners(), handleLabels, estimatedCopy, () => {
             if (!cancelled) setEstimated(false);
           });
           setEstimated(host.querySelector("[data-scan-estimated]") !== null);
@@ -392,6 +393,9 @@ export function ConfirmCornersScreen({
         : phase === "ready" && estimated
           ? copy.confirm.estimatedPill
           : null;
+  // An estimated corner is said even under the photo's own reason: the two
+  // are different asks, and the estimate is the one about these handles.
+  const estimateAside = capture.attention != null && phase === "ready" && estimated ? copy.confirm.estimatedPill : null;
 
   return (
     <div
@@ -439,6 +443,15 @@ export function ConfirmCornersScreen({
           >
             {reason ?? copy.confirm.pill}
           </p>
+          {estimateAside !== null && (
+            <p
+              role="status"
+              data-scan-estimated-pill=""
+              className="max-w-full rounded-full bg-night-deep/[0.72] px-4 py-[7px] text-center text-[14px] font-semibold leading-snug text-warm"
+            >
+              {estimateAside}
+            </p>
+          )}
           <p className="text-[13px] font-semibold leading-none text-warm/[0.85] [text-shadow:0_1px_3px_rgba(0,0,0,0.6)]">
             {copy.confirm.pageCorners(pageNumber)}
           </p>
@@ -531,9 +544,13 @@ export function ConfirmCornersScreen({
  * accessible name that says so. The
  * editor may hand its handles back in another order than the quad it was
  * seeded with, so each handle takes the provenance of the seed corner nearest
- * it. Moving a handle (pointer or keys) takes its mark away; `onCleared`
- * runs once none is left.
+ * it. Moving a handle (pointer or keys) takes its mark away — moving it,
+ * not touching it: a press released where it started leaves the estimate
+ * marked. `onCleared` runs once none is left.
  */
+/** An estimated handle counts as moved once it is this far (editor px) from where it was put. */
+const ESTIMATE_MOVED_PX = 1;
+
 function markEstimatedHandles(
   host: HTMLElement,
   check: CornerCheck,
@@ -541,6 +558,7 @@ function markEstimatedHandles(
   width: number,
   height: number,
   shown: CornerPoints,
+  current: () => CornerPoints,
   labels: Record<CornerHandleKey, string>,
   words: { estimatedBadge: string; estimatedHandle: (corner: string) => string },
   onCleared: () => void,
@@ -566,9 +584,32 @@ function markEstimatedHandles(
       handle.setAttribute("aria-label", labels[key]);
       if (host.querySelector("[data-scan-estimated]") === null) onCleared();
     };
-    handle.addEventListener("pointerdown", clear, { once: true });
+    // Cleared once the handle has actually moved off where it was put.
+    const at = () => {
+      const point = current()[key];
+      return point === undefined ? null : { x: point.x, y: point.y };
+    };
+    let from: { x: number; y: number } | null = null;
+    const settle = () => {
+      const now = at();
+      if (from !== null && now !== null && Math.hypot(now.x - from.x, now.y - from.y) >= ESTIMATE_MOVED_PX) clear();
+      from = null;
+    };
+    handle.addEventListener("pointerdown", () => {
+      from = at();
+      const end = () => {
+        window.removeEventListener("pointerup", end, true);
+        window.removeEventListener("pointercancel", end, true);
+        settle();
+      };
+      window.addEventListener("pointerup", end, true);
+      window.addEventListener("pointercancel", end, true);
+    });
     handle.addEventListener("keydown", (event) => {
-      if (event.key.startsWith("Arrow")) clear();
+      if (event.key.startsWith("Arrow") && from === null) from = at();
+    });
+    handle.addEventListener("keyup", (event) => {
+      if (event.key.startsWith("Arrow")) settle();
     });
   }
 }
