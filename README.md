@@ -51,7 +51,7 @@ the person holding the phone — can make.
 
 | | |
 |---|---|
-| **Capture** | The camera opens, a neural corner detector finds the page in the frame and guides the aim — one short hint at a time ("Aproxime", "Afaste um pouco", "Pouca luz", "Reflexo — incline o celular", "Segure firme"), a ready cue on the corner brackets, the torch where the phone has one — and a person confirms or drags the four corners. The shutter always works. Auto-capture (taking the photo once the page has been ready for a moment, still through the corner confirmation) is experimental: the default capture screen offers it as a MANUAL · AUTOMÁTICO (BETA) switch that starts on MANUAL in every flow, and a host can hide it (`experimentalAutoCapture={false}`). "Já tenho a foto" picks a photo already on the device. No camera? It falls back to picking image files on its own. |
+| **Capture** | The camera opens, a neural corner detector finds the page in the frame and guides the aim — one short hint at a time ("Aproxime", "Afaste um pouco", "Centralize a folha", "Pouca luz", "Reflexo — incline o celular", "Segure firme"), a ready cue on the corner brackets, the torch where the phone has one — and a person confirms or drags the four corners. The shutter always works. Auto-capture (taking the photo once the page has been ready for a moment, still through the corner confirmation) is experimental: the default capture screen offers it as a MANUAL · AUTOMÁTICO (BETA) switch that starts on MANUAL in every flow, and a host can hide it (`experimentalAutoCapture={false}`). "Já tenho a foto" picks a photo already on the device. No camera? It falls back to picking image files on its own. |
 | **Flatten** | A Rust/WebAssembly dewarp straightens curved paper — the bend of a page held in one hand — and falls back gracefully when the geometry is not trustworthy. |
 | **Review** | Pages as thumbnails: reorder, retake, remove. Blur and small-text warnings before it is too late to re-shoot. Its primary button is "Gerar PDF": it starts the build straight from the page list. |
 | **Build** | One PDF, assembled in the browser, with a progress bar and a cancel (which returns to the page list). Given `maxBytes`, quality steps down a fixed ladder until the exact size fits — and refuses rather than exceed it. A build that fails or does not fit shows why, with every page still there, the file name and a second "Gerar PDF". |
@@ -171,7 +171,9 @@ for testing on real phones: the session's facts (layout, viewport, device
 pixel ratio, safe-area insets, vibration support), the camera coming up
 (stream size, time to a live preview, torch support), the detection lane and
 why, the live loop sampled at most twice in any second (detection time and median,
-cadence, frame age, found / locked / ready, and the HUD's `why:` reason),
+cadence, frame age, found / locked / ready, the HUD's `why:` reason, and the
+newest pass's model confidence, why its quad was turned away, the paper
+evidence's verdict and the fill),
 the visible region, hints shown and for how long and the ready cue on and
 off (each with `fill`, the page's reach across the viewfinder at that moment),
 auto-capture's countdown, cancellations (with the reason), fires (time from a
@@ -185,7 +187,7 @@ still failed on a capped stream — whether the native stream came back for
 the page, where the corners came from, the still's registration numbers
 and the photo check's flag), each confirm-corners answer (kept, moved — the
 largest corner move as a percentage of the photo's diagonal —, retake or
-whole photo, with the canonical's sizes), the live stream's cap on Android (`stream-cap`: applied or not, and why),
+whole photo, with the canonical's sizes), the live stream's cap on Android (`stream-cap`: applied or not, and why — `disabled` as shipped),
 each page render (the page region's
 pixel size and the final JPEG's size, bytes and quality), each page of a
 finished PDF (the embedded image's pixels, bytes, ladder rung and quality,
@@ -321,16 +323,20 @@ camera shows — not most of its area (a tall phone's viewfinder is about
 0.46 as wide as it is tall and an A4 page 0.71, so a page as big as the
 screen allows still covers only ~65 % of it) but most of its *reach*: the
 page's extent along the viewfinder's limiting axis (its bounding box's
-larger share of the width or the height). Under 78 % the hint comes up,
-and it goes once the page reaches 83 % (between the two lines, whatever
+larger share of the width or the height). Under 70 % the hint comes up,
+and it goes once the page reaches 75 % (between the two lines, whatever
 was showing stays — no ping-pong); a page nearly there (60 % or more when
-the hint appears) reads "Aproxime mais um pouco". Above that band there is
-room to hold the page before "Afaste um pouco" (a corner within 1.5 % of
-the edge). The ready cue — and so auto-capture — waits for it; the shutter
+the hint appears) reads "Aproxime mais um pouco". It asks only while the
+page has room to come closer: a page held off the middle that already
+reaches the edge of the view at 65 % or more is taken as framed, and one at
+the edge that would fit if it were centred hears "Centralize a folha" —
+"Afaste um pouco" is only for a page already as big as asked (a corner
+within 1.5 % of the edge), too big to fit, or whose paper runs on past the
+edge. The ready cue — and so auto-capture — waits for it; the shutter
 does not: a photo can be taken at any size. Why it matters: the photo's
 resolution goes to the page in proportion to how much of the frame it
 fills (on a Galaxy S25 Ultra a page across 54 % of the photo's width is
-~125–150 dpi for A4; held as asked, the page gets ~40 % more pixels each way — ~175–210 dpi).
+~125–150 dpi for A4; held as asked, the page gets ~25 % more pixels each way — ~140–175 dpi).
 
 **What the camera shows is what is judged.** "Afaste um pouco", "Aproxime",
 the ready cue and auto-capture judge the page against the part of the frame

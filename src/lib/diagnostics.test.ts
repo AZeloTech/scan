@@ -21,6 +21,7 @@ test("the diagnostics HUD says what the loop is doing, in numbers only", () => {
       blocked: "auto: countdown 40 %",
       passes: 12,
       fill: 0.846,
+      answer: { conf: 0.914, rejected: null, paper: true },
     },
     { torch: false, autoOffered: true, autoOn: true, autoFires: 2, still: { width: 2250, height: 4000, attention: "corner-outside" } },
     false,
@@ -34,6 +35,7 @@ test("the diagnostics HUD says what the loop is doing, in numbers only", () => {
     "visible x0 y3 w100 h94 % · fit maxcrop",
     "torch no · vibrate no",
     "locked · fill 85 % · ready on · auto armed · fired 2",
+    "answer conf 0.91 · taken · paper yes",
     "why: auto: countdown 40 %",
     "last photo: corner-outside",
   ]);

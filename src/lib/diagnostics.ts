@@ -27,6 +27,11 @@ export function hudLines(d: LiveDiagnostics, x: HudExtras, vibrate: boolean, lan
     `visible x${pct(v.x)} y${pct(v.y)} w${pct(v.width)} h${pct(v.height)} % · fit ${d.fit}`,
     `torch ${x.torch ? "yes" : "no"} · vibrate ${vibrate ? "yes" : "no"}`,
     `${d.locked ? "locked" : "searching"}${d.fill === null ? "" : ` · fill ${pct(d.fill)} %`} · ready ${d.ready ? "on" : "off"} · auto ${x.autoOffered ? (x.autoOn ? (d.autoArmed ? "armed" : "waiting") : "off") : "hidden"} · fired ${x.autoFires}`,
+    ...(d.answer === null
+      ? []
+      : [
+          `answer ${d.answer.conf === null ? "none" : `conf ${d.answer.conf.toFixed(2)} · ${d.answer.rejected ?? "taken"}`} · paper ${d.answer.paper === null ? "–" : d.answer.paper ? "yes" : "no"}`,
+        ]),
     ...(d.blocked !== null ? [`why: ${d.blocked}`] : []),
     ...(x.still?.attention ? [`last photo: ${x.still.attention}`] : []),
   ];

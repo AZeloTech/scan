@@ -10,6 +10,9 @@ import {
   FILL_ENTER,
   FILL_EXIT,
   fillShare,
+  fitsCentred,
+  FRAMING,
+  framingHint,
   HINT_APPEAR_MS,
   HINT_MIN_GAP_MS,
   HINT_MIN_SHOW_MS,
@@ -233,18 +236,43 @@ test("the ready cue needs its conditions for a while and drops at once when the 
   assert.equal(cue.update(true, true, READY_AFTER_MS + 32), false);
 });
 
-test("the cue on screen outlasts a short wobble; the countdown's conditions do not", () => {
+test("the cue and the countdown's start outlast a short wobble; the fire waits it out", () => {
   const cue = new ReadyCue();
   cue.update(true, true, 0);
   assert.equal(cue.update(true, true, READY_AFTER_MS), true);
-  // One reading drifted: the countdown's start is gone, the cue stays.
+  assert.equal(cue.steady, true);
+  // One reading drifted: the cue stays, and so does the countdown's start —
+  // but the conditions are not steady (no fire) until it passes.
   assert.equal(cue.update(false, true, 200), true);
-  assert.equal(cue.onSince, null);
+  assert.equal(cue.onSince, READY_AFTER_MS);
+  assert.equal(cue.steady, false);
   assert.equal(cue.update(false, true, 200 + READY_EXIT_MS - 1), true);
   assert.equal(cue.update(true, true, 200 + READY_EXIT_MS - 1 + 16), true);
-  // A failure that lasts goes.
+  assert.equal(cue.onSince, READY_AFTER_MS);
+  assert.equal(cue.steady, true);
+  // A failure that lasts goes, the countdown's start with it.
   cue.update(false, true, 1000);
   assert.equal(cue.update(false, true, 1000 + READY_EXIT_MS), false);
+  assert.equal(cue.onSince, null);
+  // A failure with another hint owed (no keep) ends both at once.
+  const other = new ReadyCue();
+  other.update(true, true, 0);
+  other.update(true, true, READY_AFTER_MS);
+  assert.equal(other.update(false, false, 200), false);
+  assert.equal(other.onSince, null);
+});
+
+test("auto-capture: a wobble the cue rides out pauses the fire, it does not restart the countdown", () => {
+  // The field run of 2026-10-02: the countdown cancelled twice ("auto: no sheet") under a cue that stayed on.
+  const auto = new AutoCapture();
+  const sheet = { topLeft: { x: 0.1, y: 0.1 }, topRight: { x: 0.9, y: 0.1 }, bottomRight: { x: 0.9, y: 0.9 }, bottomLeft: { x: 0.1, y: 0.9 } };
+  const base = { readyOnSince: 0, sheet, moving: false, aspect: 1.6 };
+  assert.equal(auto.update({ ...base, now: 300, steady: true, confirmedAt: 280 }).countdown, 300 / AUTO_FIRE_MS);
+  // Countdown complete, mid-wobble: not fired, still counted.
+  const held = auto.update({ ...base, now: AUTO_FIRE_MS + 50, steady: false, confirmedAt: AUTO_FIRE_MS + 40 });
+  assert.deepEqual(held, { countdown: 1, fire: false });
+  // Steady again with a fresh confirming pass: fires, without starting over.
+  assert.deepEqual(auto.update({ ...base, now: AUTO_FIRE_MS + 120, steady: true, confirmedAt: AUTO_FIRE_MS + 100 }), { countdown: 1, fire: true });
 });
 
 test("the ready tick is once per page, not once per wobble", () => {
@@ -354,4 +382,83 @@ test("the ready window follows how often the page is actually read", () => {
   assert.equal(readingSpacing([{ at: 0 }, { at: 190 }, { at: 400 }, { at: 600 }, { at: 810 }, { at: 1000 }, { at: 1200 }]), 200);
   // One late pass does not stretch it.
   assert.equal(readingSpacing([{ at: 0 }, { at: 120 }, { at: 240 }, { at: 900 }, { at: 1020 }]), 120);
+});
+
+/** A page `width` across (share of the view's width) of `aspect` (height over width, physical), centred at (cx, cy), turned `deg`, in a view `viewAspect` tall (px h/w). */
+function held(cx: number, cy: number, width: number, aspect: number, deg: number, viewAspect: number): NormalizedQuad {
+  const c = Math.cos((deg * Math.PI) / 180);
+  const s = Math.sin((deg * Math.PI) / 180);
+  // In view-width units: x as is, y scaled by the view's aspect.
+  const hw = width / 2;
+  const hh = (width * aspect) / 2;
+  const at = (dx: number, dy: number) => ({ x: cx + dx * c - dy * s, y: cy + (dx * s + dy * c) / viewAspect });
+  return { topLeft: at(-hw, -hh), topRight: at(hw, -hh), bottomRight: at(hw, hh), bottomLeft: at(-hw, hh) };
+}
+
+test("framing: a page at the edge that would fit centred is asked to re-centre, never to back off", () => {
+  // The field run of 2026-10-02: "Afaste um pouco" at fill 0.745, under the closer exit line.
+  const offTop = rect(0.13, 0.008, 0.87, 0.6);
+  assert.ok(fillShare(offTop) < FILL_EXIT);
+  assert.equal(framingHint(offTop, {}, null), "center");
+  assert.equal(framingHint(offTop, {}, "move-closer"), "center");
+  // Already as big as asked, or too big to fit at all: back off.
+  assert.equal(framingHint(rect(0.01, 0.1, 0.99, 0.8), {}, null), "move-back");
+  assert.equal(framingHint(rect(0.2, -0.05, 0.8, 1.02), {}, null), "move-back");
+  // The page's paper runs on past the edge: only backing off shows how big it is.
+  assert.equal(framingHint(rect(0.3, 0.3, 0.6, 0.6), { cutOff: true }, null), "move-back");
+  // A corner under a control is cut off to the person, as at an edge.
+  assert.equal(framingHint(rect(0.15, 0.2, 0.85, 0.7), { covered: true }, null), "center");
+  // Re-centred: it clears at the exit line, and a page then over the entry line is framed.
+  assert.equal(framingHint(rect(0.14, 0.035, 0.86, 0.6), {}, "center"), null);
+});
+
+test("framing: Aproxime asks only while the page has room to come closer", () => {
+  // Centred and small: closer.
+  assert.equal(framingHint(rect(0.25, 0.3, 0.75, 0.6), {}, null), "move-closer");
+  // Off to one side, a corner 4 % from the edge, at 0.68 of the view: as framed as it gets without re-aiming.
+  const offSide = rect(0.04, 0.3, 0.72, 0.62);
+  assert.ok(fillShare(offSide) >= FRAMING.fillFloor && fillShare(offSide) < FILL_ENTER);
+  assert.equal(framingHint(offSide, {}, null), null);
+  // While "Aproxime" shows, it clears once the room is down to its exit line…
+  assert.equal(framingHint(rect(0.06, 0.3, 0.73, 0.62), {}, "move-closer"), "move-closer");
+  assert.equal(framingHint(rect(0.04, 0.3, 0.73, 0.62), {}, "move-closer"), null);
+  // …and a small page in a corner is re-centred first.
+  assert.equal(framingHint(rect(0.03, 0.03, 0.45, 0.4), {}, null), "center");
+});
+
+test("framing: every paper, held off-centre and turned, has a band where no hint shows", () => {
+  // The rail layout's visible regions on the owner's viewports (with insets) and the field phone: height over width in px.
+  const views = [1.365, 1.65, 1.715, 1.785, 1.79, 1.8];
+  const papers = [Math.SQRT2, 11 / 8.5, 53.98 / 85.6];
+  for (const viewAspect of views) {
+    for (const aspect of papers) {
+      for (const off of [-0.08, 0, 0.08]) {
+        for (const deg of [-10, 0, 10]) {
+          // Grow the page from small to too big: some size must leave the slot empty,
+          // and no size under the exit line may say "Afaste um pouco".
+          let quiet = false;
+          for (let width = 0.2; width <= 1.2; width += 0.005) {
+            const quad = held(0.5 + off, 0.5 + off, width, aspect, deg, viewAspect);
+            const hint = framingHint(quad, {}, null);
+            if (hint === null) quiet = true;
+            if (hint === "move-back") assert.ok(fillShare(quad) >= FILL_EXIT || !fitsCentred(quad, FRAMING.borderExit), `back under the exit line: view ${viewAspect} paper ${aspect} off ${off} turn ${deg} fill ${fillShare(quad)}`);
+          }
+          assert.ok(quiet, `no quiet band: view ${viewAspect} paper ${aspect.toFixed(2)} off ${off} turn ${deg}`);
+        }
+      }
+    }
+  }
+});
+
+test("framing: a framing hint whose ask is met clears at once, before its minimum show", () => {
+  const hints = new HintDebounce();
+  hints.update("move-closer", 0);
+  assert.equal(hints.update("move-closer", HINT_APPEAR_MS), "move-closer");
+  // The page got there 200 ms later: the hint goes now, not after a second.
+  assert.equal(hints.update(null, HINT_APPEAR_MS + 200), null);
+  // Any other hint still keeps its pace.
+  const other = new HintDebounce();
+  other.update("glare", 0);
+  assert.equal(other.update("glare", HINT_APPEAR_MS), "glare");
+  assert.equal(other.update(null, HINT_APPEAR_MS + 200), "glare");
 });

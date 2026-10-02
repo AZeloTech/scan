@@ -67,7 +67,7 @@
 
 import { CORNER_KEYS, type NormalizedQuad } from "@/lib/quad";
 
-export type HintKey = "searching" | "not-found" | "move-back" | "move-closer" | "low-light" | "glare" | "hold-still";
+export type HintKey = "searching" | "not-found" | "move-back" | "move-closer" | "center" | "low-light" | "glare" | "hold-still";
 
 /**
  * No sheet for this long since the loop started (or one was last seen)
@@ -112,9 +112,20 @@ export const BORDER_EXIT = 0.03;
  * where a held page lives; the gap between enter and exit keeps a page held
  * at the line from toggling the hint (set on the bench's hover and
  * follow-the-hint sessions, `scripts/bench/README.md`).
+ *
+ * 0.70 / 0.75, down from 0.78 / 0.83 (2026-10-01): on the owner's next field
+ * run a page took 42 s to get the ready cue — real people hold a page off
+ * the middle and come closer along the camera's axis, so a corner met the
+ * edge before the page reached 0.83 and the two hints took turns. With
+ * "Aproxime" now asking only while the page has room ({@link framingHint}),
+ * the simulated people (`npm run bench:framing`: off-centre ≤ 8 %, turned
+ * ≤ 10°, A4 / Letter / ID card) reach the cue in a median of 2.8 s at
+ * 0.70 / 0.75 against 3.9 s at 0.78 / 0.83, for ~4 % fewer pixels (the S25
+ * still's page ~1300 px across against ~1360; the area rule before both
+ * gave ~940).
  */
-export const FILL_ENTER = 0.78;
-export const FILL_EXIT = 0.83;
+export const FILL_ENTER = 0.7;
+export const FILL_EXIT = 0.75;
 
 /**
  * At or above this fill when it appears, "Aproxime" is said as "Aproxime mais
@@ -333,6 +344,98 @@ export function tooFar(quad: NormalizedQuad, showing: boolean): boolean {
 }
 
 /**
+ * The page's bounding box, unclipped, as shares of the view: whether it
+ * would fit with every corner `margin` inside the view were it centred.
+ */
+export function fitsCentred(quad: NormalizedQuad, margin: number): boolean {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const key of CORNER_KEYS) {
+    const { x, y } = quad[key];
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  }
+  return maxX - minX <= 1 - 2 * margin && maxY - minY <= 1 - 2 * margin;
+}
+
+/**
+ * The framing rules: the lines {@link framingHint} judges a page by. One
+ * object so the bench can try another set (`scripts/bench/framing-sim.mjs`);
+ * the app always uses {@link FRAMING}.
+ */
+export interface FramingRules {
+  /** "Aproxime" below this fill… */
+  fillEnter: number;
+  /** …and until this fill once it shows. */
+  fillExit: number;
+  /** A page whose nearest corner is within `roomEnter` of the edge (`roomExit` once "Aproxime" shows) cannot come closer without re-aiming… */
+  roomEnter: number;
+  roomExit: number;
+  /** …and at this fill or more is taken as framed where it is; under it, "Centralize a folha". */
+  fillFloor: number;
+  /** A corner this close to the edge (`borderExit` to clear) is cut off. */
+  borderEnter: number;
+  borderExit: number;
+}
+
+/**
+ * The page at the edge of the view while it fills less than "Aproxime"'s
+ * exit line is an aim problem, not a distance one — it would fit if it were
+ * centred — so the hint is "Centralize a folha", never "Afaste um pouco".
+ * And "Aproxime" asks only while the page has room to come closer: a page
+ * held off-centre reaches the edge before it reaches the exit line (on a
+ * full-bleed camera the controls make the clear part of the screen sit above
+ * the camera's optical centre, so a page drifts towards its top as the phone
+ * comes closer), and asking for more there is what made the field's 42 s
+ * ping-pong (2026-10-02: "Aproxime" at 0.735, "Afaste" at 0.745, 0.796, …).
+ * Such a page is taken as framed from {@link FramingRules.fillFloor}.
+ *
+ * Measured on simulated people (`npm run bench:framing`): off-centre by up to
+ * 8 %, turned up to 10°, A4 / Letter / an ID card, on the owner's viewports
+ * with their insets.
+ */
+export const FRAMING: FramingRules = {
+  fillEnter: FILL_ENTER,
+  fillExit: FILL_EXIT,
+  roomEnter: 0.07,
+  roomExit: 0.05,
+  fillFloor: 0.65,
+  borderEnter: BORDER_ENTER,
+  borderExit: BORDER_EXIT,
+};
+
+/**
+ * The framing hint for a page in the view (`sheet`, visible-crop fractions):
+ * "move-back", "center", "move-closer" or none. `cutOff`: its paper is known
+ * to run on past the edge (the quad is short of the page — only backing off
+ * shows how big it is); `covered`: a corner is under a control drawn over the
+ * picture; `current`: the hint showing (or pending), for the hysteresis.
+ */
+export function framingHint(
+  sheet: NormalizedQuad,
+  { cutOff = false, covered = false }: { cutOff?: boolean; covered?: boolean },
+  current: HintKey | null,
+  rules: FramingRules = FRAMING,
+): "move-back" | "center" | "move-closer" | null {
+  if (cutOff) return "move-back";
+  const margin = borderMargin(sheet);
+  const fill = fillShare(sheet);
+  const edging = current === "move-back" || current === "center";
+  if (covered || margin < (edging ? rules.borderExit : rules.borderEnter)) {
+    // Too big to fit even centred, or already as big as asked: back off. Else re-aim.
+    return fill >= rules.fillExit || !fitsCentred(sheet, rules.borderExit) ? "move-back" : "center";
+  }
+  const closer = current === "move-closer";
+  if (fill >= (closer ? rules.fillExit : rules.fillEnter)) return null;
+  if (margin >= (closer ? rules.roomExit : rules.roomEnter)) return "move-closer";
+  return fill >= rules.fillFloor ? null : "center";
+}
+
+/**
  * How much a sheet moved lately: over its recent readings (time, quad in the
  * visible crop), the largest corner move between the newest and any reading
  * within `windowMs` before it, as a share of the view's diagonal (`aspect` =
@@ -384,6 +487,8 @@ export interface GuidanceInput {
   sheet: NormalizedQuad | null;
   /** The page is known to run on past the viewfinder's edge though its quad does not reach it (an edgeless side with paper beyond) — suspected or found. */
   cutOff?: boolean;
+  /** A corner of the page is under a control drawn over the picture: hidden as at an edge. */
+  covered?: boolean;
   /** When a sheet (found or candidate) was last seen; null: not since `since`. */
   sheetSeenAt: number | null;
   /** The view's height over its width (for distances along its diagonal). */
@@ -402,7 +507,7 @@ export interface GuidanceInput {
  * The hint the moment calls for, before any debouncing — `current` (the hint
  * showing or pending) sets which side of each hysteresis band applies.
  */
-export function rawHint(input: GuidanceInput, current: HintKey | null): HintKey | null {
+export function rawHint(input: GuidanceInput, current: HintKey | null, rules: FramingRules = FRAMING): HintKey | null {
   const keep = (key: HintKey): boolean => current === key;
   const dark = input.bright !== null && input.bright < (keep("low-light") ? BRIGHT_EXIT : BRIGHT_ENTER);
   const sheet = input.sheet;
@@ -410,8 +515,8 @@ export function rawHint(input: GuidanceInput, current: HintKey | null): HintKey 
     // Not found: a page suspected at the edge or far away (framing it comes
     // first, as for a found one), too dark to see into, or nothing at all.
     if (sheet !== null) {
-      if (input.cutOff === true || borderMargin(sheet) < (keep("move-back") ? BORDER_EXIT : BORDER_ENTER)) return "move-back";
-      if (tooFar(sheet, keep("move-closer"))) return "move-closer";
+      const framing = framingHint(sheet, input, current, rules);
+      if (framing !== null) return framing;
     }
     if (dark) return "low-light";
     const quiet = input.now - Math.max(input.since, input.sheetSeenAt ?? input.since);
@@ -419,8 +524,8 @@ export function rawHint(input: GuidanceInput, current: HintKey | null): HintKey 
   }
   // A found sheet whose paper runs on past the viewfinder's edge is cut off
   // too, wherever the model drew its corners.
-  if (input.cutOff === true || borderMargin(sheet) < (keep("move-back") ? BORDER_EXIT : BORDER_ENTER)) return "move-back";
-  if (tooFar(sheet, keep("move-closer"))) return "move-closer";
+  const framing = framingHint(sheet, input, current, rules);
+  if (framing !== null) return framing;
   if (dark) return "low-light";
   if (input.glare !== null && input.glare >= (keep("glare") ? GLARE_EXIT : GLARE_ENTER)) return "glare";
   const shaky = input.motion !== null && input.motion > (keep("hold-still") ? SHAKY_EXIT : SHAKY_ENTER);
@@ -428,16 +533,20 @@ export function rawHint(input: GuidanceInput, current: HintKey | null): HintKey 
   // doing as asked, not a shaking hand: the slot clears instead of trading
   // one hint for "Segure firme" (the ready cue waits for stillness all the
   // same). Once it has cleared, a hand still moving gets "Segure firme".
-  if (shaky && input.sharp !== false && (current === "move-closer" || current === "move-back")) return null;
+  if (shaky && input.sharp !== false && (current === "move-closer" || current === "move-back" || current === "center")) return null;
   if (shaky || input.sharp === false) return "hold-still";
   return null;
 }
+
+/** The hints that ask the person to move the phone. */
+const FRAMING_HINTS: ReadonlySet<HintKey | null> = new Set<HintKey | null>(["move-closer", "move-back", "center"]);
 
 /**
  * The hint on screen: another answer must hold {@link HINT_APPEAR_MS} before
  * it replaces the one showing, and a shown hint stays at least
  * {@link HINT_MIN_SHOW_MS} — so a condition that comes and goes on alternate
- * passes never makes the slot flicker.
+ * passes never makes the slot flicker. A framing hint whose ask is met is the
+ * exception: it clears at once (its hysteresis is its debounce).
  */
 export class HintDebounce {
   private shown: HintKey | null = null;
@@ -459,6 +568,18 @@ export class HintDebounce {
     if (candidate === this.shown) {
       this.pending = null;
       return this.shown;
+    }
+    // A framing hint whose ask has been met goes at once: the person is
+    // moving the phone as it says, and every moment it stays up after the
+    // page got there is a moment they keep moving — past the line, into the
+    // opposite hint (the field's "Aproxime" ↔ "Afaste" ping-pong). Its exit
+    // line (hysteresis) is what keeps it from flickering at the line.
+    if (candidate === null && FRAMING_HINTS.has(this.shown)) {
+      this.shown = null;
+      this.shownAt = now;
+      this.changedAt = now;
+      this.pending = null;
+      return null;
     }
     if (candidate !== this.pending) {
       this.pending = candidate;
@@ -485,10 +606,14 @@ export class HintDebounce {
 
 /**
  * Ready: the strict conditions (`strict`) held {@link READY_AFTER_MS} turn
- * it on — {@link onSince}, what auto-capture counts from, is null the moment
- * they fail. The cue on screen (the answer) stays on through a failure
- * shorter than {@link READY_EXIT_MS} while `keep` holds (the page still
- * found, no other hint owed), and goes at once when it does not.
+ * it on. The cue on screen (the answer) stays on through a failure shorter
+ * than {@link READY_EXIT_MS} while `keep` holds (the page still found, no
+ * other hint owed), and goes at once when it does not — and so does
+ * {@link onSince}, what auto-capture counts from: a wobble the cue rides out
+ * pauses the countdown's fire ({@link steady}) but does not restart it. (It
+ * did: on the field run of 2026-10-02 a page at fill 0.84 had its countdown
+ * cancelled twice in 3 s by one-reading stillness wobbles under a cue that
+ * never went off.)
  */
 export class ReadyCue {
   /** When the strict conditions last started holding, or null while they do not. */
@@ -500,6 +625,11 @@ export class ReadyCue {
   private shown = false;
   private failingSince: number | null = null;
 
+  /** The strict conditions hold right now (not merely the cue riding out a wobble). */
+  get steady(): boolean {
+    return this.since !== null;
+  }
+
   update(strict: boolean, keep: boolean, now: number): boolean {
     if (strict) {
       this.since ??= now;
@@ -509,8 +639,8 @@ export class ReadyCue {
       return this.shown;
     }
     this.since = null;
-    this.onSince = null;
     if (!keep) {
+      this.onSince = null;
       this.shown = false;
       this.failingSince = null;
       return false;
@@ -518,9 +648,12 @@ export class ReadyCue {
     if (this.shown) {
       this.failingSince ??= now;
       if (now - this.failingSince >= READY_EXIT_MS) {
+        this.onSince = null;
         this.shown = false;
         this.failingSince = null;
       }
+    } else {
+      this.onSince = null;
     }
     return this.shown;
   }
@@ -613,6 +746,8 @@ export class AutoCapture {
     aspect: number;
     sceneChange?: number | null;
     confirmedAt?: number | null;
+    /** The ready conditions hold right now ({@link ReadyCue.steady}); false: a wobble the cue rides out — no fire until it passes. */
+    steady?: boolean;
   }): AutoCaptureState {
     const { now, readyOnSince, sheet } = input;
     if (this.fired !== null) {
@@ -623,6 +758,7 @@ export class AutoCapture {
     const start = Math.max(readyOnSince, this.armedAt);
     const progress = Math.min(1, (now - start) / AUTO_FIRE_MS);
     if (progress < 1) return { countdown: progress, fire: false };
+    if (input.steady === false) return { countdown: 1, fire: false };
     const confirmedAt = input.confirmedAt ?? null;
     if (confirmedAt === null || confirmedAt < start + AUTO_FIRE_MS) return { countdown: 1, fire: false };
     this.fired = { quad: sheet, at: now };

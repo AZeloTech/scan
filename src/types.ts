@@ -340,6 +340,14 @@ export type ScanDiagnosticsPayload =
       autoArmed: boolean;
       /** The first thing keeping the ready cue off or auto-capture from firing (the HUD's "why:"). */
       why: string | null;
+      /** The newest pass's detector confidence; null when it answered no quad. */
+      conf?: number | null;
+      /** Why the loop turned the newest pass's quad away (`floor`, `superseded`, `classical-sanity`, `ml-ready`); null when taken or none. */
+      rejected?: string | null;
+      /** The newest pass's paper evidence verdict on its quad; null when not read. */
+      paper?: boolean | null;
+      /** How much of the visible region the page fills (as for `hint`); null with no page. */
+      fill?: number | null;
     }
   /** The part of the frame the person can see changed (fractions of the frame). */
   | { type: "visible"; x: number; y: number; width: number; height: number; fit: string }
@@ -459,7 +467,7 @@ export type ScanDiagnosticsPayload =
   /**
    * The live preview stream's cap (Android Chrome only, while the still
    * pipeline is proven): whether it is capped now, and why or why not —
-   * `still-proven` (capped), `not-android`, `no-image-capture`,
+   * `disabled` (the cap is off on every device — the default), `still-proven` (capped), `not-android`, `no-image-capture`,
    * `still-unproven`, `still-failed`, `stream-small`, `constraints-failed`.
    * Emitted when the camera comes up and whenever the cap changes.
    */

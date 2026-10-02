@@ -165,6 +165,8 @@ export interface AppCopy {
       /** After a few seconds with no page: the photo can still be taken. */
       notFound: string;
       moveBack: string;
+      /** The page at the edge of the view though it would fit: re-aim, not back off. */
+      center: string;
       moveCloser: string;
       /** "Move closer" for a page that already nearly fills the view (`FILL_NEAR`, `lib/guidance.ts`): a small move, not a big one. */
       moveCloserNear: string;
@@ -965,6 +967,7 @@ const PT: AppCopy = {
       searching: "Procurando documento",
       notFound: "Não achei a folha — toque para capturar",
       moveBack: "Afaste um pouco",
+      center: "Centralize a folha",
       moveCloser: "Aproxime",
       moveCloserNear: "Aproxime mais um pouco",
       lowLight: "Pouca luz",
@@ -1624,6 +1627,7 @@ const EN: AppCopy = {
       searching: "Looking for the document",
       notFound: "Can't find the page — tap to capture",
       moveBack: "Move back a little",
+      center: "Center the page",
       moveCloser: "Move closer",
       moveCloserNear: "Move a little closer",
       lowLight: "Low light",

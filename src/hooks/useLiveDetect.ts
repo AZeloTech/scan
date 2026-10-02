@@ -628,6 +628,29 @@ interface Runtime {
   openHits: number;
   /** How much of the visible region the page (found or suspected) fills (`fillShare`), or null with none. */
   fill: number | null;
+  /** What the newest pass's detector answered and what the loop made of it ({@link PassAnswer}). */
+  answer: PassAnswer | null;
+}
+
+/**
+ * The newest pass, for the diagnostics stream: why a page is or is not found
+ * — the model's confidence (null: no quad), why the loop turned the quad away
+ * (`floor`, `superseded`, …; null: taken), and the paper evidence's verdict
+ * (null: not read).
+ */
+export interface PassAnswer {
+  conf: number | null;
+  rejected: string | null;
+  paper: boolean | null;
+}
+
+/** {@link PassAnswer} from a pass's detection, the loop's verdict on it and its evidence. */
+function passAnswer(detection: FrameDetection | null, rejected: string | null, evidence: EvidenceReading): PassAnswer {
+  return {
+    conf: detection === null ? null : (detection.confidence ?? null),
+    rejected,
+    paper: evidence === null || evidence === "unavailable" ? null : evidence.ok,
+  };
 }
 
 function freshRuntime(): Runtime {
@@ -680,6 +703,7 @@ function freshRuntime(): Runtime {
     watchScore: null,
     openHits: 0,
     fill: null,
+    answer: null,
   };
 }
 
@@ -840,6 +864,8 @@ export interface LiveDiagnostics {
   passes: number;
   /** How much of the visible region the page fills along its limiting axis (`fillShare`), or null with no page. */
   fill: number | null;
+  /** The newest pass's answer ({@link PassAnswer}), or null before the first. */
+  answer: PassAnswer | null;
 }
 
 /**
@@ -1844,6 +1870,7 @@ export function useLiveDetect({
       // The frame this describes is the one the pass sampled, not the moment
       // the detector got round to answering.
       const { accepted, rejected } = accept(outcome.detection, outcome.width, outcome.height, outcome.frameAt, outcome.evidence, outcome.refined);
+      runtime.answer = passAnswer(outcome.detection, rejected, outcome.evidence);
       // A missed detection on a moved scene ends the hold: the stale
       // horizon exists to carry a stationary page through a flicker, and the
       // probe is what proves the page was not stationary. The capture buffer
@@ -2363,6 +2390,7 @@ export function useLiveDetect({
         if (!isMlResultFresh(now, performance.now())) return;
         if (video.videoWidth === 0) return;
         const { accepted, rejected } = accept(detection, width, height, now, null);
+        runtime.answer = passAnswer(detection, rejected, null);
         const ms = performance.now() - now;
         reportPass(
           "ml",
@@ -2474,7 +2502,8 @@ export function useLiveDetect({
           locked: tracking,
           sheet,
           sheetSeenAt: runtime.sheetSeenAt,
-          cutOff: covered || (tracking ? runtime.openHits >= OPEN_READINGS : convincing && candidate.cutOff),
+          cutOff: tracking ? runtime.openHits >= OPEN_READINGS : convincing && candidate.cutOff,
+          covered,
           aspect,
           motion,
           sharp: reading?.sharp ?? null,
@@ -2540,16 +2569,21 @@ export function useLiveDetect({
           aspect,
           sceneChange: runtime.firedLuma === null || latest === null ? null : frameMotionScore(runtime.firedLuma, latest),
           confirmedAt: runtime.confirmedAt,
+          steady: guidance.ready.steady,
         });
         runtime.countdown = auto.countdown;
         if (isReady && !auto.fire) {
           runtime.blockWhy = !guidance.auto.armed
             ? "auto: waiting for another page"
             : auto.countdown === null
-              ? "auto: no sheet"
+              ? sheet === null || !tracking
+                ? "auto: no sheet"
+                : `auto: ${runtime.stillWhy ?? (raw !== null ? `hint ${raw}` : "not steady")}`
               : auto.countdown < 1
                 ? `auto: countdown ${Math.round(auto.countdown * 100)} %`
-                : "auto: waiting for a fresh pass";
+                : !guidance.ready.steady
+                  ? `auto: holding (${runtime.stillWhy ?? "wobble"})`
+                  : "auto: waiting for a fresh pass";
         }
         // One last look at the camera, at the instant of the photo.
         fire = auto.fire && watch(now);
@@ -2812,6 +2846,7 @@ export function useLiveDetect({
       blocked: runtime.blockWhy,
       passes: passCountRef.current,
       fill: runtime.fill,
+      answer: runtime.answer,
     };
   }, []);
 

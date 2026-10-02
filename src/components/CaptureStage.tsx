@@ -55,6 +55,7 @@ import {
   NATIVE_STREAM,
   STREAM_RESTORE_BUDGET_MS,
   streamCapDecision,
+  streamCapEnabled,
   waitForNativeFrame,
 } from "@/lib/stream-cap";
 import { DiagnosticsHud } from "@/components/DiagnosticsHud";
@@ -396,6 +397,7 @@ export function CaptureStage({
       const video = videoRef.current;
       if (track === null || video === null || track.readyState !== "live") return;
       const decision = streamCapDecision({
+        enabled: streamCapEnabled(),
         android: isAndroid(),
         imageCapture: hasImageCapture(),
         stillWorking: stillPipelineWorking(),
@@ -1416,6 +1418,10 @@ export function CaptureStage({
           ready: d.ready,
           autoArmed: d.autoArmed,
           why: d.blocked,
+          conf: d.answer?.conf ?? null,
+          rejected: d.answer?.rejected ?? null,
+          paper: d.answer?.paper ?? null,
+          fill: d.fill,
         });
       }
     };
@@ -1875,6 +1881,7 @@ const HINT_TONE: Record<HintKey, "night" | "alert" | "warning"> = {
   searching: "night",
   "not-found": "alert",
   "move-back": "night",
+  center: "night",
   "move-closer": "night",
   "low-light": "warning",
   glare: "night",
@@ -1894,6 +1901,8 @@ function hintCopy(hints: ReturnType<typeof useCopy>["capture"]["hints"], key: Hi
       return hints.notFound;
     case "move-back":
       return hints.moveBack;
+    case "center":
+      return hints.center;
     case "move-closer":
       return fill !== null && fill >= FILL_NEAR ? hints.moveCloserNear : hints.moveCloser;
     case "low-light":

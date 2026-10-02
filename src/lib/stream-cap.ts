@@ -30,7 +30,44 @@
  * already the rare, failed one.
  *
  * Decisions are pure and unit-tested; only `applyConstraints` touches the device.
+ *
+ * **Off ({@link STREAM_CAP_ENABLED}).** The owner's field run on a Galaxy S25
+ * Ultra (2026-10-02) showed the capped mode is not a smaller copy of the
+ * native one: the 1080×1920 stream sees a field of view ~1.26× tighter (the
+ * still registered against it at `fovScale` 1.256 and 1.275, against 1.006 on
+ * the native stream), so the page the person framed is ~20 % smaller in the
+ * photo than on screen — the very pixels "Aproxime" asks for — and from the
+ * cap on the live loop found no page at all for the rest of the session,
+ * while the photo's own detection found it every time. The live loop itself
+ * handles a stream that changes size and field of view
+ * (`npm run bench:quality -- --case cap-fov`, which forces the cap on), so
+ * what failed is the device's capped mode, which the library cannot see
+ * into. Until a capped stream is proven to keep the native field of view and
+ * the detection on a device, the stream stays native: the decision answers
+ * `disabled` on every device, and the restore path below never has anything
+ * to restore.
  */
+
+/**
+ * Whether the cap may be applied at all. Off: see the module comment. The
+ * decision, the restore and their telemetry stay, so turning it back on is
+ * this constant (and the field proof that should come with it).
+ */
+export const STREAM_CAP_ENABLED = false;
+
+/** Bench builds only: `globalThis.__scanBenchStreamCap = true` turns the cap on to prove the live loop survives it. */
+interface StreamCapBench {
+  __SCAN_PROBE_BUILD__?: boolean;
+  __scanBenchStreamCap?: boolean;
+}
+
+/** {@link STREAM_CAP_ENABLED}, or — in the bench's build only — the bench asking for the cap. */
+export function streamCapEnabled(): boolean {
+  BENCH_PROBE: if ((globalThis as StreamCapBench).__SCAN_PROBE_BUILD__ === true) {
+    if ((globalThis as StreamCapBench).__scanBenchStreamCap === true) return true;
+  }
+  return STREAM_CAP_ENABLED;
+}
 
 /** Long edge of the capped preview stream. */
 export const STREAM_CAP_LONG_EDGE = 1920;
@@ -50,6 +87,8 @@ export const STREAM_RESTORE_BUDGET_MS = 2000;
 
 /** Why the stream is, or is not, capped. */
 export type StreamCapReason =
+  /** The cap is switched off for every device ({@link STREAM_CAP_ENABLED}). */
+  | "disabled"
   /** Capped: a still became a page and none has failed since. */
   | "still-proven"
   /** Not Android Chrome (iOS WebKit, desktop, Firefox): the preview frame may be the page. */
@@ -66,6 +105,8 @@ export type StreamCapReason =
   | "constraints-failed";
 
 export interface StreamCapInputs {
+  /** {@link streamCapEnabled}: the cap may be applied at all. */
+  enabled: boolean;
   /** Android (Chrome's `ImageCapture` is where the still pipeline lives). */
   android: boolean;
   /** `ImageCapture` exists. */
@@ -85,6 +126,7 @@ export interface StreamCapInputs {
  * proven still pipeline and a stream larger than the cap (or already capped).
  */
 export function streamCapDecision(inputs: StreamCapInputs): { cap: boolean; reason: StreamCapReason } {
+  if (!inputs.enabled) return { cap: false, reason: "disabled" };
   if (!inputs.android) return { cap: false, reason: "not-android" };
   if (!inputs.imageCapture) return { cap: false, reason: "no-image-capture" };
   if (!inputs.stillWorking) return { cap: false, reason: inputs.stillFailed ? "still-failed" : "still-unproven" };

@@ -25,16 +25,19 @@ freezes at 1.0.
   `capture` (still, request, stream, kept field of view, canonical bytes and
   quality, fallback reason), `confirm`, and the new `render` and `build`
   events.
-- **A cheaper viewfinder on Android, never a cheaper page.** Once a still has
-  become a page (Android Chrome's `ImageCapture` proven on the device), the
-  live preview is lowered to 1920 px on its long edge; the first page of a
-  session is always taken on the native stream, and nothing is capped on
-  iOS, without `ImageCapture`, or after a still fails. If a still fails on a
-  capped stream, the native stream is restored for that page; only if the
-  camera does not come back within 2 s is the capped frame used, and the page
-  is then flagged `low-resolution` on the confirm screen. `onDiagnostics`
-  reports it: the new `stream-cap` event (applied or not, and why) and
-  `streamCapped` / `restore` on `capture`.
+- **The live preview stays at the camera's native size.** A cap that
+  lowered Android's preview to 1920 px once a still had proven itself is
+  built (the decision, the restore of the native stream when a still fails
+  on a capped one, the `low-resolution` flag) but switched off
+  (`STREAM_CAP_ENABLED`): on a Galaxy S25 Ultra the capped mode sees a field
+  of view ~1.26× tighter than the native one (the still registered at
+  `fovScale` 1.256 against 1.006), so the page framed on screen was ~20 %
+  smaller in the photo, and from the cap on the live loop found no page for
+  the rest of the session while the photo's own detection found it every
+  time. The live loop itself survives a stream that changes size and field
+  of view (`npm run bench:quality -- --case cap-fov` forces the cap on in
+  the bench and checks found share, ready cue and fill against the native
+  page). `stream-cap` now reports `disabled`.
 - **The rail's camera fills the whole screen again.** A Phase 5a build
   letterboxed it (`contain`, sized to the screen above the controls); with a
   browser's bars, a gesture bar or larger text a 9:16 stream then shrank on
@@ -79,13 +82,36 @@ freezes at 1.0.
   a Galaxy S25 Ultra). Now it judges the page's reach along the viewfinder's
   limiting axis (`fillShare`: its bounding box's larger share of the visible
   width or height — an area target could never be met on a tall screen):
-  "Aproxime" under 78 %, gone at 83 %, worded "Aproxime mais um pouco" for a
-  page already at 60 % or more when it appears. The ready cue and
-  auto-capture wait for it; the shutter never does. While "Aproxime" or
-  "Afaste um pouco" is up, the page moving is the person doing as asked:
-  the slot clears instead of switching to "Segure firme" (the ready cue
-  still waits for stillness). `onDiagnostics`' `hint` and `ready` events
-  carry `fill`, and the HUD shows it.
+  "Aproxime" under 70 %, gone at 75 %, worded "Aproxime mais um pouco" for a
+  page already at 60 % or more when it appears — and only while the page has
+  room to come closer (every corner at least 7 % from the edge; 5 % to clear):
+  a page held off the middle that reaches the edge at 65 % or more is taken
+  as framed. A page at the edge that would fit if it were centred is asked to
+  re-centre ("Centralize a folha", a new hint), never to back off; "Afaste um
+  pouco" is for a page already as big as asked, too big to fit, or whose
+  paper runs on past the edge. A framing hint whose ask is met clears at
+  once (its exit line is its debounce), so people stop moving where they
+  should. (A first cut at 78 % / 83 %, with "Afaste" for any corner near the
+  edge, made the owner's field run take 42 s to the ready cue: on a
+  full-bleed camera the clear part of the screen sits above the camera's
+  optical centre, so a page drifts up as the phone comes closer and met the
+  edge at 74–80 % — "Aproxime" and "Afaste" took turns. On simulated people
+  held off-centre by up to 8 % and turned up to 10°, `npm run bench:framing`,
+  the median time to the ready cue goes from 6.1 s, 15 % never, to 2.8 s,
+  all reaching it, for ~6 % fewer pixels than 78/83 asked for.) The ready cue
+  and auto-capture wait for it; the shutter never does. While a framing hint
+  is up, the page moving is the person doing as asked: the slot clears
+  instead of switching to "Segure firme" (the ready cue still waits for
+  stillness). `onDiagnostics`' `hint` and `ready` events carry `fill`, and
+  the HUD shows it.
+- **Auto-capture's countdown rides out a wobble the ready cue rides out.** A
+  one-reading stillness wobble under a cue that stayed on used to restart
+  the countdown (logged as "auto: no sheet"); now it only holds the fire
+  until the page is steady again. The HUD's reason names the wobble.
+- **The live loop's pass samples say why a page is not found:** `pass`
+  carries the model's confidence (`conf`), why its quad was turned away
+  (`rejected`), the paper evidence's verdict (`paper`) and `fill`; the HUD
+  shows them.
 - **The final JPEG is q95** (was q92), the same as the canonical; the size
   ladder for a host's `maxBytes` gains a q92 rung before q85 (quality
   still goes before any pixel).
