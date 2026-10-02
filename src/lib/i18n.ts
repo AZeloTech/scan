@@ -501,8 +501,9 @@ export interface AppCopy {
      *
      * It exists because this row now offers two very different things under one
      * word, and one of them collides with a label the app already uses:
-     * "Endireitar" is about the sheet's *curve*, while the "já endireitada" chip
-     * over the picture is about the crop the app did by itself at capture. The
+     * "Endireitar" is about the print's *tilt* inside the sheet and the
+     * sheet's *curve*, while the "já endireitada" chip over the picture is
+     * about the crop the app did by itself at capture. The
      * sheet says both out loud rather than leaving the reader to guess.
      */
     about: {
@@ -546,7 +547,8 @@ export interface AppCopy {
       back: string;
     };
     /**
-     * "Endireitar a folha curvada" — the per-page beta control.
+     * "Endireitar a folha" — the per-page beta control: the print's tilt first,
+     * then the sheet's curl.
      *
      * Descriptive, never diagnostic, and never a promise: the words say what
      * the app will *try*, and {@link AppCopy.preview.dewarp.outcomes} is the
@@ -554,7 +556,7 @@ export interface AppCopy {
      */
     dewarp: {
       label: string;
-      /** What kind of page it is for. */
+      /** What kind of page it is for: tilted text, and curved paper. */
       help: string;
       /**
        * What to do next, for the two outcomes that are worth retrying.
@@ -566,6 +568,12 @@ export interface AppCopy {
        * support code, which is the half a screenshot needs.
        */
       retryHint: string;
+      /**
+       * The same, for a tilt that was straightened while the curve could not
+       * be checked: the switch is on, so a tap would turn it off — the retry
+       * is off and on again, and the card says so.
+       */
+      retryCurlHint: string;
       /**
        * The whole of what is downloaded, said once per session before anything
        * is fetched: the size, that the cache may lose it, and that the picture
@@ -596,15 +604,37 @@ export interface AppCopy {
       /** The cancel was tapped and the run is unwinding — instant, honest. */
       cancelling: string;
       /**
-       * One sentence per outcome bucket, never a technical reason.
-       * `better-flat` is a confirmation, not a warning: the A/B ran and kept
-       * the better image. Only `download` and `transient` earn the warn tone,
-       * because only they are worth a retry.
+       * One sentence per outcome of a tap (`scan-store.ts`'s
+       * `StraightenOutcome`), never a technical reason.
+       *
+       * The first four say what was corrected — the print's tilt, the sheet's
+       * curl, both, or the tilt with the curl left as it was — so a page that
+       * only got its tilt fixed is never told "mantivemos a original".
+       * `nothing` is the one decline that states a fact about the page, and it
+       * may, because it was measured (level print, flat page). Every other
+       * decline is a *limit* of the correction and must say so without
+       * claiming the page reads better as it is. Only `download` and
+       * `transient` earn the warn tone, because only they are worth a retry.
        */
       outcomes: Record<
-        "better-flat" | "unverified" | "page" | "download" | "transient",
+        | "tilt"
+        | "curl"
+        | "both"
+        | "tilt-only"
+        | "tilt-retry"
+        | "nothing"
+        | "declined"
+        | "unverified"
+        | "page"
+        | "download"
+        | "transient",
         string
       >;
+      /**
+       * Added to the card when Endireitar is tapped again over an answer that
+       * is final for this photo: why the tap changed nothing, and what would.
+       */
+      retapHint: string;
       /** This device missed the budget twice; the control is off for the session. */
       unavailable: string;
       /**
@@ -1209,13 +1239,14 @@ const PT: AppCopy = {
       title: "As melhorias desta página",
       dewarpTitle: "Endireitar",
       dewarpBody:
-        "Tira a curva da folha — a barriga de uma página de livro ou de um " +
-        "papel que não fica reto. É diferente do endireitamento automático: " +
-        "assim que você fotografa, o app já recorta a folha pelos cantos e " +
-        "corrige a inclinação, e é isso que a etiqueta “já endireitada” quer " +
-        "dizer. O Endireitar cuida da curva que sobra depois disso. Em algumas " +
-        "páginas o resultado fica pior; quando isso acontece, o app avisa e " +
-        "mantém a original. Tudo é feito no seu aparelho.",
+        "Endireita o texto que saiu torto dentro da folha e tira a curva da " +
+        "folha — a barriga de uma página de livro ou de um papel que não fica " +
+        "reto. É diferente do endireitamento automático: assim que você " +
+        "fotografa, o app já recorta a folha pelos cantos e a deixa reta, e é " +
+        "isso que a etiqueta “já endireitada” quer dizer. O Endireitar cuida do que sobra " +
+        "depois disso: primeiro a inclinação do texto, depois a curva. Quando " +
+        "não dá para corrigir com segurança, o app avisa e mantém a página " +
+        "como estava. Tudo é feito no seu aparelho.",
       finishTitle: "Acabamento",
       finishIntro:
         "Muda a luz e a tinta da folha, nunca o formato. Também é onde você " +
@@ -1236,9 +1267,11 @@ const PT: AppCopy = {
       back: "Voltar",
     },
     dewarp: {
-      label: "Endireitar a folha curvada",
-      help: "Para folha de livro ou papel que não fica reto.",
+      label: "Endireitar a folha",
+      help: "Para texto torto na foto, folha de livro ou papel que não fica reto.",
       retryHint: "Dá para tentar de novo: toque em endireitar.",
+      retryCurlHint:
+        "Para tentar a curva de novo, desligue e ligue o endireitar.",
       consent:
         `Baixa um modelo de ${DEWARP_ASSET_SIZE_LABEL} uma vez para endireitar ` +
         "folhas curvadas neste aparelho. A melhoria leva alguns segundos por " +
@@ -1267,11 +1300,25 @@ const PT: AppCopy = {
       cancel: "Cancelar",
       cancelling: "cancelando…",
       outcomes: {
-        "better-flat": "Conferimos: esta página fica melhor como está.",
+        tilt: "Endireitamos o texto, que estava torto.",
+        curl: "Tiramos a curva da folha.",
+        both: "Endireitamos o texto torto e tiramos a curva da folha.",
+        "tilt-only":
+          "Endireitamos o texto, que estava torto. A curva da folha ficou " +
+          "como estava.",
+        "tilt-retry":
+          "Endireitamos o texto, que estava torto, mas não deu para conferir " +
+          "a curva da folha agora.",
+        nothing: "O texto já estava reto e a folha, plana — não havia o que endireitar.",
+        declined:
+          "Não deu para endireitar esta página com segurança — mantivemos " +
+          "como estava.",
         unverified:
           "Mantivemos a página como estava — não deu para conferir se a " +
           "melhoria ajudaria.",
-        page: "Esta página ficou melhor sem a melhoria — mantivemos a original.",
+        page:
+          "Esta página está além do que o Endireitar consegue corrigir — " +
+          "mantivemos como estava.",
         download:
           "Não deu para baixar o arquivo da melhoria. Confira a conexão e " +
           "tente de novo.",
@@ -1279,6 +1326,9 @@ const PT: AppCopy = {
           "Algo deu errado e a página foi mantida como estava. " +
           "Dá para tentar de novo.",
       },
+      retapHint:
+        "Tocar de novo dá a mesma resposta para esta foto. Para tentar outra " +
+        "vez, ajuste os cantos ou refaça a foto.",
       unavailable:
         "A melhoria de curvatura não deu conta neste aparelho e foi pausada.",
       diagnostics: {
@@ -1863,14 +1913,15 @@ const EN: AppCopy = {
       title: "This page's improvements",
       dewarpTitle: "Straighten",
       dewarpBody:
-        "Takes the curve out of the sheet — the belly of a page from a book, " +
-        "or of paper that will not lie flat. It is not the automatic " +
-        "straightening: the moment you take the photo the app already crops " +
-        "the sheet by its corners and fixes the tilt, and that is what the " +
-        "“already straightened” label means. Straighten deals with the curve " +
-        "left over after that. On some pages the result is worse; when that " +
-        "happens the app says so and keeps the original. It all runs on your " +
-        "device.",
+        "Levels text that came out tilted inside the sheet, and takes the " +
+        "curve out of the sheet — the belly of a page from a book, or of paper " +
+        "that will not lie flat. It is not the automatic straightening: the " +
+        "moment you take the photo the app already crops the sheet by its " +
+        "corners and squares it up, and that is what the “already " +
+        "straightened” label means. " +
+        "Straighten deals with what is left after that: the tilt of the text " +
+        "first, then the curve. When it cannot be corrected safely, the app " +
+        "says so and keeps the page as it was. It all runs on your device.",
       finishTitle: "Finish",
       finishIntro:
         "Changes the light and the ink on the sheet, never its shape. It is " +
@@ -1892,9 +1943,10 @@ const EN: AppCopy = {
       back: "Back",
     },
     dewarp: {
-      label: "Straighten the curved sheet",
-      help: "For a page from a book, or paper that will not lie flat.",
+      label: "Straighten the sheet",
+      help: "For tilted text in the photo, a page from a book, or paper that will not lie flat.",
       retryHint: "You can try again: tap straighten.",
+      retryCurlHint: "To try the curve again, turn straighten off and on.",
       consent:
         `Downloads a ${DEWARP_ASSET_SIZE_LABEL} model once to straighten curved ` +
         "sheets on this device. The improvement takes a few seconds per page. " +
@@ -1923,11 +1975,24 @@ const EN: AppCopy = {
       cancel: "Cancel",
       cancelling: "cancelling…",
       outcomes: {
-        "better-flat": "We checked: this page reads better as it is.",
+        tilt: "We levelled the text, which was tilted.",
+        curl: "We took the curve out of the sheet.",
+        both: "We levelled the tilted text and took the curve out of the sheet.",
+        "tilt-only":
+          "We levelled the text, which was tilted. The curve of the sheet was " +
+          "left as it was.",
+        "tilt-retry":
+          "We levelled the text, which was tilted, but the curve of the sheet " +
+          "could not be checked this time.",
+        nothing: "The text was already level and the sheet flat — there was nothing to straighten.",
+        declined:
+          "We could not straighten this page safely — we kept it as it was.",
         unverified:
           "We kept the page as it was — there was not enough to tell " +
           "whether the improvement would help.",
-        page: "This page looked better without the improvement — we kept the original.",
+        page:
+          "This page is beyond what Straighten can correct — we kept it as " +
+          "it was.",
         download:
           "The improvement could not be downloaded. Check the connection and " +
           "try again.",
@@ -1935,6 +2000,9 @@ const EN: AppCopy = {
           "Something went wrong and the page was kept as it was. " +
           "You can try again.",
       },
+      retapHint:
+        "Tapping again gives the same answer for this photo. To try again, " +
+        "adjust the corners or retake the photo.",
       unavailable:
         "The curvature improvement was too slow on this device and is paused.",
       diagnostics: {

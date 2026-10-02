@@ -78,7 +78,8 @@ import { resolveGeometryMode, type DewarpEngineMode } from "@/lib/dewarp/engine-
 // A dependency-free lookup table, not the engine: `dewarp/index` is the ~25 kB
 // of maths this module is careful never to pull in eagerly.
 import { dewarpReasonCode } from "@/lib/dewarp/types";
-import type { DewarpReplay } from "@/lib/dewarp-stage";
+import type { AppliedDeskew, DewarpReplay, DewarpStageReason } from "@/lib/dewarp-stage";
+import { DESKEW_POLICY_VERSION } from "@/lib/deskew-policy";
 import {
   cancelRemoteRenders,
   claimRenderLane,
@@ -170,6 +171,31 @@ export interface RenderedTransforms {
    * being read as if it were current.
    */
   dewarpEngineMode: DewarpEngineMode;
+  /**
+   * The print's tilt the tap on Endireitar straightened in these pixels,
+   * degrees — on either geometry, whatever the engine then said about the
+   * curl: rotated on the flat path, levelled by the engine itself on a
+   * dewarped page. Absent when the tap found no tilt to straighten.
+   */
+  deskewDeg?: number;
+  /**
+   * The tap found the print already level and the page flat: there was
+   * nothing to straighten, whatever the engine then did. Only on a page with
+   * no rotation.
+   */
+  alreadyStraight?: true;
+  /**
+   * The rotation's corner wedges were painted with paper the photo does not
+   * have — pixels invented, which the PDF's record says. Only with
+   * {@link deskewDeg} on the flat geometry.
+   */
+  deskewFilled?: true;
+  /**
+   * The tap's deskew could not finish in this render (its code, a readback,
+   * a render failed): the print's tilt was not checked, and a retry may
+   * succeed where this did not. Never set with {@link deskewDeg}.
+   */
+  deskewFailed?: true;
 }
 
 /** How far along a running curved-page correction is, for the page view. */
@@ -355,7 +381,25 @@ export interface ScanState {
   dewarpConsented: boolean;
   /** The correction running right now, or null. At most one page at a time. */
   dewarpActivity: DewarpActivity | null;
+  /** The last tap on Endireitar that was answered by the verdict already on screen. */
+  dewarpRetap: DewarpRetap | null;
   build: PdfBuild;
+}
+
+/**
+ * A tap on Endireitar over a page whose last answer is final for its pixels.
+ *
+ * The store does not re-run it — twelve seconds to hear the same answer — but
+ * a tap that changes nothing on screen reads as a dead control. So the refusal
+ * is recorded, and the page view answers the tap: the outcome card comes
+ * forward and says what would change the answer. `seq` grows on every such
+ * tap, so a second tap is a second answer; `revision` ties it to the pixels
+ * it was about, so any edit retires it.
+ */
+export interface DewarpRetap {
+  pageId: string;
+  revision: number;
+  seq: number;
 }
 
 /**
@@ -491,33 +535,79 @@ export function effectiveFinish(page: ScanPage): PageFinish {
 }
 
 /**
- * What the page view says about a correction that did not happen — five
- * sentences for seventeen engine reasons, because the reader needs the
+ * Whether "sem melhorias" can show this page with the improvement left out
+ * and *only* the improvement: the comparison is rendered through the
+ * confirmed outline's homography with no rotation, so any page whose pixels
+ * came out of another geometry — the engine's surface, or the outline turned
+ * by the deskew (rotated, resized, corners painted) — would put two different
+ * documents either side of the flip. Nor is there anything to compare on a
+ * page whose finish is already `original`.
+ */
+export function comparableRendering(rendered: RenderedTransforms | null): boolean {
+  return (
+    rendered !== null &&
+    rendered.finish !== "original" &&
+    !rendered.dewarped &&
+    rendered.deskewDeg === undefined
+  );
+}
+
+/**
+ * What the page view says about a correction that did not happen — six
+ * sentences for twenty-odd engine reasons, because the reader needs the
  * *consequence*, not the diagnosis.
  *
- * The first three are **deterministic for these pixels**: running again gives
- * the same answer, so their copy closes the matter ("fica melhor como está")
- * and {@link scanStore.setPageDewarp} refuses to spend twelve seconds
- * re-deriving it. The last two are worth a retry, and their copy says so.
- * `better-flat` is deliberately not a warning at all: the A/B ran end to end
- * and kept the better image — reporting that as a failure was the
- * original complaint, and it violated the honesty rule in the mirror
- * direction (claiming a failure that did not happen).
+ * The first four are **deterministic for these pixels**: running again gives
+ * the same answer, so {@link scanStore.setPageDewarp} refuses to spend twelve
+ * seconds re-deriving it (and says so, see {@link DewarpRetap}). The last two
+ * are worth a retry, and their copy says so.
+ *
+ * Only `nothing` states a fact about the page, and only because it was
+ * measured: the tap's deskew found the print level and the level page flat.
+ * Every other decline is a *limit* of the correction, not a verdict on the
+ * page, and its copy must never claim more than that — "Conferimos: fica
+ * melhor como está" over a page the engine simply could not handle (a tilt
+ * its guards read as a boundary failure, lines too merged to measure) was the
+ * dishonest sentence this split exists to retire.
  */
 export type DewarpOutcome =
-  /** The A/B compared both and the flat page reads better. Deterministic. */
-  | "better-flat"
-  /** Too little evidence to judge; kept the flat page. Deterministic. */
+  /** Already level and flat, as measured; the engine then declined. Deterministic. */
+  | "nothing"
+  /** The A/B judged the correction not safe enough to keep (#001). Deterministic. */
+  | "declined"
+  /** Too little evidence to judge; kept the flat page (#002). Deterministic. */
   | "unverified"
-  /** This page's shape is outside what the model can do. Deterministic. */
+  /** This page's shape is outside what the engine can do (#01x, #02x). Deterministic. */
   | "page"
   /** The model bytes did not arrive. Worth a retry on better signal. */
   | "download"
   /** The machinery failed mid-run. Worth a retry. */
   | "transient";
 
+/**
+ * Everything one tap on Endireitar can come to, for the page view's card:
+ * what it corrected — the print's tilt, the sheet's curl, both — or, when it
+ * corrected nothing, the {@link DewarpOutcome} that says why.
+ */
+export type StraightenOutcome =
+  /** The tilt was straightened and the level page showed no curl. */
+  | "tilt"
+  /** The engine took the curl out of print that was not tilted. */
+  | "curl"
+  /** The print was tilted and curled, and the engine corrected both. */
+  | "both"
+  /** The tilt was straightened; the curl was left as it was (the engine declined). */
+  | "tilt-only"
+  /**
+   * The tilt was straightened; the curl could not be checked this time (the
+   * engine's download or run failed) — worth a retry, and the switch is on,
+   * so the retry is off and on again.
+   */
+  | "tilt-retry"
+  | DewarpOutcome;
+
 const DEWARP_OUTCOMES: Record<string, DewarpOutcome> = {
-  "semantic-regression": "better-flat",
+  "semantic-regression": "declined",
   "semantic-insufficient-evidence": "unverified",
   "ineligible-quad": "page",
   "grid-contract": "page",
@@ -544,12 +634,21 @@ const DEWARP_OUTCOMES: Record<string, DewarpOutcome> = {
   "render-failed": "transient",
   "source-unavailable": "transient",
   "baseline-unavailable": "transient",
+  // The deskew levelled the print and found no curl, so the engine was not
+  // asked: deterministic for these pixels, and nothing went wrong. (Only ever
+  // on a rotated page, whose card is {@link StraightenOutcome}'s "tilt".)
+  "curl-absent": "nothing",
   // A cancel is the user's own act, not an outcome to report.
 };
 
 /** True when a re-run on the same pixels would give the same answer. */
 export function dewarpOutcomeIsFinal(outcome: DewarpOutcome): boolean {
-  return outcome === "better-flat" || outcome === "unverified" || outcome === "page";
+  return (
+    outcome === "nothing" ||
+    outcome === "declined" ||
+    outcome === "unverified" ||
+    outcome === "page"
+  );
 }
 
 /**
@@ -574,7 +673,90 @@ export function dewarpOutcome(
 ): DewarpOutcome | null {
   const reason = dewarpFallbackReason(page, mode);
   if (reason === null) return null;
-  return DEWARP_OUTCOMES[reason] ?? "transient";
+  const outcome = DEWARP_OUTCOMES[reason] ?? "transient";
+  // The engine's answer may be final for these pixels, but the tilt was never
+  // checked: the tap as a whole is worth another go, and its retry must not
+  // be refused as "the same answer".
+  if (page.rendered?.deskewFailed === true && dewarpOutcomeIsFinal(outcome)) return "transient";
+  // A limit of the engine on a page that, measured, needed nothing: the
+  // page's own fact is the one worth saying. A retryable failure still says
+  // it is one — the retry is the useful half there.
+  if (page.rendered?.alreadyStraight === true && dewarpOutcomeIsFinal(outcome)) return "nothing";
+  return outcome;
+}
+
+/**
+ * What the last tap on Endireitar came to, for the page view's card — the
+ * correction it made, or why it made none — or null when there is nothing
+ * to say (never asked, turned off, still rendering, edited since, cancelled,
+ * or the *other* engine's result).
+ *
+ * The same predicate as {@link dewarpOutcome} for every page the tap did not
+ * correct, so the card and the retry rule can never disagree.
+ */
+export function straightenOutcome(
+  page: ScanPage,
+  mode: DewarpEngineMode = resolveGeometryMode(),
+): StraightenOutcome | null {
+  const rendered = page.rendered;
+  if (rendered === null || rendered.revision !== page.revision) return null;
+  if (rendered.dewarpEngineMode !== mode) return null;
+  if (rendered.dewarped) {
+    // Only when the engine's surface was measured level (`dewarp-stage.ts`):
+    // it carries no rotation of its own.
+    if (rendered.deskewDeg !== undefined) return "both";
+    // The engine changed a page the deskew measured level and flat: "we took
+    // the curve out" would claim a curl that was measured absent, so the card
+    // says nothing (the tile still says the page was straightened).
+    return rendered.alreadyStraight === true ? null : "curl";
+  }
+  if (rendered.deskewDeg !== undefined) {
+    const reason = rendered.dewarpFallbackReason;
+    if (reason === undefined || reason === "curl-absent") return "tilt";
+    const curl = DEWARP_OUTCOMES[reason] ?? "transient";
+    return dewarpOutcomeIsFinal(curl) ? "tilt-only" : "tilt-retry";
+  }
+  return dewarpOutcome(page, mode);
+}
+
+/**
+ * Whether a tap's outcome is worth another go — the warn tone, the status
+ * line's sentence and the card's "try again". Only a failure of the machinery
+ * (`download`, `transient`) or a curve that could not be checked under a
+ * straightened tilt (`tilt-retry`).
+ */
+export function straightenOutcomeRetryable(outcome: StraightenOutcome | null): boolean {
+  return outcome === "download" || outcome === "transient" || outcome === "tilt-retry";
+}
+
+/**
+ * Whether the card should come forward for this re-tap answer: a new tap
+ * (`current`) since the last one the card saw (`seen`). The card starts out
+ * having seen whatever was current when it mounted, so coming back to a page
+ * does not replay a tap made before.
+ */
+export function retapPulseDue(seen: number | null, current: number | null): boolean {
+  return current !== null && current !== seen;
+}
+
+/**
+ * The support code beside {@link straightenOutcome}'s sentence: the engine's
+ * own reason whenever the curl was not corrected — including under a tilt
+ * that was — and null when nothing was declined.
+ */
+export function straightenOutcomeCode(
+  page: ScanPage,
+  mode: DewarpEngineMode = resolveGeometryMode(),
+): string | null {
+  const outcome = straightenOutcome(page, mode);
+  if (outcome === null || outcome === "tilt" || outcome === "curl" || outcome === "both") {
+    return null;
+  }
+  if (outcome === "tilt-only" || outcome === "tilt-retry") {
+    const reason = curlFallbackReason(page, mode);
+    return reason === null ? null : dewarpReasonCode(reason);
+  }
+  return dewarpOutcomeCode(page, mode);
 }
 
 /**
@@ -589,7 +771,27 @@ function dewarpFallbackReason(page: ScanPage, mode: DewarpEngineMode): string | 
   if (rendered.dewarped || rendered.dewarpFallbackReason === undefined) return null;
   // A cancel is the user's own act — nothing happened worth a sentence.
   if (rendered.dewarpFallbackReason === "cancelled") return null;
+  // The tap did correct this page — its tilt. "Mantivemos a original" would
+  // deny a correction that happened; what the curl got is
+  // {@link curlFallbackReason}'s to say.
+  if (rendered.deskewDeg !== undefined) return null;
   return rendered.dewarpFallbackReason;
+}
+
+/**
+ * Why the curl was not corrected on a page whose tilt was — the engine's own
+ * reason (`curl-absent` when it was not asked), or null when there is no
+ * such page or the curl was corrected.
+ */
+export function curlFallbackReason(
+  page: ScanPage,
+  mode: DewarpEngineMode = resolveGeometryMode(),
+): string | null {
+  const rendered = page.rendered;
+  if (rendered === null || rendered.revision !== page.revision) return null;
+  if (rendered.dewarpEngineMode !== mode || rendered.deskewDeg === undefined) return null;
+  if (rendered.dewarped) return null;
+  return rendered.dewarpFallbackReason ?? null;
 }
 
 /**
@@ -883,6 +1085,7 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
     session: null,
     dewarpConsented: false,
     dewarpActivity: null,
+    dewarpRetap: null,
     build: IDLE_BUILD,
   };
 
@@ -1062,15 +1265,50 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
    */
   const DEWARP_PROGRESS_STEP_BYTES = 262_144;
 
-  /** The last accepted map a page's curved geometry produced, and its identity. */
+  /**
+   * What a page's last Endireitar tap settled, and exactly what it was
+   * settled *for*.
+   *
+   * The key is everything the answer depends on: the pixels, the outline,
+   * the engine, and the deskew's policy. The output size is not a separate
+   * field because it is a function of the pixels and the outline (scanic's
+   * and the engine's own rule) — keying on both keys on it.
+   */
   interface DewarpReplayEntry {
     /** Reference identity, not content — `canonical` is byte-immutable and only
-     * a retake or a corner adjustment ever produces a *new* `Blob` for a page
-     * (`replaceCapture` below), so `===` is the exact "these are still the same
-     * pixels" test. */
+     * a retake produces a *new* `Blob` for a page (`replaceCapture` below), so
+     * `===` is the exact "these are still the same pixels" test. A corner
+     * adjustment keeps the Blob, which is why the corners are keyed too. */
     canonicalRef: Blob;
+    /** The outline the answer was computed on, by value. */
+    corners: NormalizedQuad | null;
     engineMode: DewarpEngineMode;
-    replay: DewarpReplay;
+    /** {@link DESKEW_POLICY_VERSION} at the time. */
+    policy: string;
+    /** The accepted map, or null when the engine declined (or was not asked). */
+    replay: DewarpReplay | null;
+    /**
+     * The deskew planned for this key: a rotation, or null for none. Absent
+     * when it was never planned. Independent of the engine — a transient
+     * engine failure keeps it, so the page never loses (or changes) its
+     * rotation on the next edit.
+     */
+    deskew?: AppliedDeskew | null;
+    /** A decline that is final for this key: the engine is not asked again. */
+    declined?: DewarpStageReason;
+    /**
+     * The deskew found the print level and the page flat when it planned
+     * `deskew: null` — measured once, on that first run, and kept with it,
+     * because a later render reuses the plan instead of measuring again.
+     */
+    alreadyStraight?: true;
+  }
+
+  function sameCorners(a: NormalizedQuad | null, b: NormalizedQuad | null): boolean {
+    if (a === null || b === null) return a === b;
+    return (["topLeft", "topRight", "bottomRight", "bottomLeft"] as const).every(
+      (key) => a[key].x === b[key].x && a[key].y === b[key].y,
+    );
   }
 
   /**
@@ -1084,22 +1322,34 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
    * moment the switch goes back on, and {@link renderRequestFor} hands it to
    * the pipeline as `dewarp.replay`. It goes stale — silently, safely — the
    * instant the canonical actually changes, because nothing here is ever read
-   * without the reference check in {@link replayFor} passing first.
+   * without the key check in {@link entryFor} passing first.
    */
   const dewarpReplays = new Map<string, DewarpReplayEntry>();
 
-  /** The stored replay for this page's *current* pixels and engine, if any. */
-  function replayFor(page: ScanPage): DewarpReplay | null {
+  /** The stored answer for this page's *current* pixels, outline, engine and policy, if any. */
+  function entryFor(page: ScanPage): DewarpReplayEntry | null {
     const entry = dewarpReplays.get(page.id);
     if (entry === undefined) return null;
     if (entry.canonicalRef !== page.canonical) return null;
+    if (!sameCorners(entry.corners, page.corners)) return null;
     if (entry.engineMode !== page.dewarpEngineMode) return null;
-    return entry.replay;
+    if (entry.policy !== DESKEW_POLICY_VERSION) return null;
+    return entry;
   }
 
   function renderRequestFor(page: ScanPage, signal?: AbortSignal): RenderRequest {
     let announced = -1;
-    const replay = page.dewarpRequested ? replayFor(page) : null;
+    const entry = page.dewarpRequested ? entryFor(page) : null;
+    const replay = entry?.replay ?? null;
+    // A map travels with the deskew it was accepted with (the record of a tilt
+    // the engine levelled); a decline with its deskew and its verdict.
+    const known =
+      entry === null
+        ? {}
+        : {
+            ...(entry.deskew === undefined ? {} : { deskew: entry.deskew }),
+            ...(replay !== null || entry.declined === undefined ? {} : { declined: entry.declined }),
+          };
     return {
       canonical: page.canonical,
       corners: page.corners,
@@ -1112,6 +1362,7 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
             generation: page.revision,
             engineMode: page.dewarpEngineMode,
             ...(replay === null ? {} : { replay }),
+            ...known,
             onPhase: (progress) => {
               const received = progress.received ?? 0;
               const total = progress.total ?? 0;
@@ -1154,6 +1405,9 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
       const mode = page.dewarpEngineMode;
       const controller = page.dewarpRequested ? new AbortController() : null;
       if (controller !== null) dewarpAborts.set(pageId, controller);
+      // What the store already knew about these pixels when this render set
+      // out — the level-and-flat verdict is measured only on a fresh plan.
+      const knownBefore = page.dewarpRequested ? entryFor(page) : null;
       try {
         const rendered = await pipeline.render(
           renderRequestFor(page, controller?.signal),
@@ -1161,6 +1415,17 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
         // The page moved on while we worked. Its successor owns the state now.
         if (findPage(pageId)?.revision !== revision) return;
         const reason = rendered.dewarpFallbackReason;
+        // A rotation the tap applied is a correction the page got, whatever
+        // the engine then said about the curl: the switch stays on over it.
+        // A cancel is the user taking the whole tap back (the page renders
+        // without the rotation too).
+        const deskew = rendered.deskew ?? null;
+        const keptByDeskew = deskew !== null && reason !== "cancelled";
+        const alreadyStraight =
+          deskew === null &&
+          reason !== "cancelled" &&
+          (rendered.alreadyStraight === true ||
+            (rendered.alreadyStraight === undefined && knownBefore?.alreadyStraight === true));
         patchPage(pageId, {
           status: "ready",
           final: rendered.final,
@@ -1175,6 +1440,12 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
             dewarped: rendered.dewarped,
             dewarpEngineMode: mode,
             ...(reason === undefined ? {} : { dewarpFallbackReason: reason }),
+            ...(deskew === null || reason === "cancelled" ? {} : { deskewDeg: deskew.plan.deg }),
+            ...(deskew !== null && reason !== "cancelled" && rendered.deskewFilled === true
+              ? { deskewFilled: true as const }
+              : {}),
+            ...(rendered.deskewFailed === true && reason !== "cancelled" ? { deskewFailed: true as const } : {}),
+            ...(alreadyStraight ? { alreadyStraight: true as const } : {}),
           },
           // Any fallback hands the switch back: the toggle reflects the
           // page the user is looking at, not the wish they once expressed — a
@@ -1182,7 +1453,7 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
           // reported as a bug. The outcome itself stays on `rendered`, where
           // the page view reads it. Clearing the request *here* rather than at
           // the tap is also what keeps a cancel from costing a second render.
-          ...(reason === undefined ? {} : { dewarpRequested: false }),
+          ...(reason === undefined || keptByDeskew ? {} : { dewarpRequested: false }),
           error: null,
         });
         if (onQuality !== null) {
@@ -1202,14 +1473,36 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
           });
         }
         // The store's own replay cache, independent of `page-processing.ts`'s
-        // per-render memo: this is what a *later* toggle-off/toggle-on reads
-        // (`replayFor`, above), not just a retry inside this one render.
+        // per-render memo: this is what a *later* toggle-off/toggle-on — or
+        // any edit that leaves pixels and outline alone — reads (`entryFor`,
+        // above), not just a retry inside this one render.
+        const key = {
+          canonicalRef: page.canonical,
+          corners: page.corners,
+          engineMode: mode,
+          policy: DESKEW_POLICY_VERSION,
+        };
         if (rendered.dewarped && rendered.dewarpReplay) {
           dewarpReplays.set(pageId, {
-            canonicalRef: page.canonical,
-            engineMode: mode,
+            ...key,
             replay: rendered.dewarpReplay,
+            ...(rendered.deskew === undefined ? {} : { deskew: rendered.deskew }),
+            ...(alreadyStraight ? { alreadyStraight: true as const } : {}),
           });
+        } else if (page.dewarpRequested && reason !== undefined && reason !== "cancelled") {
+          const final = dewarpOutcomeIsFinal(DEWARP_OUTCOMES[reason] ?? "transient");
+          // The deskew's answer stands on its own: kept through a transient
+          // engine failure (the engine is asked again next time, the rotation
+          // is not re-planned); a final decline is kept with it.
+          if (rendered.deskew !== undefined || final) {
+            dewarpReplays.set(pageId, {
+              ...key,
+              replay: null,
+              ...(rendered.deskew === undefined ? {} : { deskew: rendered.deskew }),
+              ...(final ? { declined: reason as DewarpStageReason } : {}),
+              ...(alreadyStraight ? { alreadyStraight: true as const } : {}),
+            });
+          }
         }
       } catch (error) {
         // A pass that was replaced mid-flight is not a failure to report: the
@@ -1240,7 +1533,7 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
     dewarpAborts.clear();
     // The replay cache is keyed by page id, and a fresh scan reuses ids from
     // nothing — but a stale entry here is only ever dead weight, never wrong
-    // (`replayFor`'s reference check would refuse it anyway), so this is
+    // (`entryFor`'s key check would refuse it anyway), so this is
     // hygiene, not correctness.
     dewarpReplays.clear();
   }
@@ -1336,6 +1629,7 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
           documentName: null,
         },
         dewarpActivity: null,
+        dewarpRetap: null,
         build: IDLE_BUILD,
       });
     },
@@ -1346,7 +1640,7 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
       abandonDewarps();
       queuedRenders.clear();
       currentBuild = 0;
-      setState({ session: null, dewarpActivity: null, build: IDLE_BUILD });
+      setState({ session: null, dewarpActivity: null, dewarpRetap: null, build: IDLE_BUILD });
     },
 
     addCapture(input: CaptureInput): void {
@@ -1477,10 +1771,19 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
       if (requested === active) return;
       if (requested) {
         // A verdict that is deterministic for these exact pixels is not worth
-        // twelve seconds to re-derive: the outcome line is already on screen,
-        // and the answer cannot change until an edit changes the pixels.
+        // twelve seconds to re-derive: the answer cannot change until an edit
+        // changes the pixels. The tap is still answered (`DewarpRetap`).
         const outcome = dewarpOutcome(page, mode);
-        if (outcome !== null && dewarpOutcomeIsFinal(outcome)) return;
+        if (outcome !== null && dewarpOutcomeIsFinal(outcome)) {
+          setState({
+            dewarpRetap: {
+              pageId,
+              revision: page.revision,
+              seq: (state.dewarpRetap?.seq ?? 0) + 1,
+            },
+          });
+          return;
+        }
       }
       reviseAndRender(pageId, () => ({
         dewarpRequested: requested,
@@ -1686,6 +1989,15 @@ export function createScanStore(options: ScanStoreOptions = {}): ScanStore {
             finish: rendered.finish,
             rotation: rendered.rotation,
             dewarped: rendered.dewarped,
+            // A rotation the pixels carry (the flat geometry only: an engine
+            // surface is never rotated, and "dewarped" already says it was
+            // remade), and whether paper was painted into its corners.
+            ...(rendered.deskewDeg !== undefined && !rendered.dewarped
+              ? {
+                  deskewDeg: rendered.deskewDeg,
+                  ...(rendered.deskewFilled === true ? { filled: true } : {}),
+                }
+              : {}),
           },
         });
       }

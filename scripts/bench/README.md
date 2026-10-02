@@ -21,6 +21,10 @@ npm run bench -- --suite session --session regression --seeds 5   # the adversar
 npm run bench -- --suite session --session guidance --seeds 5     # hints, the ready cue, auto-capture (Phase 4)
 npm run bench:webkit                                       # the flow end to end in WebKit, both lanes
 npm run bench -- --suite emulator --seeds 10               # the emulator's own GT check
+npm run bench -- --suite straighten --quick               # Endireitar, 83 scenes, ~1 min (Node, no browser)
+npm run bench -- --suite straighten                        # all 279 scenes, ~4 min at --jobs 8 (12 cores)
+npm run bench -- --suite straighten --compare .bench-out/latest-straighten/results.json
+npm run bench -- --suite straighten --engine-root ../other-worktree --sheets   # score another checkout's engine
 npm run bench:play                                         # the playground, in a Chromium window
 npm run bench:play -- --no-browser                         # …or serve it and open the URL yourself
 node scripts/bench/server.mjs                              # serve the bench pages, print the URL
@@ -29,6 +33,8 @@ node scripts/bench/server.mjs                              # serve the bench pag
 export SCAN_REAL_MEDIA=/path/to/real/photos-and-clips
 npm run bench -- --suite real-stills                       # ~10 s
 npm run bench -- --suite real-video                        # ~2 min, incl. replay through the app
+SCAN_BENCH_LABELS=~/.cache/scan-bench/labels/scan-bench-labels.json \
+  npm run bench -- --suite straighten-real                  # Endireitar on the labelled stills, ~1 min
 npm run bench:label                                        # label pages by hand, print the URL
 node scripts/bench/real.mjs                                # extract clip frames, list what was found
 ```
@@ -447,6 +453,8 @@ several seeds.
 
 ~/.cache/scan-bench/frames/<clip>/{replay,sparse}/   real clips' frames (ffmpeg, once)
 ~/.cache/scan-bench/runs/real-{stills,video}-<stamp>/ real reports, results, sheets — never in the repo
+.bench-out/straighten-<stamp>/{report.md,results.json,sheets/*.png}   Endireitar, synthetic
+~/.cache/scan-bench/runs/straighten-real-<stamp>/       Endireitar on real stills — never in the repo
 ~/.cache/scan-bench/labels/scan-bench-labels.json    labels, when next to the media is not allowed
 ```
 
@@ -1092,6 +1100,200 @@ receives a `structuredClone` of each event: nothing it keeps or mutates can
 reach a quad the scanner is using. Nothing is buffered or sent; events are
 numbers and normalized corners, never pixels.
 
+## Endireitar: the straighten suites (`--suite straighten`, `--suite straighten-real`)
+
+The detector suites ask "would the crop have been right?"; these ask the same
+of the **Endireitar** tap: *is the page the user now sees straighter than the
+flat page of the outline they confirmed, and did anything get worse?*
+
+**What runs.** The real engine — the checkout's `src/lib/dewarp/*.ts` and the
+dewarp wasm named by its own `wasm-manifest.json` — driven the way
+`dewarp-stage.ts` drives it: a 896 px baseline, the padded crop, the output
+size, the engine's A/B verdict and its guards (`straighten/engine-host.mjs`).
+The baseline's corners go onto the 896 px copy per axis, by the engine's own
+`quadOnScaledCopy` (pixel centre to pixel centre) when the engine exports it
+and linearly, as older app code did, when it does not; the copy is handed to
+the engine as `baselineSource`, which older engines ignore. The app's worker is replaced by an in-thread stand-in that makes exactly the
+worker's calls. When the engine root has a text-deskew module
+(`src/lib/deskew.ts`), the step runs first (`straighten/deskew-step.mjs`,
+`--deskew auto|off|paper|crop`; `auto` = `paper` when the module exists). A
+module that exports `planStraighten` (the app's own step) is driven the way
+`dewarp-stage.ts` drives it: one 896 px copy, B₀ of the confirmed outline, the
+rotation estimated and judged against B₀, and the engine run — on the
+confirmed outline, with B₀ as its A/B baseline — only when the step asks for
+it (no rotation, or a level page that still shows a curl). The page the user
+sees is the engine's surface (never rotated) when it accepts, else the flat
+page of the rotated outline with its wedges painted. A page the step levelled
+with no curl is recorded as engine outcome `#050 curl-absent`, with no engine
+time. `SCAN_STRAIGHTEN_CURL_GATE=always|never` forces the engine on or off on
+every rotated page — a diagnostic for choosing the curl gate from two runs,
+never the app's behaviour. An older module (`planDeskew`, the F5 prototype's)
+is driven the way that prototype drove it: the rotated outline replaces the
+confirmed one and the engine always runs.
+
+**Why Node, not the bench page.** The engine has no DOM in its path, a page
+takes seconds of single-threaded wasm, and a run is 279 of them: the suite
+shards its scenes over `--jobs` Node processes (`straighten/worker.mjs`,
+default 8), which one Chromium page cannot do, and it can load the engine from
+**any** checkout (`--engine-root dir`, or `ENGINE_ROOT`) so a prototype
+worktree is scored with this bench's metrics. A command that runs only
+straighten suites builds no bench page and launches no browser.
+
+**Scenes.** `straighten/scenes.mjs` renders a photo and its confirmed outline
+from a physical chain with the truth known exactly: print tilted θ on the
+sheet, a cylinder curl seen by a pinhole camera, the sheet turned φ in the
+frame, sensor noise, uneven light and a camera blur. The full profile is 279
+scenes — tilt × layout (paragraphs, block, two columns, form) × outline
+(correct, full-frame, jittered), in-frame rotation, curl × tilt × outline,
+rotation × curl — of which 255 should act (|θ| ≥ 0.5° or any curl). `--quick`
+is an 83-scene screen of the same (every layout, family and outline mode).
+`--only regex` narrows either by scene id. `straighten-real` puts the same θ
+into every labelled real still (`straighten/real-scenes.mjs`): the print
+rotated inside a right outline (`interior`, the common case), the whole photo
+rotated with its outline (`rot-quad`, nothing to do) or without it
+(`rot-origquad`), plus the still itself — 16 scenes a still, 7 in `--quick`.
+
+**Verdicts** (`straighten/score.mjs`, unit-tested in `straighten-*.test.mjs`).
+Every finished page is judged against **the original flat page of the
+confirmed outline** — never against itself, and never against a rotated
+outline. A should-act page lands in exactly one of five classes, all over the
+same denominator:
+
+| class | the page the user sees |
+|---|---|
+| `noop` | the flat page: nothing acted |
+| `harm` | acted and got worse: \|tilt\| up by > 0.3°, bow up by > max(0.15 %, 25 %) (engine surfaces only — a rotation cannot bend lines), print lost, table brought into a straight page or around print shrunk into it, or the page's aspect off the flat page's by > 1 % (stretched) |
+| `unverified` | acted, no harm found, but a check it needed could not be measured (a NaN tilt or bow, too little print) — **never** a success |
+| `complete` | no harm, \|tilt\| ≤ 0.35°, bow ≤ 60 % of the flat page's |
+| `partial` | acted, measured, no harm, not complete |
+
+A page with nothing to do is `left-alone`, `harm`, `unverified` or `acted-ok`.
+**Print lost** is judged on absolute ink (the ink over the whole page area,
+< 92 % of the flat page's), on the ink in each border band and on the ink's
+bounding box (print pushed into a border the flat page's print kept clear
+of) — not on ink density over the visible sheet, which a kept wedge of table
+fools one way and a sheet that grew the other. Print that lost ink but shrank
+with its bounding box alike on both axes, touching no new border, was scaled
+down, not cut: it is reported as shrunk, not as print lost (a page shrunk into
+a frame of table is still harm, as background brought in). Table newly in the border of a *tilted* page is the price of turning its
+print — by the deskew or by the engine levelling the lines it models, which
+uncovers the same corners — unless the print shrank with it (`shrunk`): a
+page scaled into a frame of table is harm whatever its tilt. A shrink too
+mild to lose 8 % of the ink is not detected; that is this check's blind spot.
+**Painted** pages carry fill
+without the photo's grain; a **seam** is a fill that steps more than 6 grey
+levels against the paper beside it; both are net of what the flat page
+itself shows, and **dark wedges** count table newly in the border band. The
+seam looks for paper up to two blocks (about 2 % of the long edge) from each
+painted block, so on a sheet lit steeply toward its edge it also counts the
+light's own gradient; each deskewed record therefore carries `fillStep`, the
+fill against the real paper right across the fill's edge (p10/p50/p90, grey
+levels, + = fill brighter).
+Counts sit beside every rate in the report.
+
+**What the card says.** The report also tallies the sentence the page view
+would show after the tap (`straightenOutcome` in `scan-store.ts`, rebuilt from
+each record by `cardOf` in `straighten/score.mjs`: tilt, curl, both,
+tilt-only, nothing, or the decline's bucket) against each page's verdict.
+`nothing` ("already level and flat") comes from the deskew's own measurement
+of a page it found level (`deskew.level`), and only when that measurement
+looked for a bow on enough lines (`level.flat`, `measuredFlat`); on a
+should-act page it is a false claim, and every such page is listed by name.
+`both` needs the engine's surface measured level (`deskew.engineLevel`,
+`measuredLevel`): otherwise the card is `curl`. `tilt-retry` is a turned page
+whose curve could not be checked (the engine failed rather than declined). `none` is a page the engine
+changed although the deskew measured it level and flat: the app shows no
+card there rather than claim a curl.
+
+**Provenance and runtime.** `config.engine` records the engine root, its HEAD
+and — when it has uncommitted changes — a sha256 over its diff and untracked
+files, so "the same dirty worktree" is provably the same code or not. The
+engine's hard timeout is the app's own, capped at 30 s: a slower page is the
+timeout the app would show, counted as such. Timeouts and pages over the 12 s
+device budget (engine + deskew) depend on load, so they only compare between
+runs at the same `--jobs`.
+
+**`--compare`.** Only runs over the same scenes (profile, `--only`, scene
+hash, rendering), `--jobs` and timeout compare; the engine root and deskew
+mode are what is being compared. The gated headlines (larger is worse) are
+`unfixedRate` (1 − complete), `noopRate`, `harmCount`, `flatHarms`,
+`unverifiedCount`, `curlUnfixedRate`, `residTiltP90`, `seamCount`, `timeouts`
+and `overBudget`, per group (`ALL`, each family, `tilt/correct`; per variant
+for real media). On top, **every scene** that was a complete fix and no longer
+is (a lost fix), and every scene harmed now that was not (a new harm), fails
+the run by name, whatever the totals say. A scene that crashed is an absolute
+failure.
+
+**Sheets.** `--sheets` writes a before/after PNG (flat page | page the user
+sees) for each flagged scene — harms, unverified pages, seams, and with
+`--compare` lost fixes and newly acted pages — into the run's `sheets/`
+(for `straighten-real`, in the cache: real pixels never enter the repository).
+
+**Curl on real stills is not graded.** Their truth has no curl (`"unknown"`):
+a real page is `complete` on its tilt and on no harm alone, and a still's own
+base and `rot-quad` variants are "nothing to do" only in the tilt the suite
+added, not in whatever skew or curl the photo itself has. The real report
+says so above its headline.
+
+**Baseline** (engine 1e0548d, no deskew step, full profile, `--jobs 8`): of
+255 should-act synthetic pages 49 complete (19.2 %), 7 partial, 198 no-op
+(77.6 %), 1 harm, 0 unverified; 3 harms over all 279 pages (a bowed
+full-frame form and two pages shrunk into a frame of table at 10° in-frame
+rotation); tilt-only pages 36/204 complete (tilted print in a correct outline
+9/64); curl 13/51; residual tilt p50/p90 3.0°/10.0°; 6 pages over the 12 s
+budget, no timeouts. Real stills (3 labelled): 4/30 complete, 26 no-op, no
+harm.
+
+**The deskew step** (engine d24bdb2 plus `src/lib/deskew.ts`, full profile,
+`--jobs 8`, against the same engine without it): complete 81 → 225 of 255
+(tilt-only 56 → 200 of 204, tilted print in a correct outline 64/64), harms
+3 → 1 (the bowed full-frame form, untouched by the step), curl 25/51
+unchanged, residual tilt p90 10° → 0°, seams 0, 1 page over the 12 s budget
+(6 before: the engine now runs on 78 of 279 pages). The one lost fix,
+`tilt/form/jitter/t2`, is a jittered outline whose leftover perspective the
+engine used to straighten; the step levels it to 0.41° and, finding no curl,
+does not ask the engine. The step itself costs 297/464 ms (p50/p90) in
+Node at `--jobs 8`. Real stills: 7 → 21 of 30 complete, no harm, no lost fix; 12–14
+pages flag a seam while the fill's own step across its edge stays within
+±3 grey levels at p90 on all but two.
+
+The sideways refusal then compared raw projection energy, and a dense form
+(still 145830) read as on its side at every tilt from 2° to 8°: 12 of the
+real pages' abstains. Compared by peak sharpness instead, real stills go to
+23 of 30 complete, 3 partial, 4 no-op, no harm, no lost fix; the synthetic
+run is unchanged scene for scene (its 9 sideways abstains become
+low-confidence ones).
+
+The two real pages whose fill stepped far from the paper beside it
+(145810 `interior` at 6° and 8°, `fillStep` p90 146 and 173 grey levels)
+were one case: a wedge kept because the frame already showed the table
+there, running past the photo, where everything was painted paper — a paper
+patch inside a strip of table. Past the photo, such a wedge now keeps
+scanic's clamp (the photo's edge, which is that table), and a wedge with
+nothing inside the photo to judge follows the border it lies beyond. Every
+deskewed real page's `fillStep` p90 is now within 2 grey levels; the
+synthetic fill is unchanged pixel for pixel (no synthetic scene has such a
+wedge). `seamCount` on the real stills stays at 18: on these photos the
+flat page's own paper blocks within two blocks of each other already differ
+by 18–22 grey levels at p90 (43–58 at p99), against the 6 the seam flag
+allows, so there it counts the light more than the fill.
+
+**After the review fixes** (engine 7b48f49, bench 1d41453, full profile,
+`--jobs 8`, verdicts of both runs by this scorer): against the step-0
+baseline, complete 49 → 225 of 255 (tilt-only 36 → 200 of 204, tilted print
+in a correct outline 64/64 at every tilt from 0.5° to 15°), curl 13 → 25 of
+51, no-op 198 → 20, harms 3 → 1 (the bowed full-frame form), unverified 0,
+residual tilt p90 10° → 0°, 1 page over the 12 s budget (6 before), deskew
+323/418 ms p50/p90 in Node. Scene for scene against 0c95359 nothing changed
+class: the turned pages now keep the flat page's size (their aspect drifted
+by up to a few percent before, unscored), three `both` cards whose engine
+surface kept 0.5–1.6° of tilt now read `curl`, and one seam flag flips at
+its own threshold (tilt/twocol/jitter/t5: 3 blocks at 6.0 grey levels
+against 5.8 before; the fill's step across its edge is −1/0/+1 at
+p10/p50/p90 in both). Real stills: 4 → 23 of 30 complete (interior 2 → 12
+of 15), no harm, no lost fix, identical classes to 0c95359; the seam count
+stays at 18 for the reason above.
+
 ## Status
 
 Phase 3 (the live loop) added the sustained session, remounts and leak
@@ -1118,7 +1320,7 @@ fire and no fire in a tremor window either, latency p50 2.3 s (the ready cue
 waits for five readings of a still page).
 
 Implemented: probe, server, bench page, the `detector`, `session`,
-`real-stills`, `real-video` and `emulator` suites, metrics, report,
+`real-stills`, `real-video`, `emulator`, `straighten` and `straighten-real` suites, metrics, report,
 `--compare`, families F1–F7, the session emulator and fake camera, real-media
 extraction, the labelling page (`bench:label`) and the playground
 (`bench:play`); Phase 2's edge refinement with its `refined` / `ml+refine`

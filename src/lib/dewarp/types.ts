@@ -151,7 +151,8 @@ export type DewarpFallbackReason =
  * `#03x` assets, `#04x` the machinery around a run (including the two the
  * *stage* adds rather than the engine — `source-unavailable` and
  * `baseline-unavailable`, which happen before the engine is called and are
- * listed here so that support has one table rather than two). `#1xx` is the
+ * listed here so that support has one table rather than two), `#05x` the
+ * text deskew the stage runs before the engine (`lib/deskew.ts`). `#1xx` is the
  * session latch's own family and lives with the latch (`lib/dewarp-stage.ts`).
  *
  * Keyed by `string` rather than by {@link DewarpFallbackReason} on purpose:
@@ -182,6 +183,9 @@ export const DEWARP_REASON_CODES: Record<string, string> = {
   "render-failed": "#043",
   "source-unavailable": "#044",
   "baseline-unavailable": "#045",
+  // The deskew levelled the print and the level page showed no curl: the
+  // engine was not asked. An outcome, not a failure.
+  "curl-absent": "#050",
 };
 
 /**

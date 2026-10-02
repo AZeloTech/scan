@@ -15,7 +15,7 @@
  */
 
 import { composeInto, pixelFraction, type CoarseGrid } from "./grid.ts";
-import type { CropBox, RgbaImage } from "./types.ts";
+import type { CropBox, DewarpPoint, DewarpQuad, RgbaImage } from "./types.ts";
 
 /**
  * Rows per resumable step.
@@ -103,6 +103,70 @@ export interface TiledRenderRequest {
   width: number;
   height: number;
   tileRows?: number;
+  /**
+   * Set when `source` is a scaled copy of the canonical rather than the
+   * canonical itself: the copy's size over the canonical's, per axis.
+   *
+   * Only the semantic A/B uses it: it samples the *same* small copy the
+   * caller's flat baseline was warped from, so both renderings inherit the
+   * same resampling chain. Positions go through {@link toScaledCopy}, the
+   * pixel-centre mapping the copy's own `drawImage` used. Absent, the source
+   * is sampled at the composed position untouched — the full-size render is
+   * not one arithmetic operation different from what it always was.
+   */
+  sourceScale?: CopyScale;
+}
+
+/** A scaled copy's size over its original's, per axis. */
+export interface CopyScale {
+  x: number;
+  y: number;
+}
+
+/**
+ * The per-axis scale of `copy` against `original`.
+ *
+ * Per axis because the copy's size is rounded per axis (`scaleSurface` hands
+ * `drawImage` two integers): one shared factor would put the far edge of the
+ * other axis up to half a copy pixel off.
+ */
+export function copyScale(
+  original: { width: number; height: number },
+  copy: { width: number; height: number },
+): CopyScale {
+  return {
+    x: copy.width / Math.max(1, original.width),
+    y: copy.height / Math.max(1, original.height),
+  };
+}
+
+/**
+ * A pixel position in an image → the same place in a scaled copy of it.
+ *
+ * `(p + ½)·s − ½`, not `p·s`. Every sampler here, scanic's included, reads a
+ * position as a pixel *index* (pixel `i` is sampled whole at `i`), while
+ * `drawImage(src, 0, 0, w, h)` scales the image's *area*: the centre of copy
+ * pixel `j`, at `j + ½`, is the original's `(j + ½)/s`. Any centre-aligned
+ * filter does this — bilinear, box or mipmapped — which is why the rule can
+ * be exact without knowing the browser's. `p·s` is off by `½(1 − s)` of a copy
+ * pixel: a third of one at 896 px from 12 MP, toward the top-left.
+ */
+export function toScaledCopy(position: number, scale: number): number {
+  return (position + 0.5) * scale - 0.5;
+}
+
+/** {@link toScaledCopy} for a quad — the baseline's corners on the small copy. */
+export function quadOnScaledCopy(quad: DewarpQuad, scale: CopyScale): DewarpQuad {
+  const at = (point: DewarpPoint): DewarpPoint => ({
+    x: toScaledCopy(point.x, scale.x),
+    y: toScaledCopy(point.y, scale.y),
+  });
+  return {
+    topLeft: at(quad.topLeft),
+    topRight: at(quad.topRight),
+    bottomRight: at(quad.bottomRight),
+    bottomLeft: at(quad.bottomLeft),
+  };
 }
 
 /** A render in progress. `step()` does one band and reports whether it finished. */
@@ -129,6 +193,7 @@ export function startTiledRender(request: TiledRenderRequest): TiledRender {
   const image: RgbaImage = { width, height, data };
   const point = { x: 0, y: 0 };
   const rgb = new Float64Array(3);
+  const scale = request.sourceScale;
   let nextRow = 0;
 
   return {
@@ -152,7 +217,16 @@ export function startTiledRender(request: TiledRenderRequest): TiledRender {
             v,
             point,
           );
-          sampleRgb(request.source, point.x, point.y, rgb);
+          if (scale === undefined) {
+            sampleRgb(request.source, point.x, point.y, rgb);
+          } else {
+            sampleRgb(
+              request.source,
+              toScaledCopy(point.x, scale.x),
+              toScaledCopy(point.y, scale.y),
+              rgb,
+            );
+          }
           data[offset] = rgb[0];
           data[offset + 1] = rgb[1];
           data[offset + 2] = rgb[2];

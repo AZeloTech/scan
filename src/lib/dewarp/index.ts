@@ -12,11 +12,12 @@
  *
  * Two seams are deliberate. The engine **does not compute homographies**: the
  * caller renders its own flat baseline (small — ~448 px long edge is plenty)
- * and hands it in, because the flat path already exists, already has a
- * canonical implementation, and must not grow a second one in here. And the
- * engine **does not decide what the user waits for**: it measures its own
- * device gate and exposes it, leaving the 12-second policy to integration,
- * where a spinner and a piece of copy live.
+ * and hands it in — with the small copy it warped it from, so the A/B can put
+ * its candidate through the same resampling — because the flat path already
+ * exists, already has a canonical implementation, and must not grow a second
+ * one in here. And the engine **does not decide what the user waits for**: it
+ * measures its own device gate and exposes it, leaving the 12-second policy to
+ * integration, where a spinner and a piece of copy live.
  *
  * No UI, no i18n, no store. Every string that leaves this file is a stable
  * identifier for telemetry, never something a person reads.
@@ -49,10 +50,10 @@ import {
   parseGridTensor,
 } from "./grid.ts";
 import type { CoarseGrid } from "./grid.ts";
-import { fitLongEdge, renderThroughGrid, startTiledRender } from "./sampler.ts";
+import { renderThroughGrid, startTiledRender } from "./sampler.ts";
 import {
-  SEMANTIC_LONG_EDGE,
   measureSurface,
+  renderSemanticCandidate,
   semanticVerdict,
 } from "./semantic.ts";
 import type { SemanticVerdict } from "./semantic.ts";
@@ -82,6 +83,7 @@ export {
   renderKeyFor,
 } from "./crop.ts";
 export { resolveGeometryMode, type DewarpEngineMode } from "./engine-mode.ts";
+export { copyScale, quadOnScaledCopy, type CopyScale } from "./sampler.ts";
 export type * from "./types.ts";
 
 /**
@@ -201,6 +203,14 @@ export interface RunDewarpOptions {
    * Anything up to ~448 px on the long edge; larger is downscaled here.
    */
   baseline: RgbaImage;
+  /**
+   * The scaled copy of `canonical` that `baseline` was warped from.
+   *
+   * Optional, but the A/B is only fair with it: the candidate is then rendered
+   * from these same pixels at the baseline's own size, so both sides carry the
+   * same resampling blur (see `renderSemanticCandidate`).
+   */
+  baselineSource?: RgbaImage;
   onPhase?: (progress: DewarpProgress) => void;
   signal?: AbortSignal;
 }
@@ -583,14 +593,19 @@ class Engine implements DewarpEngine {
     if (aborted()) return finish(stopped());
 
     // The A/B runs at the comparison size, not the page's: it decides whether
-    // the expensive render is worth doing at all.
-    const preview = fitLongEdge(job.outputWidth, job.outputHeight, SEMANTIC_LONG_EDGE);
-    const candidate = renderThroughGrid({
-      source: options.canonical,
+    // the expensive render is worth doing at all. And through the baseline's
+    // own chain — same small source, same warp size — or the flat page's extra
+    // resampling blur reads as ink the dewarp "lost".
+    const candidate = renderSemanticCandidate({
+      canonical: options.canonical,
+      baseline: options.baseline,
+      ...(options.baselineSource === undefined
+        ? {}
+        : { baselineSource: options.baselineSource }),
       grid,
       crop: job.crop,
-      width: preview.width,
-      height: preview.height,
+      outputWidth: job.outputWidth,
+      outputHeight: job.outputHeight,
       shouldCancel: aborted,
     });
     if (candidate === null) return finish(stopped());
