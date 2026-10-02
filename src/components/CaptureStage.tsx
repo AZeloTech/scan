@@ -37,7 +37,7 @@ import {
 import { prefetchDewarpAssets } from "@/lib/dewarp/prefetch";
 import { connectionKind, shouldPrefetchHeavyAssets } from "@/lib/network";
 import { captureFromFile, type Capture, type CapturePath, type CaptureSizes } from "@/lib/capture-intake";
-import { FILL_NEAR, type HintKey } from "@/lib/guidance";
+import { FILL_NEAR, type HintKey, type MoveDirection } from "@/lib/guidance";
 import { assessSource, type GateReading } from "@/lib/capture-gate";
 import { normalizedCoverage, type NormalizedQuad } from "@/lib/quad";
 import { refineOnCanvas } from "@/lib/refine";
@@ -1341,17 +1341,25 @@ export function CaptureStage({
   }, [shownHints]);
 
   // ── the diagnostics stream (`onDiagnostics`): hints, and the live loop sampled ──
-  const hintShownRef = React.useRef<{ key: HintKey; at: number } | null>(null);
+  // "Mova o celular" turning to another way is another hint shown: it ends the
+  // one before (its `direction` enum rides along).
+  const shownDirection: MoveDirection | null = shownHint === "move-phone" ? detect.hintDirection : null;
+  const hintShownRef = React.useRef<{ key: HintKey; direction: MoveDirection | null; at: number } | null>(null);
   React.useEffect(() => {
     if (diagnosticsSink === null) return;
     const previous = hintShownRef.current;
-    if ((previous?.key ?? null) === shownHint) return;
+    if ((previous?.key ?? null) === shownHint && (previous?.direction ?? null) === shownDirection) return;
     const now = performance.now();
     const fill = detect.diagnostics().fill;
-    if (previous !== null) diagnosticsSink.emit({ type: "hint", id: previous.key, shown: false, ms: now - previous.at, fill });
-    hintShownRef.current = shownHint === null ? null : { key: shownHint, at: now };
-    if (shownHint !== null) diagnosticsSink.emit({ type: "hint", id: shownHint, shown: true, ms: null, fill: detect.hintFill ?? fill });
-  }, [diagnosticsSink, shownHint]);
+    const way = (direction: MoveDirection | null) => (direction === null ? {} : { direction });
+    if (previous !== null) {
+      diagnosticsSink.emit({ type: "hint", id: previous.key, shown: false, ms: now - previous.at, fill, ...way(previous.direction) });
+    }
+    hintShownRef.current = shownHint === null ? null : { key: shownHint, direction: shownDirection, at: now };
+    if (shownHint !== null) {
+      diagnosticsSink.emit({ type: "hint", id: shownHint, shown: true, ms: null, fill: detect.hintFill ?? fill, ...way(shownDirection) });
+    }
+  }, [diagnosticsSink, shownHint, shownDirection]);
 
   const loopStateRef = React.useRef({ running: false, found: false });
   // Diagnostics-only state: nothing is built for it without a sink.
@@ -1615,6 +1623,19 @@ export function CaptureStage({
           </svg>
         )}
 
+        {mode === "live" && (
+          // "Mova o celular"'s arrow: pinned by the live loop to the visible
+          // edge the phone should move toward (`data-direction`, empty when
+          // that hint is not up), pointing the way. The hint's words carry it
+          // for a screen reader.
+          <div ref={detect.overlay.nudge} data-scan-nudge="" data-direction="" aria-hidden="true">
+            <svg viewBox="0 0 40 40" fill="none" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20 31V10M11 18l9-9 9 9" className="stroke-night/85" strokeWidth={8} />
+              <path d="M20 31V10M11 18l9-9 9 9" className="stroke-warm" strokeWidth={4} />
+            </svg>
+          </div>
+        )}
+
         {chrome === undefined && mode === "live" && (
           // The hint slot: one hint at a time, in a box of fixed height that
           // is there whether it holds anything or not — a hint coming or
@@ -1627,7 +1648,7 @@ export function CaptureStage({
           >
             {shownHint !== null && (
               <Chip mono tone={HINT_TONE[shownHint]} className="shadow-sm">
-                {hintCopy(copy.capture.hints, shownHint, detect.hintFill)}
+                {hintCopy(copy.capture.hints, shownHint, detect.hintFill, detect.hintDirection)}
               </Chip>
             )}
             {offerTorch && (
@@ -1816,7 +1837,7 @@ export function CaptureStage({
           hint:
             shownHint === null
               ? null
-              : { key: shownHint, text: hintCopy(copy.capture.hints, shownHint, detect.hintFill), tone: HINT_TONE[shownHint] },
+              : { key: shownHint, text: hintCopy(copy.capture.hints, shownHint, detect.hintFill, detect.hintDirection), tone: HINT_TONE[shownHint] },
           torchOffer: offerTorch
             ? () => {
                 setTorchOn(true);
@@ -1916,7 +1937,7 @@ const HINT_TONE: Record<HintKey, "night" | "alert" | "warning"> = {
   searching: "night",
   "not-found": "alert",
   "move-back": "night",
-  center: "night",
+  "move-phone": "night",
   "move-closer": "night",
   "corner-covered": "warning",
   "separate-sheets": "warning",
@@ -1928,9 +1949,15 @@ const HINT_TONE: Record<HintKey, "night" | "alert" | "warning"> = {
 /**
  * A hint's words. "Aproxime" for a page that already nearly fills the view
  * when the hint appeared (`fill`, kept while it shows) is "Aproxime mais um
- * pouco": a small move asked for, not a big one that overshoots.
+ * pouco": a small move asked for, not a big one that overshoots. "Mova o
+ * celular" says which way (`direction`, kept while it shows).
  */
-function hintCopy(hints: ReturnType<typeof useCopy>["capture"]["hints"], key: HintKey, fill: number | null): string {
+function hintCopy(
+  hints: ReturnType<typeof useCopy>["capture"]["hints"],
+  key: HintKey,
+  fill: number | null,
+  direction: MoveDirection | null,
+): string {
   switch (key) {
     case "searching":
       return hints.searching;
@@ -1938,8 +1965,8 @@ function hintCopy(hints: ReturnType<typeof useCopy>["capture"]["hints"], key: Hi
       return hints.notFound;
     case "move-back":
       return hints.moveBack;
-    case "center":
-      return hints.center;
+    case "move-phone":
+      return hints.movePhone[direction ?? "up"];
     case "move-closer":
       return fill !== null && fill >= FILL_NEAR ? hints.moveCloserNear : hints.moveCloser;
     case "corner-covered":

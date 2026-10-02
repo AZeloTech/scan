@@ -225,7 +225,7 @@ export function hold(view, paper, r, { off = OFF, turn = TURN, period = PERIOD }
       const near = hintFill !== null && hintFill >= G.FILL_NEAR;
       if (answering === "move-closer") action = { kind: "closer", goal: page.size * (near ? r.range(1.08, 1.25) : r.range(1.25, 1.6)) };
       else if (answering === "move-back") action = { kind: "back", goal: page.size / r.range(1.06, 1.18) };
-      else if (answering === "center") action = { kind: "center", from: t, ms: r.range(500, 900), residual: { u: r.range(-0.02, 0.02), v: r.range(-0.02, 0.02) } };
+      else if (answering === "move-phone") action = { kind: "center", from: t, ms: r.range(500, 900), residual: { u: r.range(-0.02, 0.02), v: r.range(-0.02, 0.02) } };
       else action = null;
     }
     if (action !== null) {
@@ -369,7 +369,7 @@ export function run({ trials = TRIALS, period = PERIOD, off = OFF, turn = TURN, 
         moveBackShown: back,
         moveBackUnderExit: backFalse,
         closerBackFlips: flips,
-        centerShown: holds.reduce((n, h) => n + h.hints.filter((e) => e.hint === "center").length, 0),
+        centerShown: holds.reduce((n, h) => n + h.hints.filter((e) => e.hint === "move-phone").length, 0),
         fillAtReadyMed: q(ready.map((h) => h.fill), 0.5),
         pxMed: q(ready.map((h) => h.px), 0.5),
         pxP10: q(ready.map((h) => h.px), 0.1),

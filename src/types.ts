@@ -401,7 +401,15 @@ export type ScanDiagnosticsPayload =
    * region the page filled along its limiting axis at that moment (0–1; null
    * with no page) — what "Aproxime" is judged on.
    */
-  | { type: "hint"; id: string; shown: boolean; ms: number | null; fill: number | null }
+  | {
+      type: "hint";
+      id: string;
+      shown: boolean;
+      ms: number | null;
+      fill: number | null;
+      /** `move-phone` only: which way it says to move the phone. */
+      direction?: "up" | "down" | "left" | "right";
+    }
   /**
    * The ready cue came on, or went off after `ms` (with why, when it is
    * known); `fill` as for `hint`; `phases` (on only) where the time to it went.

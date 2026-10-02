@@ -140,6 +140,9 @@ import {
   rawHint,
   ReadyCue,
   ReadyTick,
+  DirectionLatch,
+  moveDirection,
+  type MoveDirection,
   SHAKE_WINDOW_MS,
   SHAKY_ENTER,
   READY_DENSE_READINGS,
@@ -661,7 +664,9 @@ interface Runtime {
   timeline: FireTimeline;
   /** When the running auto-capture countdown started, or null. */
   countdownStart: number | null;
-  /** The newest fire's timeline ({@link fireMarks}), for the bench's probe and the diagnostics stream. */
+  /** Which way "Mova o celular" points while it shows (the nudge arrow, {@link LiveOverlayRefs.nudge}); else null. */
+  nudge: MoveDirection | null;
+  /** The newest fire's timeline ({@link FireMarks}), for the bench's probe and the diagnostics stream. */
   lastFire: { at: number; marks: FireMarks } | null;
 }
 
@@ -758,6 +763,7 @@ function freshRuntime(): Runtime {
     separateSince: null,
     timeline: new FireTimeline(),
     countdownStart: null,
+    nudge: null,
     lastFire: null,
   };
 }
@@ -847,6 +853,8 @@ function clearTracking(runtime: Runtime, overlay: LiveOverlayRefs): void {
   if (group !== null) group.style.opacity = "0";
   const anchor = overlay.anchor.current;
   if (anchor !== null) anchor.style.opacity = "0";
+  const nudge = overlay.nudge?.current ?? null;
+  if (nudge !== null) nudge.dataset.direction = "";
   paintRing(overlay.ring.current, null);
 }
 
@@ -998,6 +1006,13 @@ export interface LiveOverlayRefs {
    * `stroke-dasharray`; the paint sets its `stroke-dashoffset`.
    */
   ring: React.MutableRefObject<SVGCircleElement | null>;
+  /**
+   * Optional: the arrow of "Mova o celular" — an element the live loop pins
+   * to the middle of the visible region's edge the phone should move toward
+   * (stage pixels in `--scan-nudge-x` / `--scan-nudge-y`, the way in
+   * `data-direction`), shown only while that hint is.
+   */
+  nudge?: React.MutableRefObject<HTMLDivElement | null>;
 }
 
 /** An accepted quad, with the detection that produced it. */
@@ -1050,6 +1065,8 @@ export interface LiveDetect {
   hint: HintKey | null;
   /** How much of the view the page filled (`fillShare`) when {@link hint} appeared — its wording's band; null with no page. */
   hintFill: number | null;
+  /** Which way "Mova o celular" says to move the phone (`moveDirection`), while that hint shows; else null. */
+  hintDirection: MoveDirection | null;
   /** The ready cue: a found sheet, framed, sharp and still. */
   ready: boolean;
   /** Bumped once per page as the ready cue comes on: the one haptic tick (and a spoken "ready"). */
@@ -1140,6 +1157,7 @@ export function useLiveDetect({
   const countdownRef = React.useRef<SVGPathElement | null>(null);
   const anchorRef = React.useRef<HTMLDivElement | null>(null);
   const ringRef = React.useRef<SVGCircleElement | null>(null);
+  const nudgeRef = React.useRef<HTMLDivElement | null>(null);
   // One stable object so the consumer can spread it into JSX without giving the
   // stage a new set of ref identities on every render.
   const overlay = React.useMemo<LiveOverlayRefs>(
@@ -1152,6 +1170,7 @@ export function useLiveDetect({
       countdown: countdownRef,
       anchor: anchorRef,
       ring: ringRef,
+      nudge: nudgeRef,
     }),
     [],
   );
@@ -1161,7 +1180,13 @@ export function useLiveDetect({
    * took above all — kept across the pauses a capture and its confirm screen
    * put the loop through.
    */
-  const guidanceRef = React.useRef({ hints: new HintDebounce(), ready: new ReadyCue(), tick: new ReadyTick(), auto: new AutoCapture() });
+  const guidanceRef = React.useRef({
+    hints: new HintDebounce(),
+    direction: new DirectionLatch(),
+    ready: new ReadyCue(),
+    tick: new ReadyTick(),
+    auto: new AutoCapture(),
+  });
   const autoCaptureRef = React.useRef(autoCapture);
   const onAutoCaptureRef = React.useRef(onAutoCapture);
   onAutoCaptureRef.current = onAutoCapture;
@@ -1239,6 +1264,7 @@ export function useLiveDetect({
   const [tabHidden, setTabHidden] = React.useState(false);
   const [hint, setHint] = React.useState<HintKey | null>(null);
   const [hintFill, setHintFill] = React.useState<number | null>(null);
+  const [hintDirection, setHintDirection] = React.useState<MoveDirection | null>(null);
   const [ready, setReady] = React.useState(false);
   /** Bumped once per page when the ready cue comes on: the haptic tick and the spoken "ready" ({@link ReadyTick}). */
   const [readyTick, setReadyTick] = React.useState(0);
@@ -1426,12 +1452,14 @@ export function useLiveDetect({
     runtime.sheetSeenAt = null;
     const guidance = guidanceRef.current;
     guidance.hints.reset();
+    guidance.direction.reset();
     guidance.ready.reset();
     // The next cue is another page's (or this one retaken): it ticks.
     guidance.tick.reset();
     guidance.auto.pause();
     setHint(null);
     setHintFill(null);
+    setHintDirection(null);
     setReady(false);
   }, [loopLive, overlay]);
 
@@ -1513,6 +1541,7 @@ export function useLiveDetect({
     let trackedQuad = false;
     let announcedSearching = false;
     let announcedHint: HintKey | null = null;
+    let announcedDirection: MoveDirection | null = null;
     let announcedReady = false;
     // What the probe last reported of the overlay (`lib/probe.ts`).
     let overlayProbedAt = Number.NEGATIVE_INFINITY;
@@ -2596,6 +2625,31 @@ export function useLiveDetect({
       }
     }
 
+    /**
+     * The arrow of "Mova o celular" ({@link LiveOverlayRefs.nudge}): at the
+     * middle of the visible region's edge on the side to move toward, in
+     * stage pixels; hidden with no direction.
+     */
+    function paintNudge(direction: MoveDirection | null): void {
+      const element = overlay.nudge?.current ?? null;
+      if (element === null) return;
+      const box = frameBoxRef.current;
+      if (direction === null || box === null) {
+        if (element.dataset.direction !== "") element.dataset.direction = "";
+        return;
+      }
+      const v = visibleRef.current;
+      const left = box.left + v.x * box.width;
+      const top = box.top + v.y * box.height;
+      const width = v.width * box.width;
+      const height = v.height * box.height;
+      const x = direction === "left" ? left : direction === "right" ? left + width : left + width / 2;
+      const y = direction === "up" ? top : direction === "down" ? top + height : top + height / 2;
+      element.style.setProperty("--scan-nudge-x", `${x.toFixed(1)}px`);
+      element.style.setProperty("--scan-nudge-y", `${y.toFixed(1)}px`);
+      if (element.dataset.direction !== direction) element.dataset.direction = direction;
+    }
+
     /** The visible crop's height over its width, in pixels of the frame. */
     function visibleAspect(): number {
       const size = videoSizeRef.current;
@@ -2787,6 +2841,14 @@ export function useLiveDetect({
           };
         }
         else if (guidance.auto.armed) runtime.firedLuma = null;
+      }
+      // "Mova o celular": which way, kept while the hint shows (`DirectionLatch`).
+      const direction = guidance.direction.update(shown === "move-phone" && sheet !== null ? moveDirection(sheet, guidance.direction.value) : null, now);
+      runtime.nudge = direction;
+      paintNudge(direction);
+      if (direction !== announcedDirection) {
+        announcedDirection = direction;
+        setHintDirection(direction);
       }
       if (shown !== announcedHint) {
         announcedHint = shown;
@@ -3083,6 +3145,7 @@ export function useLiveDetect({
     endCapture,
     hint,
     hintFill,
+    hintDirection,
     ready,
     readyTick,
     visible,

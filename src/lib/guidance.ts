@@ -21,7 +21,10 @@
  *     the reason and the torch is the remedy — unless a page is suspected
  *     cut off or far away, when framing it comes first, as below;
  *  2. a corner at or past the edge of what the viewfinder shows —
- *     "Afaste um pouco";
+ *     "Afaste um pouco" when the page is as big as asked or would not fit
+ *     anyway, else "Mova o celular para cima / para baixo / para a esquerda /
+ *     para a direita" ({@link moveDirection}: the way that brings the cut
+ *     side into view);
  *  3. the page not filling the viewfinder — "Aproxime" ("Aproxime mais um
  *     pouco" when it already nearly does: {@link FILL_NEAR});
  *  3b. another sheet overlapping the page — "Separe as folhas"; a corner
@@ -77,7 +80,7 @@ export type HintKey =
   | "not-found"
   | "move-back"
   | "move-closer"
-  | "center"
+  | "move-phone"
   | "corner-covered"
   | "separate-sheets"
   | "low-light"
@@ -404,7 +407,7 @@ export interface FramingRules {
   /** A page whose nearest corner is within `roomEnter` of the edge (`roomExit` once "Aproxime" shows) cannot come closer without re-aiming… */
   roomEnter: number;
   roomExit: number;
-  /** …and at this fill or more is taken as framed where it is; under it, "Centralize a folha". */
+  /** …and at this fill or more is taken as framed where it is; under it, "Mova o celular" toward the page. */
   fillFloor: number;
   /** A corner this close to the edge (`borderExit` to clear) is cut off. */
   borderEnter: number;
@@ -414,7 +417,7 @@ export interface FramingRules {
 /**
  * The page at the edge of the view while it fills less than "Aproxime"'s
  * exit line is an aim problem, not a distance one — it would fit if it were
- * centred — so the hint is "Centralize a folha", never "Afaste um pouco".
+ * centred — so the hint is "Mova o celular" (its way: {@link moveDirection}), never "Afaste um pouco".
  * And "Aproxime" asks only while the page has room to come closer: a page
  * held off-centre reaches the edge before it reaches the exit line (on a
  * full-bleed camera the controls make the clear part of the screen sit above
@@ -439,7 +442,7 @@ export const FRAMING: FramingRules = {
 
 /**
  * The framing hint for a page in the view (`sheet`, visible-crop fractions):
- * "move-back", "center", "move-closer" or none. `cutOff`: its paper is known
+ * "move-back", "move-phone" (its way: {@link moveDirection}), "move-closer" or none. `cutOff`: its paper is known
  * to run on past the edge (the quad is short of the page — only backing off
  * shows how big it is); `covered`: a corner is under a control drawn over the
  * picture; `current`: the hint showing (or pending), for the hysteresis.
@@ -449,19 +452,19 @@ export function framingHint(
   { cutOff = false, covered = false }: { cutOff?: boolean; covered?: boolean },
   current: HintKey | null,
   rules: FramingRules = FRAMING,
-): "move-back" | "center" | "move-closer" | null {
+): "move-back" | "move-phone" | "move-closer" | null {
   if (cutOff) return "move-back";
   const margin = borderMargin(sheet);
   const fill = fillShare(sheet);
-  const edging = current === "move-back" || current === "center";
+  const edging = current === "move-back" || current === "move-phone";
   if (covered || margin < (edging ? rules.borderExit : rules.borderEnter)) {
     // Too big to fit even centred, or already as big as asked: back off. Else re-aim.
-    return fill >= rules.fillExit || !fitsCentred(sheet, rules.borderExit) ? "move-back" : "center";
+    return fill >= rules.fillExit || !fitsCentred(sheet, rules.borderExit) ? "move-back" : "move-phone";
   }
   const closer = current === "move-closer";
   if (fill >= (closer ? rules.fillExit : rules.fillEnter)) return null;
   if (margin >= (closer ? rules.roomExit : rules.roomEnter)) return "move-closer";
-  return fill >= rules.fillFloor ? null : "center";
+  return fill >= rules.fillFloor ? null : "move-phone";
 }
 
 /**
@@ -558,7 +561,7 @@ export function rawHint(input: GuidanceInput, current: HintKey | null, rules: Fr
   // corner at or past the view's edge: {@link BORDER_ENTER}, kept to
   // {@link BORDER_EXIT} while a framing hint is up): two sheets spanned as
   // one look too big, and "Afaste um pouco" is not what separates them.
-  const edging = current === "move-back" || current === "center";
+  const edging = current === "move-back" || current === "move-phone";
   const clipped =
     input.cutOff === true || input.covered === true || borderMargin(sheet) < (edging ? rules.borderExit : rules.borderEnter);
   if (!clipped && input.occlusion === "separate") return "separate-sheets";
@@ -576,13 +579,112 @@ export function rawHint(input: GuidanceInput, current: HintKey | null, rules: Fr
   // doing as asked, not a shaking hand: the slot clears instead of trading
   // one hint for "Segure firme" (the ready cue waits for stillness all the
   // same). Once it has cleared, a hand still moving gets "Segure firme".
-  if (shaky && input.sharp !== false && (current === "move-closer" || current === "move-back" || current === "center")) return null;
+  if (shaky && input.sharp !== false && (current === "move-closer" || current === "move-back" || current === "move-phone")) return null;
   if (shaky || input.sharp === false) return "hold-still";
   return null;
 }
 
 /** The hints that ask the person to move the phone. */
-const FRAMING_HINTS: ReadonlySet<HintKey | null> = new Set<HintKey | null>(["move-closer", "move-back", "center"]);
+const FRAMING_HINTS: ReadonlySet<HintKey | null> = new Set<HintKey | null>(["move-closer", "move-back", "move-phone"]);
+
+/** Which way to move the phone (relative to the phone held as the screen shows it). */
+export type MoveDirection = "up" | "down" | "left" | "right";
+
+/**
+ * The other axis has to be this much more off before "Mova o celular" turns
+ * to it: a page off in both directions does not have its hint swing between
+ * them.
+ */
+export const DIRECTION_SWITCH = 1.25;
+
+/**
+ * Which way the phone should move to bring the page's cut side into view
+ * (`sheet` in visible-crop fractions): one direction at a time, on the axis
+ * where the page is furthest off-centre for the room it has there — its
+ * bounding box's centre off the view's middle, over the slack the page
+ * leaves on that axis. A page off to the top (touching or past the top edge)
+ * asks for "up": the camera moving up moves the picture down, bringing the
+ * page's top into view. `current` is the direction showing: the other axis
+ * takes over only at {@link DIRECTION_SWITCH} times as far off.
+ */
+export function moveDirection(sheet: NormalizedQuad, current: MoveDirection | null = null): MoveDirection {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const key of CORNER_KEYS) {
+    const { x, y } = sheet[key];
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  }
+  const dx = (minX + maxX) / 2 - 0.5;
+  const dy = (minY + maxY) / 2 - 0.5;
+  // The room the page leaves on each axis (never quite zero: a page as big as
+  // the view on one axis is off on it however little it is off).
+  const rx = Math.abs(dx) / Math.max(0.02, (1 - (maxX - minX)) / 2);
+  const ry = Math.abs(dy) / Math.max(0.02, (1 - (maxY - minY)) / 2);
+  const horizontal: MoveDirection = dx < 0 ? "left" : "right";
+  const vertical: MoveDirection = dy < 0 ? "up" : "down";
+  const onX = current === "left" || current === "right";
+  const onY = current === "up" || current === "down";
+  if (onX) return ry > rx * DIRECTION_SWITCH ? vertical : horizontal;
+  if (onY) return rx > ry * DIRECTION_SWITCH ? horizontal : vertical;
+  return rx > ry ? horizontal : vertical;
+}
+
+/**
+ * The direction "Mova o celular" says, under the hint's own rules: chosen when
+ * the hint appears and kept while it shows — another direction replaces it
+ * only once it has been the answer {@link HINT_APPEAR_MS} and the one showing
+ * has been up {@link HINT_MIN_SHOW_MS} (no text that changes under the
+ * person's eyes, no flicker between two directions).
+ */
+export class DirectionLatch {
+  private shown: MoveDirection | null = null;
+  private shownAt = Number.NEGATIVE_INFINITY;
+  private pending: MoveDirection | null = null;
+  private pendingSince = 0;
+
+  get value(): MoveDirection | null {
+    return this.shown;
+  }
+
+  /** `direction`: the answer now while the hint shows; null: the hint is not showing. */
+  update(direction: MoveDirection | null, now: number): MoveDirection | null {
+    if (direction === null) {
+      this.reset();
+      return null;
+    }
+    if (this.shown === null) {
+      this.shown = direction;
+      this.shownAt = now;
+      this.pending = null;
+      return this.shown;
+    }
+    if (direction === this.shown) {
+      this.pending = null;
+      return this.shown;
+    }
+    if (direction !== this.pending) {
+      this.pending = direction;
+      this.pendingSince = now;
+    }
+    if (now - this.pendingSince >= HINT_APPEAR_MS && now - this.shownAt >= HINT_MIN_SHOW_MS) {
+      this.shown = direction;
+      this.shownAt = now;
+      this.pending = null;
+    }
+    return this.shown;
+  }
+
+  reset(): void {
+    this.shown = null;
+    this.shownAt = Number.NEGATIVE_INFINITY;
+    this.pending = null;
+  }
+}
 
 /**
  * The hint on screen: another answer must hold {@link HINT_APPEAR_MS} before

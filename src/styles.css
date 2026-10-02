@@ -285,6 +285,59 @@
 
 @layer components {
   /*
+   * "Mova o celular"'s arrow (`LiveOverlayRefs.nudge`): the live loop pins it
+   * to the middle of the visible region's edge on the side the phone should
+   * move toward and names the way in `data-direction` (empty: hidden). It sits
+   * inside that edge — below the hint pill at the top, clear of the controls
+   * at the bottom — points the way, and nudges toward it (not under reduced
+   * motion, where the rule above stops every animation). Decoration: the hint's
+   * words are what a screen reader hears.
+   */
+  .scan-root [data-scan-nudge] {
+    position: absolute;
+    left: var(--scan-nudge-x, 0px);
+    top: var(--scan-nudge-y, 0px);
+    width: 40px;
+    height: 40px;
+    margin: -20px 0 0 -20px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 150ms ease-out;
+  }
+  .scan-root [data-scan-nudge] > svg {
+    width: 40px;
+    height: 40px;
+  }
+  .scan-root [data-scan-nudge][data-direction="up"] {
+    opacity: 1;
+    transform: translateY(120px);
+  }
+  .scan-root [data-scan-nudge][data-direction="down"] {
+    opacity: 1;
+    transform: translateY(-36px) rotate(180deg);
+  }
+  .scan-root [data-scan-nudge][data-direction="left"] {
+    opacity: 1;
+    transform: translateX(36px) rotate(-90deg);
+  }
+  .scan-root [data-scan-nudge][data-direction="right"] {
+    opacity: 1;
+    transform: translateX(-36px) rotate(90deg);
+  }
+  .scan-root [data-scan-nudge]:not([data-direction=""]) > svg {
+    animation: scan-nudge 900ms ease-in-out infinite;
+  }
+  @keyframes scan-nudge {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(-6px);
+    }
+  }
+
+  /*
    * The one thing a screen reader needs that no utility provides: text that is
    * announced but not seen. Used by the live region that calls out each
    * captured page.

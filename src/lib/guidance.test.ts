@@ -17,6 +17,10 @@ import {
   HINT_MIN_GAP_MS,
   HINT_MIN_SHOW_MS,
   HintDebounce,
+  DIRECTION_SWITCH,
+  DirectionLatch,
+  moveDirection,
+  type MoveDirection,
   motionOf,
   NOT_FOUND_AFTER_MS,
   rawHint,
@@ -402,17 +406,17 @@ test("framing: a page at the edge that would fit centred is asked to re-centre, 
   // The field run of 2026-10-02: "Afaste um pouco" at fill 0.745, under the closer exit line.
   const offTop = rect(0.13, 0.008, 0.87, 0.6);
   assert.ok(fillShare(offTop) < FILL_EXIT);
-  assert.equal(framingHint(offTop, {}, null), "center");
-  assert.equal(framingHint(offTop, {}, "move-closer"), "center");
+  assert.equal(framingHint(offTop, {}, null), "move-phone");
+  assert.equal(framingHint(offTop, {}, "move-closer"), "move-phone");
   // Already as big as asked, or too big to fit at all: back off.
   assert.equal(framingHint(rect(0.01, 0.1, 0.99, 0.8), {}, null), "move-back");
   assert.equal(framingHint(rect(0.2, -0.05, 0.8, 1.02), {}, null), "move-back");
   // The page's paper runs on past the edge: only backing off shows how big it is.
   assert.equal(framingHint(rect(0.3, 0.3, 0.6, 0.6), { cutOff: true }, null), "move-back");
   // A corner under a control is cut off to the person, as at an edge.
-  assert.equal(framingHint(rect(0.15, 0.2, 0.85, 0.7), { covered: true }, null), "center");
+  assert.equal(framingHint(rect(0.15, 0.2, 0.85, 0.7), { covered: true }, null), "move-phone");
   // Re-centred: it clears at the exit line, and a page then over the entry line is framed.
-  assert.equal(framingHint(rect(0.14, 0.035, 0.86, 0.6), {}, "center"), null);
+  assert.equal(framingHint(rect(0.14, 0.035, 0.86, 0.6), {}, "move-phone"), null);
 });
 
 test("framing: Aproxime asks only while the page has room to come closer", () => {
@@ -426,7 +430,7 @@ test("framing: Aproxime asks only while the page has room to come closer", () =>
   assert.equal(framingHint(rect(0.06, 0.3, 0.73, 0.62), {}, "move-closer"), "move-closer");
   assert.equal(framingHint(rect(0.04, 0.3, 0.73, 0.62), {}, "move-closer"), null);
   // …and a small page in a corner is re-centred first.
-  assert.equal(framingHint(rect(0.03, 0.03, 0.45, 0.4), {}, null), "center");
+  assert.equal(framingHint(rect(0.03, 0.03, 0.45, 0.4), {}, null), "move-phone");
 });
 
 test("framing: every paper, held off-centre and turned, has a band where no hint shows", () => {
@@ -482,7 +486,7 @@ test("covered corners: a sheet over the page asks after framing and before light
 
 test("covered corners: a page whole in the view hears what lies over it before how to frame it", () => {
   // A small page (or two sheets taken for one, off centre): what lies over
-  // it is the ask, not "Aproxime" / "Centralize".
+  // it is the ask, not "Aproxime" / "Mova o celular".
   const small = rect(0.35, 0.4, 0.65, 0.6);
   assert.equal(rawHint(input({ sheet: small }), null), "move-closer");
   assert.equal(rawHint(input({ sheet: small, occlusion: "covered" }), null), "corner-covered");
@@ -492,7 +496,7 @@ test("covered corners: a page whole in the view hears what lies over it before h
   const edge = rect(0.005, 0.2, 0.9, 0.75);
   assert.equal(rawHint(input({ sheet: edge, occlusion: "separate" }), null), "move-back");
   assert.equal(rawHint(input({ sheet: small, occlusion: "separate", cutOff: true }), null), "move-back");
-  assert.equal(rawHint(input({ sheet: small, occlusion: "covered", covered: true }), null), "center");
+  assert.equal(rawHint(input({ sheet: small, occlusion: "covered", covered: true }), null), "move-phone");
 });
 
 test("covered corners: the hint goes through the slot's debounce like any other — it never flickers", () => {
@@ -502,4 +506,91 @@ test("covered corners: the hint goes through the slot's debounce like any other 
   // A pass that reads the corner seen for a moment does not take it down before its minimum show.
   assert.equal(slot.update(null, HINT_APPEAR_MS + 200), "corner-covered");
   assert.equal(slot.update(null, HINT_APPEAR_MS + HINT_MIN_GAP_MS + 10), null);
+});
+
+/** The picture after the phone moved `step` (share of the view) in `direction`: the scene slides the other way. */
+function afterMoving(quad: NormalizedQuad, direction: MoveDirection, step: number): NormalizedQuad {
+  const [dx, dy] = direction === "up" ? [0, step] : direction === "down" ? [0, -step] : direction === "left" ? [step, 0] : [-step, 0];
+  const move = (p: { x: number; y: number }) => ({ x: p.x + dx, y: p.y + dy });
+  return { topLeft: move(quad.topLeft), topRight: move(quad.topRight), bottomRight: move(quad.bottomRight), bottomLeft: move(quad.bottomLeft) };
+}
+
+test("move the phone: the way is toward the side the page is cut on, one axis at a time", () => {
+  const cases: [NormalizedQuad, MoveDirection][] = [
+    [rect(0.13, 0.008, 0.87, 0.6), "up"],
+    [rect(0.13, 0.4, 0.87, 0.995), "down"],
+    [rect(0.005, 0.2, 0.6, 0.75), "left"],
+    [rect(0.4, 0.2, 0.996, 0.75), "right"],
+  ];
+  for (const [quad, way] of cases) {
+    assert.equal(framingHint(quad, {}, null), "move-phone", way);
+    assert.equal(moveDirection(quad), way);
+  }
+  // A small page in the top-left corner: the axis it is further off on, for the room it has there.
+  assert.equal(moveDirection(rect(0.03, 0.03, 0.45, 0.4)), "up");
+  assert.equal(moveDirection(rect(0.01, 0.2, 0.45, 0.6)), "left");
+});
+
+test("move the phone: turned and tilted pages point the same way", () => {
+  for (const viewAspect of [1.365, 1.79]) {
+    for (const deg of [-25, -10, 10, 25]) {
+      // Off to the top, the left, the right, the bottom of the view.
+      assert.equal(moveDirection(held(0.5, 0.26, 0.6, Math.SQRT2, deg, viewAspect)), "up", `up ${deg}° ${viewAspect}`);
+      assert.equal(moveDirection(held(0.5, 0.74, 0.6, Math.SQRT2, deg, viewAspect)), "down", `down ${deg}° ${viewAspect}`);
+      assert.equal(moveDirection(held(0.36, 0.5, 0.6, Math.SQRT2, deg, viewAspect)), "left", `left ${deg}° ${viewAspect}`);
+      assert.equal(moveDirection(held(0.64, 0.5, 0.6, Math.SQRT2, deg, viewAspect)), "right", `right ${deg}° ${viewAspect}`);
+    }
+  }
+  // A page seen in perspective (its far edge shorter), cut at the top.
+  const tilted: NormalizedQuad = { topLeft: { x: 0.3, y: 0.004 }, topRight: { x: 0.7, y: 0.004 }, bottomRight: { x: 0.79, y: 0.62 }, bottomLeft: { x: 0.21, y: 0.62 } };
+  assert.equal(framingHint(tilted, {}, null), "move-phone");
+  assert.equal(moveDirection(tilted), "up");
+});
+
+test("move the phone: doing as it says brings the cut side into view, and the hint clears", () => {
+  const cases: NormalizedQuad[] = [
+    rect(0.13, 0.008, 0.87, 0.6),
+    rect(0.13, 0.4, 0.87, 0.995),
+    rect(0.005, 0.2, 0.6, 0.75),
+    rect(0.4, 0.2, 0.996, 0.75),
+    held(0.5, 0.18, 0.55, Math.SQRT2, 12, 1.79),
+  ];
+  for (const start of cases) {
+    let quad = start;
+    let current: "move-phone" | "move-back" | "move-closer" | null = framingHint(quad, {}, null);
+    assert.equal(current, "move-phone");
+    const way = moveDirection(quad);
+    const before = borderMargin(quad);
+    for (let i = 0; i < 40 && current === "move-phone"; i += 1) {
+      quad = afterMoving(quad, moveDirection(quad, way), 0.01);
+      current = framingHint(quad, {}, current);
+    }
+    assert.notEqual(current, "move-phone", `still asked after moving ${way}`);
+    assert.ok(borderMargin(quad) > before, `${way}: the cut side came into view`);
+    // Moving the other way would have cut it further.
+    const opposite: MoveDirection = way === "up" ? "down" : way === "down" ? "up" : way === "left" ? "right" : "left";
+    assert.ok(borderMargin(afterMoving(start, opposite, 0.02)) < before, `${way}: the opposite cuts it more`);
+  }
+});
+
+test("move the phone: the other axis takes over only when clearly further off", () => {
+  // Off by about as much on both axes: the axis showing keeps it.
+  const both = rect(0.02, 0.025, 0.62, 0.62);
+  const first = moveDirection(both);
+  const other: MoveDirection = first === "up" ? "left" : "up";
+  assert.equal(moveDirection(both, other), other);
+  assert.ok(DIRECTION_SWITCH > 1);
+});
+
+test("move the phone: the way shown keeps the hint's rules — kept while it shows, changed only after its minimum", () => {
+  const latch = new DirectionLatch();
+  assert.equal(latch.update("up", 0), "up");
+  // Another answer at once does not replace it…
+  assert.equal(latch.update("left", 100), "up");
+  assert.equal(latch.update("left", 100 + HINT_APPEAR_MS), "up");
+  // …until the shown one has had its minimum and the new one its appear time.
+  assert.equal(latch.update("left", HINT_MIN_SHOW_MS + 100), "left");
+  // The hint gone: nothing; back: chosen afresh.
+  assert.equal(latch.update(null, 2000), null);
+  assert.equal(latch.update("down", 2100), "down");
 });

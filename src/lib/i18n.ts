@@ -165,8 +165,12 @@ export interface AppCopy {
       /** After a few seconds with no page: the photo can still be taken. */
       notFound: string;
       moveBack: string;
-      /** The page at the edge of the view though it would fit: re-aim, not back off. */
-      center: string;
+      /**
+       * The page at the edge of the view though it would fit: re-aim, not
+       * back off — which way to move the phone (`moveDirection`,
+       * `lib/guidance.ts`), relative to the phone as the screen shows it.
+       */
+      movePhone: { up: string; down: string; left: string; right: string };
       moveCloser: string;
       /** "Move closer" for a page that already nearly fills the view (`FILL_NEAR`, `lib/guidance.ts`): a small move, not a big one. */
       moveCloserNear: string;
@@ -983,7 +987,12 @@ const PT: AppCopy = {
       searching: "Procurando documento",
       notFound: "Não achei a folha — toque para capturar",
       moveBack: "Afaste um pouco",
-      center: "Centralize a folha",
+      movePhone: {
+        up: "Mova o celular para cima",
+        down: "Mova o celular para baixo",
+        left: "Mova o celular para a esquerda",
+        right: "Mova o celular para a direita",
+      },
       moveCloser: "Aproxime",
       moveCloserNear: "Aproxime mais um pouco",
       cornerCovered: "Canto coberto — afaste a folha de cima",
@@ -1648,7 +1657,12 @@ const EN: AppCopy = {
       searching: "Looking for the document",
       notFound: "Can't find the page — tap to capture",
       moveBack: "Move back a little",
-      center: "Center the page",
+      movePhone: {
+        up: "Move the phone up",
+        down: "Move the phone down",
+        left: "Move the phone left",
+        right: "Move the phone right",
+      },
       moveCloser: "Move closer",
       moveCloserNear: "Move a little closer",
       cornerCovered: "Corner covered — move the sheet on top",
