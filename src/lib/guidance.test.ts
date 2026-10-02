@@ -12,6 +12,8 @@ import {
   autoFrameAgeMax,
   AutoCapture,
   readingsAgree,
+  settledOn,
+  SETTLE_WINDOW_MS,
   STILL_MAX,
   borderMargin,
   BORDER_ENTER,
@@ -648,4 +650,16 @@ test("move the phone: the way shown keeps the hint's rules — kept while it sho
   // The hint gone: nothing; back: chosen afresh.
   assert.equal(latch.update(null, 2000), null);
   assert.equal(latch.update("down", 2100), "down");
+});
+
+test("settled: the newest three readings still, over at least the settle window, at any cadence", () => {
+  const at = (spacing: number, step: number) => [0, 1, 2].map((i) => ({ at: i * spacing, quad: rect(0.2 + step * i, 0.2, 0.8 + step * i, 0.75) }));
+  // A fast loop (125 ms apart): settled after three readings — the window spanned by them is 250 ms.
+  assert.equal(settledOn(at(125, 0.001), 1.5), true);
+  // A slow one (600 ms apart): the same.
+  assert.equal(settledOn(at(600, 0.001), 1.5), true);
+  // Too close together to say anything yet, or still moving.
+  assert.equal(settledOn(at(SETTLE_WINDOW_MS / 2 - 10, 0.001), 1.5), false);
+  assert.equal(settledOn(at(125, 0.02), 1.5), false);
+  assert.equal(settledOn(at(125, 0).slice(0, 2), 1.5), false);
 });

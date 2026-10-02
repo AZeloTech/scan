@@ -152,7 +152,7 @@ import {
   readingSpacing,
   STILL_MAX,
   STILL_WINDOW_MS,
-  SETTLE_WINDOW_MS,
+  settledOn,
   autoFrameAgeMax,
   readingsAgree,
   toVisible,
@@ -2137,16 +2137,14 @@ export function useLiveDetect({
     }
 
     /**
-     * Settled, what auto-capture's countdown starts on: still over the last
-     * {@link SETTLE_WINDOW_MS} (at least 1.2 of the loop's interval) — the
-     * ready cue's full stillness and drift are then gathered during the
-     * countdown, and the fire waits for them.
+     * Settled, what auto-capture's countdown starts on: the newest
+     * {@link SETTLE_READINGS} readings still within {@link STILL_MAX}, over at
+     * least {@link SETTLE_WINDOW_MS} — the ready cue's full stillness and
+     * drift are then gathered during the countdown, and the fire waits for
+     * them.
      */
     function settledEnough(): boolean {
-      const readings = runtime.sheetReadings;
-      const period = Math.max(runtime.intervalMs, readingSpacing(readings));
-      const stillness = motionOf(readings, visibleAspect(), Math.max(SETTLE_WINDOW_MS, 1.2 * period));
-      return stillness !== null && stillness <= STILL_MAX;
+      return settledOn(runtime.sheetReadings, visibleAspect());
     }
 
     /**

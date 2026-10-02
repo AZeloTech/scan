@@ -265,12 +265,23 @@ export const AUTO_AGREE_READINGS = 3;
 export const AUTO_AGREE_MAX = 0.6 / 100;
 /**
  * The countdown starts once the page has *settled*: everything the ready cue
- * asks for, but still over the last {@link SETTLE_WINDOW_MS} (at least 1.2 of
- * the loop's interval) instead of the cue's full window and drift. The
- * stillness the cue asks for is then gathered DURING the countdown — the fire
- * still needs the cue's full conditions, on, at that moment.
+ * asks for, but with its newest {@link SETTLE_READINGS} readings still (within
+ * {@link STILL_MAX} of each other) over at least {@link SETTLE_WINDOW_MS},
+ * instead of the cue's full window and drift. The stillness the cue asks for
+ * is then gathered DURING the countdown — the fire still needs the cue's full
+ * conditions, on, at that moment.
  */
+export const SETTLE_READINGS = 3;
 export const SETTLE_WINDOW_MS = 200;
+
+/** Settled ({@link SETTLE_READINGS}): readings (frame time, quad in the visible crop), the view's `aspect`. */
+export function settledOn(readings: readonly { at: number; quad: NormalizedQuad }[], aspect: number): boolean {
+  if (readings.length < SETTLE_READINGS) return false;
+  const recent = readings.slice(-SETTLE_READINGS);
+  if (recent[recent.length - 1].at - recent[0].at < SETTLE_WINDOW_MS) return false;
+  const motion = motionOf(recent, aspect, Number.POSITIVE_INFINITY);
+  return motion !== null && motion <= STILL_MAX;
+}
 /**
  * The fire's final look (R3): the newest pass that found the page where it
  * was must have read a frame at least this far into the countdown…
