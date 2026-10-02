@@ -8,8 +8,9 @@
  * screen's "estimado" handles and the diagnostics stream.
  *
  * Owner rule: auto-capture never fires on an uncertain page. A page is
- * uncertain while any corner is not `seen`, or another sheet overlaps it
- * ({@link isUncertain}). Manual capture always works.
+ * uncertain while any corner is not `seen`, or another sheet overlaps it —
+ * or while nothing has measured it at all: no check is not an all-clear
+ * ({@link isUncertain} fails closed). Manual capture always works.
  *
  * Pure: no DOM; tested in `corner-check.test.ts`.
  */
@@ -33,18 +34,26 @@ export const ALL_SEEN: CornerCheck = Object.freeze({
   separate: false,
 }) as CornerCheck;
 
-/** The check a refinement answered, its corners keyed like its quad. */
-export function cornerCheckOf(result: Pick<RefineResult, "corners" | "occlusion">): CornerCheck {
+/**
+ * The check a refinement answered, its corners keyed like its quad — or
+ * `null` when it measured nothing (out of time, no paper, nothing found to
+ * walk): unmeasured, never all-seen.
+ */
+export function cornerCheckOf(result: Pick<RefineResult, "corners" | "occlusion" | "measured">): CornerCheck | null {
+  if (!result.measured) return null;
   const corners = {} as Record<CornerKey, CornerProvenance>;
   CORNER_KEYS.forEach((key, i) => {
-    corners[key] = result.corners[i]?.provenance ?? "seen";
+    corners[key] = result.corners[i]?.provenance ?? "unknown";
   });
   return { corners, separate: result.occlusion.separate };
 }
 
-/** Any corner not seen, or another sheet overlapping: auto-capture holds, the ready cue waits. */
+/**
+ * Any corner not seen, another sheet overlapping — or no check at all
+ * (unmeasured): auto-capture holds, the ready cue waits.
+ */
 export function isUncertain(check: CornerCheck | null | undefined): boolean {
-  if (check === null || check === undefined) return false;
+  if (check === null || check === undefined) return true;
   return check.separate || CORNER_KEYS.some((key) => check.corners[key] !== "seen");
 }
 

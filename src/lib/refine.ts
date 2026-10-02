@@ -127,7 +127,22 @@ export interface CornerReport {
   confidence: number;
   /** Share of each of its two edges (the side before it, the side after it) seen running up to it; 0 when not measured. */
   runs: [number, number];
+  /** What the provenance rests on ({@link CornerBasis}); absent on old reports. */
+  basis?: CornerBasis;
 }
+
+/**
+ * What a corner's provenance rests on: `edges` (both edges walked to it),
+ * `rounded` (an edge stops short at the desk — a rounded or torn corner),
+ * `on-sheet` (its edges seen over another sheet), `off-image`, `covered`
+ * (something found over it: inferred or unknown) — or, short of evidence,
+ * `no-edge` (neither edge found), `one-edge` (one edge found, the other not),
+ * `short` (an edge stops short with nothing seen to say why) — called seen:
+ * on the bench about a fifth of real corners rest on no more than that, and
+ * calling them unknown would hold auto-capture on most pages — and
+ * `unmeasured` (the refinement never got to the corners).
+ */
+export type CornerBasis = "edges" | "rounded" | "on-sheet" | "off-image" | "covered" | "no-edge" | "one-edge" | "short" | "unmeasured";
 
 /** What lies over the page, as the edges show it. */
 export interface OcclusionReport {
@@ -166,9 +181,16 @@ export interface RefineResult {
   /** A corner moved by half a working pixel or more. */
   changed: boolean;
   sides: SideReport[];
-  /** Each corner's provenance, TL, TR, BR, BL (all `seen`, confidence 0, when nothing was measured). */
+  /** Each corner's provenance, TL, TR, BR, BL (all `unknown`, confidence 0, when nothing was measured: see `measured`). */
   corners: CornerReport[];
   occlusion: OcclusionReport;
+  /**
+   * The corners' provenance was measured on the quad returned: the run went
+   * to its end and an answer's edges were walked. False for every early
+   * return (budget, bad image, no paper, nothing found to measure on) — its
+   * `corners` are placeholders, and nothing downstream may read them as seen.
+   */
+  measured: boolean;
   ms: number;
   /**
    * `refined`, `no-change` (nothing found, or every corner found where it
@@ -1836,6 +1858,8 @@ const SEPARATE_REACH = 0.04;
 const SEPARATE_SHARE = 0.25;
 /** …with the desk (not paper) right past at least this share of it. */
 const SEPARATE_DESK = 0.15;
+/** …past this many sides. */
+const SEPARATE_SIDES = 2;
 
 /** The longest stretch of profiles holding the line's points, gaps of {@link RUN_GAP} allowed: [first, last] and how many hold one. */
 function longestRun(profiles: Int16Array, count: number): { i0: number; i1: number; hits: number } {
@@ -2202,7 +2226,7 @@ interface Walk {
  * the unit normal towards the page, out to `maxT` px: the first place where
  * {@link WALK_WINDOW} samples in a row (but one) are the edge.
  */
-function walkEdge(planes: Planes, corner: Vec, dir: Vec, inward: Vec, start: number, maxT: number, look: EdgeLook, nearPx: number): Walk {
+function walkEdge(planes: Planes, corner: Vec, dir: Vec, inward: Vec, start: number, maxT: number, look: EdgeLook, nearPx: number, clock: Clock): Walk {
   const inner = new Float32Array(3);
   const outer = new Float32Array(3);
   const at = new Float32Array(3);
@@ -2243,7 +2267,8 @@ function walkEdge(planes: Planes, corner: Vec, dir: Vec, inward: Vec, start: num
   const kinds: Stretch[] = [];
   const ts: number[] = [];
   const outers: number[] = [];
-  for (let t = start; t <= maxT; t += WALK_STEP) {
+  for (let t = start, tick = 0; t <= maxT; t += WALK_STEP, tick += 1) {
+    if ((tick & 15) === 15) clock.check();
     const x = corner[0] + dir[0] * t;
     const y = corner[1] + dir[1] * t;
     let kind: Stretch = strip(x, y, 1, inner) && strip(x, y, -1, outer) ? classify(inner, outer, look) : "off";
@@ -2350,19 +2375,22 @@ function tipCovered(planes: Planes, corner: Vec, towardA: Vec, towardB: Vec, loo
       around.push(c);
     }
   }
-  // One thing all round the corner's outside (a clip's body), not the desk
-  // changing past it (a mat's border, a table's edge): one colour.
-  let one = true;
-  for (let i = 0; i < around.length && one; i += 1) {
-    for (let j = i + 1; j < around.length; j += 1) if (colourDistance(around[i], around[j]) > BACKGROUND_MATCH) one = false;
-  }
-  if (one) return true;
-  // Or the page's tip itself under something that is not its paper.
+  // The page's tip itself under something that is not its paper. What lies
+  // outside a corner alone never says it is covered: a mat's border or a
+  // table's bright edge just past a real corner (in glare, its edges fading
+  // short of it) is one material all round it too.
   const c = new Float32Array(3);
   let inside = 0;
   for (const [i, j] of TIP_INSIDE) {
     if (sampleInto(planes, corner[0] + a[0] * i + b[0] * j, corner[1] + a[1] * i + b[1] * j, c, 0) && object(c, look.paper)) inside += 1;
   }
+  // One thing all round the corner's outside (a clip's body), not the desk
+  // changing past it: one colour — and over the tip as well, on half of it.
+  let one = true;
+  for (let i = 0; i < around.length && one; i += 1) {
+    for (let j = i + 1; j < around.length; j += 1) if (colourDistance(around[i], around[j]) > BACKGROUND_MATCH) one = false;
+  }
+  if (one && inside >= TIP_INSIDE.length / 2) return true;
   return inside >= TIP_INSIDE.length - 1;
 }
 
@@ -2377,6 +2405,7 @@ function provenance(
   points: Vec[],
   diag: number,
   clock: Clock,
+  cache: Map<string, { walk: Walk; length: number } | null> = new Map(),
 ): { corners: CornerReport[]; occlusion: OcclusionReport } {
   clock.check();
   const reachDiag = REACH_DIAG * diag;
@@ -2391,22 +2420,31 @@ function provenance(
     if (look === null) return null;
     const a = points[from];
     const b = points[from === k ? (k + 1) % 4 : k];
+    // The fallback ladder measures many combinations of the same sides: a
+    // walk from the same corner along the same edge is walked once.
+    const key = `${k}:${from}:${start.toFixed(1)}:${a[0].toFixed(2)},${a[1].toFixed(2)}:${b[0].toFixed(2)},${b[1].toFixed(2)}:${rungKey(rungs[k])}`;
+    const hit = cache.get(key);
+    if (hit !== undefined) return hit;
+    clock.check();
     const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
     const dir: Vec = [(b[0] - a[0]) / length, (b[1] - a[1]) / length];
     let inward: Vec = [-dir[1], dir[0]];
     const mx = (a[0] + b[0]) / 2;
     const my = (a[1] + b[1]) / 2;
     if ((cx - mx) * inward[0] + (cy - my) * inward[1] < 0) inward = [-inward[0], -inward[1]];
-    return { walk: walkEdge(planes, a, dir, inward, start, 0.7 * length, look, nearPx), length };
+    const answer = { walk: walkEdge(planes, a, dir, inward, start, 0.7 * length, look, nearPx, clock), length };
+    cache.set(key, answer);
+    return answer;
   };
   const reports: CornerReport[] = [];
+
   let sheetCorners = 0;
   for (let c = 0; c < 4; c += 1) {
     const p = points[c];
     const before = (c + 3) % 4;
     // A corner off the picture is the framing hints' business.
     if (p[0] < 0 || p[1] < 0 || p[0] > width || p[1] > height) {
-      reports.push({ provenance: "seen", confidence: 0, runs: [0, 0] });
+      reports.push({ provenance: "seen", confidence: 0, runs: [0, 0], basis: "off-image" });
       continue;
     }
     // The walk starts where its inner strip is clear of the other edge: at an
@@ -2419,7 +2457,7 @@ function provenance(
     const reachPx = Math.max(Math.max(WALK_START, start) + REACH_PX - WALK_START, reachDiag);
     const walks = [walkSide(before, c, Math.max(WALK_START, start)), walkSide(c, c, Math.max(WALK_START, start))];
     if (walks.every((w) => w === null)) {
-      reports.push({ provenance: "seen", confidence: 0, runs: [0, 0] });
+      reports.push({ provenance: "seen", confidence: 0, runs: [0, 0], basis: "no-edge" });
       continue;
     }
     const runs = walks.map((w) => (w === null ? 0 : Math.max(0, 1 - Math.min(w.walk.reach, w.length) / w.length))) as [number, number];
@@ -2445,7 +2483,7 @@ function provenance(
       );
     if (onSheet) {
       sheetCorners += 1;
-      reports.push({ provenance: "seen", confidence: 1, runs });
+      reports.push({ provenance: "seen", confidence: 1, runs, basis: "on-sheet" });
       continue;
     }
     const look = looks[before] ?? looks[c];
@@ -2464,7 +2502,17 @@ function provenance(
       walks.some((w) => w !== null && w.walk.reach >= reachPx) &&
       tipCovered(planes, p, points[before], points[(c + 1) % 4], look, desks);
     if (!coveredWalk && !coveredTip) {
-      reports.push({ provenance: "seen", confidence: walks.every((w) => w !== null && w.walk.reach <= reachPx) ? 1 : 0.5, runs });
+      // Seen on evidence: each edge reaches the corner, or — short of it —
+      // runs into the desk on both sides of its line (a rounded or torn
+      // corner: background where the tip would be).
+      const reaches = walks.every((w) => w !== null && w.walk.reach <= reachPx);
+      const evidenced = walks.every(
+        (w) =>
+          w !== null &&
+          (w.walk.reach <= reachPx || (w.walk.desk >= COVER_MIN_SAMPLES && w.walk.desk >= COVER_SHARE * w.walk.measured)),
+      );
+      const basis: CornerBasis = reaches ? "edges" : evidenced ? "rounded" : walks.some((w) => w === null) ? "one-edge" : "short";
+      reports.push({ provenance: "seen", confidence: reaches ? 1 : 0.5, runs, basis });
       continue;
     }
     // Covered: inferred when both edges are seen far enough to extend, unknown otherwise.
@@ -2480,7 +2528,7 @@ function provenance(
       );
     });
     const confidence = trusted ? Math.min(1, Math.max(0, (Math.min(runs[0], runs[1]) - INFER_MIN_RUN) / (1 - INFER_MIN_RUN))) : 0;
-    reports.push({ provenance: trusted ? "inferred" : "unknown", confidence, runs });
+    reports.push({ provenance: trusted ? "inferred" : "unknown", confidence, runs, basis: "covered" });
   }
   // Another sheet past sides whose own two corners are seen: the page lies
   // on it or under it whole — not a sheet over one of its corners.
@@ -2494,7 +2542,7 @@ function provenance(
   const separate =
     deskNotPaper &&
     (sheetCorners > 0 ||
-      (paperOf !== null && deskInside(planes, points, outsides, paperOf, diag)) ||
+      (paperOf !== null && deskInside(planes, points, outsides, paperOf, diag, clock)) ||
     rungs.filter(
       (rung, k) =>
         rung.report.accepted &&
@@ -2502,8 +2550,20 @@ function provenance(
         reports[k].provenance === "seen" &&
         reports[(k + 1) % 4].provenance === "seen" &&
         sheetBeyond(states[k], rung.edge, diag),
-    ).length >= 2);
+    ).length >= SEPARATE_SIDES);
   return { corners: reports, occlusion: { suspected: reports.some((r) => r.provenance !== "seen"), separate } };
+}
+
+/** A stable name for a rung's line within one refinement (the walk cache's key). */
+const rungIds = new WeakMap<Rung, number>();
+let nextRungId = 0;
+function rungKey(rung: Rung): number {
+  let id = rungIds.get(rung);
+  if (id === undefined) {
+    id = nextRungId += 1;
+    rungIds.set(rung, id);
+  }
+  return id;
 }
 
 /**
@@ -2514,7 +2574,7 @@ function provenance(
  * the found edges, not the page's paper) for at least {@link WEDGE_DEPTH} of
  * the diagonal, on at least {@link WEDGE_SHARE} of a side's profiles.
  */
-function deskInside(planes: Planes, points: Vec[], desks: Float32Array[], paper: Paper, diag: number): boolean {
+function deskInside(planes: Planes, points: Vec[], desks: Float32Array[], paper: Paper, diag: number, clock: Clock): boolean {
   // Only a desk well apart from the paper: on a white table the page's own
   // blank margin reads as the desk.
   const ref = Float32Array.of(paper.l, paper.w, paper.t);
@@ -2541,6 +2601,7 @@ function deskInside(planes: Planes, points: Vec[], desks: Float32Array[], paper:
     const b = points[(k + 1) % 4];
     let wedges = 0;
     for (let j = 0; j < WEDGE_PROFILES; j += 1) {
+      clock.check();
       const f = (j + 0.5) / WEDGE_PROFILES;
       const x0 = a[0] + (b[0] - a[0]) * f;
       const y0 = a[1] + (b[1] - a[1]) * f;
@@ -2607,9 +2668,9 @@ function sheetBeyond(st: SideState, h: { a: number; b: number }, diag: number): 
 
 const KEYS = ["topLeft", "topRight", "bottomRight", "bottomLeft"] as const;
 
-/** Four corners nothing was measured at. */
+/** Four corners nothing was measured at: never `seen` — a reader that skips `measured` still holds auto-capture. */
 function unmeasured(): CornerReport[] {
-  return [0, 1, 2, 3].map(() => ({ provenance: "seen", confidence: 0, runs: [0, 0] }));
+  return [0, 1, 2, 3].map(() => ({ provenance: "unknown", confidence: 0, runs: [0, 0], basis: "unmeasured" }));
 }
 
 const NO_OCCLUSION: OcclusionReport = { suspected: false, separate: false };
@@ -2622,8 +2683,9 @@ function unchanged(
   sides: SideReport[] = [],
   corners: CornerReport[] = unmeasured(),
   occlusion: OcclusionReport = NO_OCCLUSION,
+  measured = false,
 ): RefineResult {
-  return { quad, changed: false, sides, corners, occlusion, ms: now() - started, reason };
+  return { quad, changed: false, sides, corners, occlusion, measured, ms: now() - started, reason };
 }
 
 function kept(reason: string, h?: Hypothesis): SideReport {
@@ -2947,7 +3009,8 @@ function refine(
   const dropped = (combo: number[]) =>
     combo.reduce((s, r, k) => s + (r > 0 ? Math.abs(ladders[k][0].report.shiftFrac) : 0), 0);
   combos.sort((p, q) => stepsDown(p) - stepsDown(q) || dropped(q) - dropped(p));
-  const measure = (rungs: Rung[], points: Vec[]) => provenance(planes, states, rungs, points, diag, clock);
+  const walks = new Map<string, { walk: Walk; length: number } | null>();
+  const measure = (rungs: Rung[], points: Vec[]) => provenance(planes, states, rungs, points, diag, clock, walks);
   for (const combo of combos) {
     const rungs = combo.map((r, k) => ladders[k][r]);
     if (!rungs.some((rung) => rung.report.accepted)) break;
@@ -2976,7 +3039,7 @@ function refine(
     }
     // Every corner found where it already was: the prior confirmed, not changed.
     if (points.every((p, k) => Math.hypot(p[0] - corners[k][0], p[1] - corners[k][1]) < MOVED_PX)) {
-      return unchanged(quad, started, now, "no-change", sides, reports, occlusion);
+      return unchanged(quad, started, now, "no-change", sides, reports, occlusion, true);
     }
     const refined = {} as NormalizedQuad;
     KEYS.forEach((key, k) => {
@@ -2987,7 +3050,7 @@ function refine(
         y: Math.min(Math.max(1, y), Math.max(Math.min(0, y), points[k][1] / height)),
       };
     });
-    return { quad: refined, changed: true, sides, corners: reports, occlusion, ms: now() - started, reason: "refined" };
+    return { quad: refined, changed: true, sides, corners: reports, occlusion, measured: true, ms: now() - started, reason: "refined" };
   }
   const moved = wideReports.some((side) => side.accepted);
   return unchanged(quad, started, now, moved ? "insane" : "no-change", wideReports);

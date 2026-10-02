@@ -302,6 +302,14 @@ const MOTION_SPAN_MS = 700;
 const JUMP_RESET_DIAG = 0.08;
 
 /**
+ * A corner check speaks for the tracked page while it was measured on a
+ * pass at most this long (frame time) before the newest accepted one…
+ */
+const CHECK_FRESH_MS = 1000;
+/** …on a quad no further than this (fraction of the diagonal) from the one drawn now. */
+const CHECK_DRIFT_DIAG = 0.02;
+
+/**
  * Consecutive readings that say "paper" before a tracked quad counts as a
  * found sheet — one lucky reading of a place mat is not a page — and
  * consecutive readings that say "not paper" before a found sheet is let go —
@@ -638,6 +646,13 @@ interface Runtime {
    * auto-capture's hard gate. Null with no page, or none measured yet.
    */
   check: CornerCheck | null;
+  /**
+   * What `check` was measured on: the frame time of its pass and the quad it
+   * walked (as drawn). A check speaks for the page only while it is fresh
+   * and the quad has not drifted from it ({@link checkSpeaks}).
+   */
+  checkAt: number | null;
+  checkQuad: NormalizedQuad | null;
   /** Since when (frame time) the tracked page has had an unknown corner / another sheet over it, or null. */
   unknownSince: number | null;
   separateSince: number | null;
@@ -716,6 +731,8 @@ function freshRuntime(): Runtime {
     fill: null,
     answer: null,
     check: null,
+    checkAt: null,
+    checkQuad: null,
     unknownSince: null,
     separateSince: null,
   };
@@ -743,6 +760,19 @@ function switchDetector(runtime: Runtime, source: DetectionSource, lane: DetectL
 }
 
 /**
+ * The tracked page's corner check still describes it: measured on a pass
+ * within {@link CHECK_FRESH_MS} of the newest accepted one, on a quad within
+ * {@link CHECK_DRIFT_DIAG} of the one drawn now. Otherwise the page is
+ * unmeasured — and an unmeasured page is never ready nor auto-captured.
+ */
+function checkSpeaks(runtime: Runtime, aspect: number): boolean {
+  if (runtime.check === null || runtime.checkAt === null || runtime.checkQuad === null) return false;
+  if (runtime.shown === null || runtime.lastAccepted === null) return false;
+  if (runtime.lastAccepted.capturedAt - runtime.checkAt > CHECK_FRESH_MS) return false;
+  return quadJump(runtime.checkQuad, runtime.shown, aspect) <= CHECK_DRIFT_DIAG;
+}
+
+/**
  * Drop everything the overlay and a capture could still be reading.
  *
  * Called the moment tracking stops being live — paused behind a sheet, camera
@@ -757,6 +787,8 @@ function switchDetector(runtime: Runtime, source: DetectionSource, lane: DetectL
  */
 function clearTracking(runtime: Runtime, overlay: LiveOverlayRefs): void {
   runtime.check = null;
+  runtime.checkAt = null;
+  runtime.checkQuad = null;
   runtime.unknownSince = null;
   runtime.separateSince = null;
   runtime.target = null;
@@ -1644,7 +1676,7 @@ export function useLiveDetect({
           const result = refineQuad(pixels, quad, { mode: detection.source === "ml" ? "full" : "local", budgetMs: LIVE_REFINE_BUDGET_MS });
           refineMs = result.ms;
           // Only an answer that ran to its end says anything about the corners.
-          if (result.reason === "refined" || result.reason === "no-change") check = cornerCheckOf(result);
+          check = cornerCheckOf(result);
           if (result.changed) {
             corners = denormalizeQuad(result.quad, canvas.width, canvas.height);
             refined = corners;
@@ -2362,6 +2394,8 @@ export function useLiveDetect({
         runtime.evidenceMisses = 0;
         runtime.evidenceHits = 0;
         runtime.check = null;
+        runtime.checkAt = null;
+        runtime.checkQuad = null;
         runtime.unknownSince = null;
         runtime.separateSince = null;
       }
@@ -2369,6 +2403,8 @@ export function useLiveDetect({
       // next one says otherwise (a pass that ran out of time says nothing).
       if (check !== null) {
         runtime.check = check;
+        runtime.checkAt = capturedAt;
+        runtime.checkQuad = shown;
         runtime.unknownSince = hasUnknown(check) ? (runtime.unknownSince ?? capturedAt) : null;
         runtime.separateSince = check.separate ? (runtime.separateSince ?? capturedAt) : null;
       }
@@ -2575,7 +2611,11 @@ export function useLiveDetect({
       // has held on a found page, so a pass that misreads a corner once does
       // not put words on screen.
       const check = tracking ? runtime.check : null;
-      const uncertain = isUncertain(check);
+      // Fails closed: a page whose corners no recent pass measured on (about)
+      // this quad — every pass out of its refinement budget, or the quad
+      // drifted since — is as uncertain as one with a covered corner.
+      const measured = tracking && checkSpeaks(runtime, aspect);
+      const uncertain = tracking && (!measured || isUncertain(check));
       const occlusion =
         !tracking || !runtime.locked
           ? null
@@ -2631,9 +2671,11 @@ export function useLiveDetect({
           : covered
             ? "corner under a control"
             : uncertain
-              ? check?.separate
-                ? "sheets overlap"
-                : `corner ${hasUnknown(check) ? "unknown" : "inferred"}`
+              ? !measured
+                ? "corners unmeasured"
+                : check?.separate
+                  ? "sheets overlap"
+                  : `corner ${hasUnknown(check) ? "unknown" : "inferred"}`
               : raw !== null
               ? `hint ${raw}`
               : shown !== null
@@ -2687,7 +2729,9 @@ export function useLiveDetect({
         fire = auto.fire && !uncertain && watch(now);
         if (auto.fire && !fire) {
           runtime.blockWhy = uncertain
-            ? "auto: cancelled, corner uncertain"
+            ? measured
+              ? "auto: cancelled, corner uncertain"
+              : "auto: cancelled, corners unmeasured"
             : `auto: cancelled, camera moved (watch ${runtime.watchScore === null ? "–" : runtime.watchScore.toFixed(3)})`;
           guidance.ready.update(false, false, now);
           runtime.countdown = null;

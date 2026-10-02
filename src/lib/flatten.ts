@@ -159,9 +159,11 @@ export interface QuadDetection {
   /**
    * What the refinement said about the corners (`lib/corner-check.ts`):
    * each seen, inferred or unknown, and whether another sheet overlaps the
-   * page. Absent when the answer was not refined.
+   * page. Absent when the answer was not refined; `null` when the
+   * refinement measured nothing (out of time, no paper): unmeasured, not
+   * all-seen.
    */
-  check?: CornerCheck;
+  check?: CornerCheck | null;
 }
 
 /**
@@ -383,7 +385,7 @@ export function refineCornersChecked(
   quad: NormalizedQuad,
   detector: DetectionSource | null,
   from: RefineFrom,
-): { quad: NormalizedQuad; check: CornerCheck } {
+): { quad: NormalizedQuad; check: CornerCheck | null } {
   const mode = detector === "ml" ? "full" : "local";
   const result = refineOnCanvas(frame, quad, { mode });
   if (probing()) {

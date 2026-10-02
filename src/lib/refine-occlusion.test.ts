@@ -306,7 +306,39 @@ test("trap: an ID card's rounded corners are seen (the corner is where the edges
   for (let k = 0; k < 4; k += 1) for (let i = 0; i <= 6; i += 1) outline.push(at(k, (i / 6) * (Math.PI / 2)));
   canvas.polygon(outline, [236, 238, 242], 1.2);
   const result = refineQuad(canvas.image(), toQuad(card.map(([x, y]) => [x + (x < 300 ? 3 : -3), y + (y < 370 ? 3 : -3)] as Pt)));
-  assert.deepEqual(provenance(result), ["seen", "seen", "seen", "seen"], describe(result));
+  // Nothing here is called covered. The card's edges are too faint for the
+  // refinement to walk at this prior: it measured nothing, and says so —
+  // unmeasured is never all-seen (`measured`, and every corner unknown).
+  if (result.measured) assert.deepEqual(provenance(result), ["seen", "seen", "seen", "seen"], describe(result));
+  else {
+    assert.deepEqual(provenance(result), ["unknown", "unknown", "unknown", "unknown"], describe(result));
+    assert.equal(result.occlusion.suspected, false);
+  }
+  assert.ok(!provenance(result).includes("inferred"), describe(result));
+});
+
+test("a refinement that runs out of time measures nothing: every corner unknown, never seen", () => {
+  const canvas = page();
+  let t = 0;
+  const result = refineQuad(canvas.image(), toQuad(shrink(PAGE, 0.006)), { budgetMs: 5, now: () => (t += 10) });
+  assert.equal(result.reason, "budget");
+  assert.equal(result.measured, false);
+  assert.deepEqual(provenance(result), ["unknown", "unknown", "unknown", "unknown"]);
+});
+
+test("trap: a mat's border all round a real corner, its edges faint in glare, is not called covered", () => {
+  const canvas = page();
+  // A bright band one colour right past the top-left corner on both its
+  // edges' lines (a mat's stitched border, a table's light edge)…
+  const [x, y] = PAGE[0];
+  canvas.polygon([[x - 20, y - 20], [x + 40, y - 20], [x + 40, y - 2], [x - 2, y - 2], [x - 2, y + 40], [x - 20, y + 40]], [196, 150, 60], 1);
+  canvas.polygon(PAGE, PAPER, 1.2);
+  // …the page's tip faded towards it (soft focus) and a lamp over it: its
+  // edges fade out short of the corner. The tip itself is the page's paper.
+  canvas.polygon([[x - 1, y - 1], [x + 30, y - 1], [x - 1, y + 30]], [230, 225, 200], 6);
+  canvas.glare(x + 2, y + 2, 45, 0.5);
+  const result = refineQuad(canvas.image(), toQuad(shrink(PAGE, 0.006)));
+  assert.equal(provenance(result)[0], "seen", describe(result));
 });
 
 test("trap: a torn-off corner (the desk where the corner was) is seen", () => {

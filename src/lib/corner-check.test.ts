@@ -27,15 +27,23 @@ test("a refinement's corner reports become a check keyed like its quad (TL, TR, 
   const check = cornerCheckOf({
     corners: [report("inferred"), report("seen"), report("seen"), report("unknown")],
     occlusion: { suspected: true, separate: false },
+    measured: true,
   });
+  assert.ok(check !== null);
   assert.deepEqual(check.corners, { topLeft: "inferred", topRight: "seen", bottomRight: "seen", bottomLeft: "unknown" });
   assert.equal(check.separate, false);
 });
 
+test("a refinement that measured nothing answers no check — unmeasured, never all-seen", () => {
+  const placeholder = [report("seen"), report("seen"), report("seen"), report("seen")];
+  assert.equal(cornerCheckOf({ corners: placeholder, occlusion: { suspected: false, separate: false }, measured: false }), null);
+});
+
 test("uncertain: any corner not seen, or another sheet over the page — what holds auto-capture", () => {
   assert.equal(isUncertain(ALL_SEEN), false);
-  assert.equal(isUncertain(null), false);
-  assert.equal(isUncertain(undefined), false);
+  // No check is not an all-clear: auto-capture fails closed.
+  assert.equal(isUncertain(null), true);
+  assert.equal(isUncertain(undefined), true);
   const inferred: CornerCheck = { corners: { ...ALL_SEEN.corners, topLeft: "inferred" }, separate: false };
   const unknown: CornerCheck = { corners: { ...ALL_SEEN.corners, bottomRight: "unknown" }, separate: false };
   const separate: CornerCheck = { corners: ALL_SEEN.corners, separate: true };

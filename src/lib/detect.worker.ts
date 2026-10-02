@@ -273,7 +273,7 @@ async function run(job: Job): Promise<void> {
         // the overlay draws. The classical detector's is only snapped nearby.
         const result = refineQuad(pixels, quad, { mode: found.detector === "ml" ? "full" : "local", budgetMs: job.refineMs });
         refineMs = result.ms;
-        if (result.reason === "refined" || result.reason === "no-change") check = cornerCheckOf(result);
+        check = cornerCheckOf(result);
         if (result.changed) {
           corners = denormalizeQuad(result.quad, job.width, job.height);
           refined = corners;
