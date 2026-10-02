@@ -399,3 +399,98 @@ test("guard: a side found on a sheet's outline, the page's own edge seen inside 
   // the top edge: not trusted.
   assert.equal(provenance(result)[0], "unknown", describe(result));
 });
+
+// ── the model's quad the union of the page and what lies over it ─────────────
+
+/** A smaller page low right in the picture, and room up-left for a big sheet over its corner. */
+const SMALL: Pt[] = [
+  [262, 330],
+  [520, 316],
+  [536, 700],
+  [248, 710],
+];
+
+test("the model's quad spans the page and a big sheet over its corner: the quad comes back to the page's visible runs", () => {
+  const canvas = new Canvas(LEATHER);
+  canvas.polygon(SMALL, PAPER, 1.5);
+  text(canvas, 0.1, 0.15, 0.9, 0.85, SMALL);
+  // The sheet's own corner on the page, the sheet reaching far up and left.
+  const tip = onPage(0.12, 0.14, SMALL);
+  canvas.polygon([[18, 58], [tip[0], 58], tip, [18, tip[1]]], LEAFLET, 1.2);
+  // The model's corner out on the sheet's far corner: the union of the two,
+  // over half again the page — the page's top edge is seen along under half
+  // of the prior's top side.
+  const prior: Pt[] = [[24, 64], SMALL[1], SMALL[2], SMALL[3]];
+  const result = refineQuad(canvas.image(), toQuad(prior));
+  assert.ok(cornerError(result.quad, 0, SMALL) < 0.006, `top-left off by ${(cornerError(result.quad, 0, SMALL) * 100).toFixed(2)} % (${describe(result)})`);
+  assert.ok(worstCorner(result.quad, SMALL) < 0.006, describe(result));
+  assert.notEqual(provenance(result)[0], "seen", describe(result));
+  assert.equal(result.occlusion.suspected, true);
+});
+
+// ── two sheets: the page on another, the desk between two ───────────────────
+
+test("two sheets: the page's corner lying on another sheet is seen, and the two sheets are said to overlap", () => {
+  const canvas = new Canvas(LEATHER);
+  // The other sheet under the page's bottom-right corner, reaching well past it.
+  const corner = PAGE[2];
+  canvas.polygon([[corner[0] - 150, corner[1] - 170], [corner[0] + 90, corner[1] - 182], [corner[0] + 100, corner[1] + 90], [corner[0] - 140, corner[1] + 96]], [236, 236, 230], 1.2);
+  // The page's soft contact shadow on it, then the page.
+  canvas.polygon(PAGE.map(([x, y]) => [x + 2, y + 3] as Pt), [190, 188, 182], 3);
+  canvas.polygon(PAGE, PAPER, 1.2);
+  text(canvas, 0.1, 0.12, 0.9, 0.85);
+  const result = refineQuad(canvas.image(), toQuad(shrink(PAGE, 0.006)));
+  assert.ok(worstCorner(result.quad) < 0.005, describe(result));
+  assert.deepEqual(provenance(result), ["seen", "seen", "seen", "seen"], describe(result));
+  assert.equal(result.occlusion.separate, true, describe(result));
+});
+
+test("two sheets taken for one (the desk between them inside the answer): the two are said to overlap", () => {
+  const canvas = new Canvas(LEATHER);
+  // Two sheets, the second down and to the right, overlapping at one corner;
+  // the model's quad their hull.
+  const a: Pt[] = [
+    [80, 90],
+    [330, 82],
+    [338, 420],
+    [86, 428],
+  ];
+  const b: Pt[] = a.map(([x, y]) => [x + 110, y + 300] as Pt);
+  canvas.polygon(a, PAPER, 1.2);
+  text(canvas, 0.1, 0.12, 0.9, 0.85, a);
+  canvas.polygon(b.map(([x, y]) => [x + 2, y + 3] as Pt), [190, 188, 182], 3);
+  canvas.polygon(b, PAPER, 1.2);
+  text(canvas, 0.1, 0.12, 0.9, 0.85, b);
+  const hull: Pt[] = [a[0], [b[1][0], a[1][1]], b[2], [a[3][0], b[3][1]]];
+  const result = refineQuad(canvas.image(), toQuad(hull));
+  assert.equal(result.occlusion.separate, true, describe(result));
+});
+
+test("trap: a page on a desk mat, the mat's edge and the wood past it near a corner, is one page", () => {
+  const canvas = new Canvas([188, 140, 96]);
+  // The mat ends 30 px past the page's right edge.
+  canvas.polygon([[0, 0], [PAGE[1][0] + 30, 0], [PAGE[2][0] + 30, H], [0, H]], LEATHER, 1.5);
+  canvas.polygon(PAGE, PAPER, 1.5);
+  text(canvas, 0.1, 0.12, 0.9, 0.85);
+  const result = refineQuad(canvas.image(), toQuad(shrink(PAGE, 0.006)));
+  assert.deepEqual(provenance(result), ["seen", "seen", "seen", "seen"], describe(result));
+  assert.equal(result.occlusion.separate, false, describe(result));
+});
+
+// ── a clipboard ──────────────────────────────────────────────────────────────
+
+test("a page on a clipboard, the board's margin wide at the top and bottom and too thin to read at the sides: the crop is the page's", () => {
+  const canvas = new Canvas([214, 210, 204]);
+  const [tl, tr, br, bl] = PAGE;
+  // The board: 3 px past the page's sides, 60 px past its top, 30 px past its bottom.
+  canvas.polygon([[tl[0] - 3, tl[1] - 60], [tr[0] + 3, tr[1] - 60], [br[0] + 3, br[1] + 30], [bl[0] - 3, bl[1] + 30]], [120, 82, 52], 1.2);
+  canvas.polygon(PAGE, PAPER, 1.5);
+  text(canvas, 0.1, 0.12, 0.9, 0.85);
+  // The clip over the top edge's middle, out over the board.
+  const [a, b] = [onPage(0.35, 0), onPage(0.65, 0)];
+  canvas.polygon([[a[0], a[1] - 40], [b[0], b[1] - 40], [b[0], b[1] + 22], [a[0], a[1] + 22]], [40, 40, 44], 1.2);
+  // The model's quad: the board's outline.
+  const prior: Pt[] = [[tl[0] - 3, tl[1] - 60], [tr[0] + 3, tr[1] - 60], [br[0] + 3, br[1] + 30], [bl[0] - 3, bl[1] + 30]];
+  const result = refineQuad(canvas.image(), toQuad(prior));
+  assert.ok(worstCorner(result.quad) < 0.006, describe(result));
+});

@@ -134,9 +134,11 @@ export interface OcclusionReport {
   /** A corner is covered: some corner is `inferred` or `unknown`. */
   suspected: boolean;
   /**
-   * Another sheet overlaps this one: paper reaching well past a side whose
-   * own edge runs to a seen corner (the sheet below, or the one on top seen
-   * past it). Two sheets, not one page: "Separe as folhas".
+   * Another sheet overlaps this one: paper reaching well past two sides whose
+   * own edges run to seen corners (the sheet below, or the one on top seen
+   * past it); a corner of the page seen lying on another sheet; or the desk
+   * inside the answer, between two sheets it spans. Two sheets, not one
+   * page: "Separe as folhas".
    */
   separate: boolean;
 }
@@ -349,6 +351,13 @@ const FRAME_SLACK_PX = 0.5;
 /** Area of the refined quad over the prior's. */
 const MIN_AREA_RATIO = 0.7;
 const MAX_AREA_RATIO = 2.5;
+/**
+ * …down to this when a side is fitted on a visible run (pass 4): a prior
+ * whose corner sat out on the sheet over the page is the union of the two,
+ * often well over half again the page. The new quad must still lie inside
+ * the prior ({@link MIN_OVERLAP}).
+ */
+const MIN_AREA_RATIO_OCCLUDED = 0.4;
 /** The refined quad and the prior share at least this share of the smaller: the same page, not a neighbour. */
 const MIN_OVERLAP = 0.85;
 /** A corner closer than this to where it was (working px) did not move. */
@@ -1715,12 +1724,14 @@ const PAPER_LIGHT = 0.7;
  * A board's margin is looked for up to this far inside the prior's sides
  * (fraction of the diagonal): at least this wide (px), one even material
  * other than the desk and the paper, on this share of a side's middle
- * profiles.
+ * profiles (at least {@link BOARD_MIN_PROFILES} of them).
  */
-const BOARD_REACH = 0.06;
+const BOARD_REACH = 0.1;
 const BOARD_MIN_PX = 3;
 const BOARD_BLUR = 5;
 const BOARD_SHARE = 0.4;
+/** …and on at least this many of them. */
+const BOARD_MIN_PROFILES = 6;
 /**
  * The occluder guard ({@link overSheet}): a paper-on-paper line at least this
  * far inside a found side (fraction of the diagonal), near parallel to it
@@ -1737,8 +1748,13 @@ const OCCLUDED_INWARD = 0.15;
 const OCCLUDED_MAX_ANGLE_DEG = 40;
 /** Lines the run search weighs per side (a page's text rows are lines too, and many). */
 const OCCLUDED_LINES = 24;
-/** A visible run covers at least this share of the side's profiles… */
-const OCCLUDED_MIN_RUN = 0.45;
+/**
+ * A visible run covers at least this share of the side's profiles… (The
+ * prior's side may run far out onto the sheet over the corner, so the
+ * page's edge, seen nearly whole, can be a third of it; whether the corner
+ * so placed is trusted is the provenance's call, on the answer's own sides.)
+ */
+const OCCLUDED_MIN_RUN = 0.3;
 /** …with gaps of at most this many profiles (a strip of print, a speck)… */
 const RUN_GAP = 2;
 /**
@@ -1796,6 +1812,22 @@ const COVER_SHARP = 0.4;
  */
 const INFER_MIN_RUN = 0.4;
 const INFER_MAX_EXTEND = 0.6;
+/** {@link deskInside}: profiles per side, start and step inside it, and the wedge's depth and share (fractions of the diagonal / of the profiles). */
+const WEDGE_PROFILES = 16;
+const WEDGE_FROM = 0.01;
+const WEDGE_STEP = 0.004;
+const WEDGE_DEPTH = 0.05;
+const WEDGE_SHARE = 0.25;
+/**
+ * The page's corner on another sheet (two sheets overlapping, the page on
+ * top): along each edge short of where the desk is outside it, at least this
+ * share of what was measured shows the edge over the other sheet — paper
+ * outside at least {@link UNDER_LIGHT} of the page's luma (in the page's
+ * contact shadow, darker), and still {@link UNDER_FAR} px further out.
+ */
+const UNDER_SHARE = 0.6;
+const UNDER_LIGHT = 0.6;
+const UNDER_FAR = 14;
 /**
  * Two sheets: paper right outside a side, reaching at least this far past it
  * (fraction of the diagonal), along at least this share of its profiles.
@@ -1965,12 +1997,14 @@ function overSheet(scan: SideScan, h: Hypothesis, lines: Judged[], paper: Paper[
 }
 
 /**
- * The page on a board — a clipboard, a mat — taken for the page: on three
+ * The page on a board — a clipboard, a mat — taken for the page: on two
  * or more sides the page's own edge lies a few px or more inside the
  * prior, and what lies between the two is one even material, not paper,
- * reaching out to the prior — the board, the same all round (in whatever
- * light). That material is the background the page's edges are found
- * against, and cutting it away clips nothing.
+ * reaching out to the prior — the board, the same on those sides (in
+ * whatever light), with something else past the prior on one of them at
+ * least. (A board's margin can be too thin to read on the other sides, and
+ * its top is under the clip.) That material is the background the page's
+ * edges are found against, and cutting it away clips nothing.
  */
 function boardInside(states: SideState[], diag: number): Desk | null {
   const strip = new Float32Array(3);
@@ -1993,9 +2027,10 @@ function boardInside(states: SideState[], diag: number): Desk | null {
           break;
         }
       }
-      if (end === null) continue;
+      // (The page's edge right at the prior — a board's margin too thin to
+      // read there — says nothing either way.)
+      if (end === null || end > -BOARD_MIN_PX) continue;
       seen += 1;
-      if (end > -BOARD_MIN_PX) continue;
       // …then back out over one material, to the prior at least.
       // (Past the edge's blur: a few px.)
       if (!stripMean(scan, i, end + BOARD_BLUR, end + BOARD_BLUR + 3, first) || paperLike(first, paper[i])) continue;
@@ -2003,24 +2038,24 @@ function boardInside(states: SideState[], diag: number): Desk | null {
       while (out + 3 <= STRIP_FAR && stripMean(scan, i, out, out + 3, strip) && colourDistance(strip, first) <= BACKGROUND_MATCH && !paperLike(strip, paper[i])) {
         out += 2;
       }
-      if (out < 0) continue;
+      if (out + 3 < -BOARD_BLUR) continue;
       for (let j = 0; j < 3; j += 1) cols[j].push(first[j]);
       // What lies past the prior: the board again, or the desk past it.
       if (stripMean(scan, i, STRIP_FAR + 2, STRIP_FAR + 8, strip)) for (let j = 0; j < 3; j += 1) outs[j].push(strip[j]);
     }
-    if (seen === 0 || cols[0].length < BOARD_SHARE * seen) continue;
+    if (cols[0].length < BOARD_MIN_PROFILES || cols[0].length < BOARD_SHARE * seen) continue;
     const median = (v: number[]) => v.sort((p, q) => p - q)[v.length >> 1];
     colours.push(Float32Array.from(cols.map(median)));
     beyond.push(outs[0].length === 0 ? null : Float32Array.from(outs.map(median)));
   }
-  if (colours.length < 3) return null;
+  if (colours.length < 2) return null;
   for (let i = 0; i < colours.length; i += 1) {
     const agree = colours.map((q, j) => j).filter((j) => sameMaterial(colours[j], colours[i]));
     // A board ends somewhere: on two of its sides at least, the prior is its
     // outline, with the desk — something else — past it. A loose prior on an
     // even desk has the desk on both sides of it.
     const outlined = agree.filter((j) => beyond[j] !== null && colourDistance(beyond[j]!, colours[i]) > BACKGROUND_MATCH).length;
-    if (agree.length >= 3 && outlined >= 2) return { colour: colours[i], even: true };
+    if (agree.length >= 2 && outlined >= 1) return { colour: colours[i], even: true };
   }
   return null;
 }
@@ -2144,6 +2179,12 @@ interface Walk {
   reach: number;
   /** Samples short of `reach`: covered (paper over the line, an object across it), the desk on both sides, measured at all. */
   covered: number;
+  /**
+   * Samples short of `reach` where the edge is there after all, over another
+   * sheet: the page's paper inside, a step at the line, and paper — not the
+   * desk — outside it and on past it (the sheet the page lies on).
+   */
+  under: number;
   desk: number;
   measured: number;
   /**
@@ -2188,6 +2229,17 @@ function walkEdge(planes: Planes, corner: Vec, dir: Vec, inward: Vec, start: num
     return false;
   };
   const at3 = new Float32Array(3);
+  const far = new Float32Array(3);
+  // The page's edge over another sheet: a step at the line, the page's
+  // paper inside, light paper — not the desk — outside and further out.
+  const overSheetAt = (x: number, y: number) => {
+    if (!paperLike(inner, look.paper) || colourDistance(inner, outer) < MATERIAL_STEP) return false;
+    const light = (c: Float32Array) =>
+      c[0] >= UNDER_LIGHT * look.paper.l && colourDistance(c, look.outer) > BACKGROUND_MATCH && !inShade(c, look.outer) && !otherStock({ l: c[0], w: c[1], t: c[2] }, look.paper);
+    if (!light(outer)) return false;
+    return strip(x - inward[0] * UNDER_FAR, y - inward[1] * UNDER_FAR, -1, far) && light(far);
+  };
+  const unders: boolean[] = [];
   const kinds: Stretch[] = [];
   const ts: number[] = [];
   const outers: number[] = [];
@@ -2196,6 +2248,7 @@ function walkEdge(planes: Planes, corner: Vec, dir: Vec, inward: Vec, start: num
     const y = corner[1] + dir[1] * t;
     let kind: Stretch = strip(x, y, 1, inner) && strip(x, y, -1, outer) ? classify(inner, outer, look) : "off";
     if (kind === "paper" && deskNear(x, y)) kind = "other";
+    unders.push(kind !== "off" && kind !== "edge" && kind !== "desk" && overSheetAt(x, y));
     kinds.push(kind);
     ts.push(t);
     outers.push(outer[0], outer[1], outer[2]);
@@ -2208,9 +2261,11 @@ function walkEdge(planes: Planes, corner: Vec, dir: Vec, inward: Vec, start: num
         let covered = 0;
         let desk = 0;
         let measured = 0;
+        let under = 0;
         for (let j = 0; j < first; j += 1) {
           if (kinds[j] === "off") continue;
           measured += 1;
+          if (unders[j]) under += 1;
           if (kinds[j] === "paper" || kinds[j] === "object") covered += 1;
           if (kinds[j] === "desk") desk += 1;
         }
@@ -2239,20 +2294,22 @@ function walkEdge(planes: Planes, corner: Vec, dir: Vec, inward: Vec, start: num
           }
         }
         for (let q = 0; q < 3; q += 1) deskNear[q] /= Math.max(1, m);
-        return { reach: ts[first], covered, desk, measured, sharp, deskNear };
+        return { reach: ts[first], covered, under, desk, measured, sharp, deskNear };
       }
     }
   }
   let covered = 0;
   let desk = 0;
   let measured = 0;
-  for (const kind of kinds) {
-    if (kind === "off") continue;
+  let under = 0;
+  kinds.forEach((kind, j) => {
+    if (kind === "off") return;
     measured += 1;
+    if (unders[j]) under += 1;
     if (kind === "paper" || kind === "object") covered += 1;
     if (kind === "desk") desk += 1;
-  }
-  return { reach: Infinity, covered, desk, measured, sharp: 1, deskNear: null };
+  });
+  return { reach: Infinity, covered, under, desk, measured, sharp: 1, deskNear: null };
 }
 
 /**
@@ -2343,6 +2400,7 @@ function provenance(
     return { walk: walkEdge(planes, a, dir, inward, start, 0.7 * length, look, nearPx), length };
   };
   const reports: CornerReport[] = [];
+  let sheetCorners = 0;
   for (let c = 0; c < 4; c += 1) {
     const p = points[c];
     const before = (c + 3) % 4;
@@ -2374,6 +2432,22 @@ function provenance(
         w.walk.covered > w.walk.desk &&
         w.walk.sharp >= COVER_SHARP,
     );
+    // The edges seen right up to the corner after all, over another sheet:
+    // the page lies on it (or it on the page's corner, seen past it) — the
+    // corner is seen; the two sheets are another matter ("Separe as folhas").
+    const onSheet =
+      walks.some((w) => w !== null && w.walk.reach > reachPx) &&
+      walks.every(
+        (w) =>
+          w === null ||
+          w.walk.reach <= reachPx ||
+          (w.walk.under >= COVER_MIN_SAMPLES && w.walk.under >= UNDER_SHARE * w.walk.measured),
+      );
+    if (onSheet) {
+      sheetCorners += 1;
+      reports.push({ provenance: "seen", confidence: 1, runs });
+      continue;
+    }
     const look = looks[before] ?? looks[c];
     // Every desk seen round the page: a clip is none of them; the desk
     // changing past the corner (a mat's border, a table's edge) is one of
@@ -2412,9 +2486,15 @@ function provenance(
   // on it or under it whole — not a sheet over one of its corners.
   // (Never on a paper-coloured desk: there the "sheet" past a side is the table.)
   const deskNotPaper = looks.some((look) => look !== null && !look.outerPaper);
-  // A whole sheet offset under or over this one shows past two of its sides.
+  // A corner seen lying on another sheet; the desk inside the answer (two
+  // sheets spanned as one); a whole sheet offset under or over this one,
+  // showing past two of its sides.
+  const outsides = looks.flatMap((l) => (l === null || l.outerPaper ? [] : [l.outer]));
+  const paperOf = looks.find((l) => l !== null)?.paper ?? null;
   const separate =
     deskNotPaper &&
+    (sheetCorners > 0 ||
+      (paperOf !== null && deskInside(planes, points, outsides, paperOf, diag)) ||
     rungs.filter(
       (rung, k) =>
         rung.report.accepted &&
@@ -2422,8 +2502,70 @@ function provenance(
         reports[k].provenance === "seen" &&
         reports[(k + 1) % 4].provenance === "seen" &&
         sheetBeyond(states[k], rung.edge, diag),
-    ).length >= 2;
+    ).length >= 2);
   return { corners: reports, occlusion: { suspected: reports.some((r) => r.provenance !== "seen"), separate } };
+}
+
+/**
+ * Two sheets taken for one: the answer reaches over both, and the desk
+ * between them lies inside it — a wedge of the desk running in from a side.
+ * Along {@link WEDGE_PROFILES} profiles of each side, walked in from
+ * {@link WEDGE_FROM} of the diagonal inside it: the desk (the colour outside
+ * the found edges, not the page's paper) for at least {@link WEDGE_DEPTH} of
+ * the diagonal, on at least {@link WEDGE_SHARE} of a side's profiles.
+ */
+function deskInside(planes: Planes, points: Vec[], desks: Float32Array[], paper: Paper, diag: number): boolean {
+  // Only a desk well apart from the paper: on a white table the page's own
+  // blank margin reads as the desk.
+  const ref = Float32Array.of(paper.l, paper.w, paper.t);
+  desks = desks.filter((d) => colourDistance(d, ref) > 2 * BACKGROUND_MATCH);
+  if (desks.length === 0) return false;
+  const cx = (points[0][0] + points[1][0] + points[2][0] + points[3][0]) / 4;
+  const cy = (points[0][1] + points[1][1] + points[2][1] + points[3][1]) / 4;
+  const c = new Float32Array(3);
+  const at = new Float32Array(3);
+  const step = WEDGE_STEP * diag;
+  const deskAt = (x: number, y: number, ux: number, uy: number) => {
+    // Three samples across the walk, averaged: one speck is not the desk.
+    c.fill(0);
+    for (const o of [-2, 0, 2]) {
+      if (!sampleInto(planes, x + uy * o, y - ux * o, at, 0)) return false;
+      c[0] += at[0] / 3;
+      c[1] += at[1] / 3;
+      c[2] += at[2] / 3;
+    }
+    return !paperLike(c, paper) && desks.some((d) => colourDistance(c, d) <= BACKGROUND_MATCH);
+  };
+  for (let k = 0; k < 4; k += 1) {
+    const a = points[k];
+    const b = points[(k + 1) % 4];
+    let wedges = 0;
+    for (let j = 0; j < WEDGE_PROFILES; j += 1) {
+      const f = (j + 0.5) / WEDGE_PROFILES;
+      const x0 = a[0] + (b[0] - a[0]) * f;
+      const y0 = a[1] + (b[1] - a[1]) * f;
+      const toC = Math.hypot(cx - x0, cy - y0);
+      if (toC < 1) continue;
+      const ux = (cx - x0) / toC;
+      const uy = (cy - y0) / toC;
+      let run = 0;
+      let miss = 0;
+      for (let d = WEDGE_FROM * diag; d < 0.5 * toC; d += step) {
+        if (deskAt(x0 + ux * d, y0 + uy * d, ux, uy)) {
+          run += step;
+          miss = 0;
+        } else if (run > 0 && miss === 0) {
+          miss = 1;
+        } else {
+          break;
+        }
+        if (run >= WEDGE_DEPTH * diag) break;
+      }
+      if (run >= WEDGE_DEPTH * diag) wedges += 1;
+    }
+    if (wedges >= WEDGE_SHARE * WEDGE_PROFILES) return true;
+  }
+  return false;
 }
 
 /**
@@ -2773,7 +2915,7 @@ function refine(
     return rungs;
   });
   const priorArea = polygonArea(corners);
-  const corneredBy = (lines: Line[]): Vec[] | null => {
+  const corneredBy = (lines: Line[], minRatio = MIN_AREA_RATIO): Vec[] | null => {
     const points: Vec[] = [];
     for (let k = 0; k < 4; k += 1) {
       const p = intersect(lines[(k + 3) % 4], lines[k]);
@@ -2790,7 +2932,7 @@ function refine(
     // the page into its mirror image, and one that has slid off most of the
     // prior is a neighbour's crop.
     if (!inFrame || Math.sign(area) !== Math.sign(priorArea) || !saneQuad(points, MIN_CORNER_ANGLE_DEG)) return null;
-    if (!(ratio > MIN_AREA_RATIO && ratio < MAX_AREA_RATIO)) return null;
+    if (!(ratio > minRatio && ratio < MAX_AREA_RATIO)) return null;
     return overlapArea(points, corners) >= MIN_OVERLAP * Math.min(Math.abs(area), Math.abs(priorArea)) ? points : null;
   };
   const combos: number[][] = [[]];
@@ -2809,10 +2951,17 @@ function refine(
   for (const combo of combos) {
     const rungs = combo.map((r, k) => ladders[k][r]);
     if (!rungs.some((rung) => rung.report.accepted)) break;
-    const points = corneredBy(rungs.map((rung) => rung.line));
+    const points = corneredBy(
+      rungs.map((rung) => rung.line),
+      rungs.some((rung) => rung.report.mode === "occluded") ? MIN_AREA_RATIO_OCCLUDED : MIN_AREA_RATIO,
+    );
     if (points === null) continue;
     const sides = rungs.map((rung) => rung.report);
     const { corners: reports, occlusion } = measure(rungs, points);
+    // Well inside the prior on the strength of visible runs alone: only when
+    // every corner they place is trusted. (Two sheets side by side would
+    // otherwise give the strip where they overlap.)
+    if (Math.abs(polygonArea(points)) <= MIN_AREA_RATIO * Math.abs(priorArea) && reports.some((r) => r.provenance === "unknown")) continue;
     // A side fitted on a visible run is believed only for the corner it was
     // fitted to infer: one of its two corners must show something over it.
     if (
