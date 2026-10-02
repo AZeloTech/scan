@@ -462,3 +462,26 @@ test("framing: a framing hint whose ask is met clears at once, before its minimu
   assert.equal(other.update("glare", HINT_APPEAR_MS), "glare");
   assert.equal(other.update(null, HINT_APPEAR_MS + 200), "glare");
 });
+
+test("covered corners: a sheet over the page asks after framing and before light, glare and stillness", () => {
+  // Framing first: the page cut off at the view's edge is asked for before what lies on it.
+  assert.equal(rawHint(input({ sheet: rect(0.0, 0.2, 0.9, 0.75), occlusion: "covered" }), null), "move-back");
+  assert.equal(rawHint(input({ occlusion: "covered" }), null), "corner-covered");
+  assert.equal(rawHint(input({ occlusion: "separate" }), null), "separate-sheets");
+  // Another sheet over the page outranks a covered corner.
+  assert.equal(rawHint(input({ occlusion: "separate", bright: 40, glare: 0.3, motion: 0.05 }), null), "separate-sheets");
+  assert.equal(rawHint(input({ occlusion: "covered", bright: 40 }), null), "corner-covered");
+  // An inferred corner (placed from its edges) says nothing: the dashed bracket is its cue.
+  assert.equal(rawHint(input({ occlusion: null }), null), null);
+  // No page found: nothing about what lies on it.
+  assert.equal(rawHint(input({ locked: false, sheet: null, occlusion: "covered", sheetSeenAt: null }), null), "not-found");
+});
+
+test("covered corners: the hint goes through the slot's debounce like any other — it never flickers", () => {
+  const slot = new HintDebounce();
+  assert.equal(slot.update("corner-covered", 0), null);
+  assert.equal(slot.update("corner-covered", HINT_APPEAR_MS), "corner-covered");
+  // A pass that reads the corner seen for a moment does not take it down before its minimum show.
+  assert.equal(slot.update(null, HINT_APPEAR_MS + 200), "corner-covered");
+  assert.equal(slot.update(null, HINT_APPEAR_MS + HINT_MIN_GAP_MS + 10), null);
+});

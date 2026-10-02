@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import type { CornerEditor, CornerPoints } from "scanic";
+import type { CornerHandleKey } from "@/lib/flatten";
 import { detectInBlob, localizeCornerHandles } from "@/lib/flatten";
 import { loadScanic } from "@/lib/scanic-runtime";
 import { decodeCanonical, releaseCanvas } from "@/lib/image";
@@ -14,6 +15,7 @@ import {
 import type { Capture } from "@/lib/capture-intake";
 import { probe, probing, quadMoved } from "@/lib/probe";
 import { maxCornerMovePct } from "@/lib/diagnostics-events";
+import { isUncertain, provenanceByNearest, provenanceDiagnostic, type CornerCheck } from "@/lib/corner-check";
 import { deriveShellTheme, LOUPE_RING } from "@/lib/shell-theme";
 import { fillSlot, flyToSlot } from "@/lib/motion";
 import { useBlobUrl } from "@/hooks/useScanStore";
@@ -98,6 +100,13 @@ export function ConfirmCornersScreen({
   const [landed, setLanded] = React.useState(false);
   /** False once the editor opened with no page outline to seed it (its own inset quad). */
   const [found, setFound] = React.useState(true);
+  /**
+   * The seed has a corner the capture could not see (`lib/corner-check.ts`),
+   * still where it was estimated: the pill says so until the person moves it.
+   */
+  const [estimated, setEstimated] = React.useState(false);
+  /** What the seed's corners were, for the diagnostics stream. */
+  const seedCheckRef = React.useRef<CornerCheck | null>(null);
 
   const copy = useCopy();
   const urls = useAssetUrls();
@@ -139,6 +148,7 @@ export function ConfirmCornersScreen({
                 quality: capture.sizes.quality,
               },
         capped: capture.sizes?.capped ?? null,
+        corners: provenanceDiagnostic(seedCheckRef.current),
       });
     },
     [capture.attention, capture.sizes, diagnosticsSink, pageNumber],
@@ -229,6 +239,7 @@ export function ConfirmCornersScreen({
 
   /** A stable per-language object (the dictionary is a module constant). */
   const handleLabels = copy.corners.handles;
+  const estimatedCopy = copy.confirm;
 
   React.useEffect(() => {
     let cancelled = false;
@@ -237,14 +248,15 @@ export function ConfirmCornersScreen({
 
     async function boot(): Promise<void> {
       try {
-        const [canvas, detected, scanic] = await Promise.all([
+        const [canvas, seed, scanic] = await Promise.all([
           decodeCanonical(canonical),
           // The live quad if the viewfinder had one; a fresh detect otherwise.
           capture.corners !== null
-            ? Promise.resolve(capture.corners)
-            : detectInBlob(canonical, urls).then((d) => d?.corners ?? null),
+            ? Promise.resolve({ corners: capture.corners, check: capture.cornerCheck ?? null })
+            : detectInBlob(canonical, urls).then((d) => (d === null ? null : { corners: d.corners, check: d.check ?? null })),
           loadScanic(urls),
         ]);
+        const detected = seed?.corners ?? null;
         const host = hostRef.current;
         if (cancelled || host === null) {
           releaseCanvas(canvas);
@@ -297,6 +309,17 @@ export function ConfirmCornersScreen({
         setFound(detected !== null);
         // scanic names its handles in English and offers no option for it.
         localizeCornerHandles(host, handleLabels);
+        // A corner something lay over, placed where its edges meet: its
+        // handle is marked "estimado" (hollow, dashed, a word under it) and
+        // named so, until the person moves it.
+        const check = detected === null ? null : (seed?.check ?? null);
+        seedCheckRef.current = check;
+        if (check !== null && detected !== null && isUncertain(check)) {
+          markEstimatedHandles(host, check, detected, canvas.width, canvas.height, editor.getCorners(), handleLabels, estimatedCopy, () => {
+            if (!cancelled) setEstimated(false);
+          });
+          setEstimated(host.querySelector("[data-scan-estimated]") !== null);
+        }
         if (probing() || diagnosticsSink !== null) {
           // What the user is looking at: the seed, or — with none — the
           // editor's own inset quad, which is what "confirm" would hand back.
@@ -352,7 +375,7 @@ export function ConfirmCornersScreen({
       editor?.destroy();
       editorRef.current = null;
     };
-  }, [canonical, capture.corners, diagnosticsSink, handleLabels, reportError, shell, urls]);
+  }, [canonical, capture.corners, capture.cornerCheck, diagnosticsSink, estimatedCopy, handleLabels, reportError, shell, urls]);
 
   const busy = phase === "flying";
 
@@ -366,7 +389,9 @@ export function ConfirmCornersScreen({
       ? copy.confirm.attention[capture.attention]
       : phase === "ready" && !found
         ? copy.confirm.notFound
-        : null;
+        : phase === "ready" && estimated
+          ? copy.confirm.estimatedPill
+          : null;
 
   return (
     <div
@@ -497,6 +522,50 @@ export function ConfirmCornersScreen({
       </div>
     </div>
   );
+}
+
+/**
+ * Mark the editor's handles whose corner the capture could not see
+ * (inferred or unknown, `lib/corner-check.ts`): `data-scan-estimated` (the
+ * stylesheet draws it hollow and dashed, with the badge word from
+ * `data-scan-estimated-label`) and an accessible name that says so. The
+ * editor may hand its handles back in another order than the quad it was
+ * seeded with, so each handle takes the provenance of the seed corner nearest
+ * it. Moving a handle (pointer or keys) takes its mark away; `onCleared`
+ * runs once none is left.
+ */
+function markEstimatedHandles(
+  host: HTMLElement,
+  check: CornerCheck,
+  seed: NormalizedQuad,
+  width: number,
+  height: number,
+  shown: CornerPoints,
+  labels: Record<CornerHandleKey, string>,
+  words: { estimatedBadge: string; estimatedHandle: (corner: string) => string },
+  onCleared: () => void,
+): void {
+  const normalized: Record<string, { x: number; y: number }> = {};
+  for (const [key, point] of Object.entries(shown)) normalized[key] = { x: point.x / width, y: point.y / height };
+  const provenance = provenanceByNearest(check, seed, normalized);
+  for (const handle of host.querySelectorAll<HTMLElement>("[data-corner]")) {
+    const key = handle.dataset.corner as CornerHandleKey | undefined;
+    if (key === undefined || !(key in labels) || provenance[key] === undefined || provenance[key] === "seen") continue;
+    handle.setAttribute("data-scan-estimated", provenance[key]);
+    handle.setAttribute("data-scan-estimated-label", words.estimatedBadge);
+    handle.setAttribute("aria-label", words.estimatedHandle(labels[key]));
+    const clear = () => {
+      if (!handle.hasAttribute("data-scan-estimated")) return;
+      handle.removeAttribute("data-scan-estimated");
+      handle.removeAttribute("data-scan-estimated-label");
+      handle.setAttribute("aria-label", labels[key]);
+      if (host.querySelector("[data-scan-estimated]") === null) onCleared();
+    };
+    handle.addEventListener("pointerdown", clear, { once: true });
+    handle.addEventListener("keydown", (event) => {
+      if (event.key.startsWith("Arrow")) clear();
+    });
+  }
 }
 
 /**

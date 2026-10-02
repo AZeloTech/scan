@@ -113,6 +113,7 @@ import { QuadOneEuro } from "@/lib/one-euro";
 import { CadenceController, type CadenceProfile } from "@/lib/cadence";
 import { classicalQuadSane, PAPER, paperEvidence, paperSurface, type PaperEvidence } from "@/lib/paper-evidence";
 import { refineQuad } from "@/lib/refine";
+import { cornerCheckOf, hasUnknown, isUncertain, provenanceDiagnostic, type CornerCheck } from "@/lib/corner-check";
 import type { CornerPoints } from "@/lib/flatten";
 import {
   demoteDetectLane,
@@ -134,6 +135,7 @@ import {
   fillShare,
   HintDebounce,
   motionOf,
+  OCCLUSION_HINT_AFTER_MS,
   rawHint,
   ReadyCue,
   ReadyTick,
@@ -630,6 +632,15 @@ interface Runtime {
   fill: number | null;
   /** What the newest pass's detector answered and what the loop made of it ({@link PassAnswer}). */
   answer: PassAnswer | null;
+  /**
+   * The tracked page's corners, as the newest pass that measured them said
+   * (`lib/corner-check.ts`): the dashed brackets, the occlusion hints and
+   * auto-capture's hard gate. Null with no page, or none measured yet.
+   */
+  check: CornerCheck | null;
+  /** Since when (frame time) the tracked page has had an unknown corner / another sheet over it, or null. */
+  unknownSince: number | null;
+  separateSince: number | null;
 }
 
 /**
@@ -704,6 +715,9 @@ function freshRuntime(): Runtime {
     openHits: 0,
     fill: null,
     answer: null,
+    check: null,
+    unknownSince: null,
+    separateSince: null,
   };
 }
 
@@ -742,6 +756,9 @@ function switchDetector(runtime: Runtime, source: DetectionSource, lane: DetectL
  * a sheet or torn down has no claim on the next capture at all.
  */
 function clearTracking(runtime: Runtime, overlay: LiveOverlayRefs): void {
+  runtime.check = null;
+  runtime.unknownSince = null;
+  runtime.separateSince = null;
   runtime.target = null;
   runtime.displayTarget = null;
   runtime.current = null;
@@ -765,6 +782,8 @@ function clearTracking(runtime: Runtime, overlay: LiveOverlayRefs): void {
   runtime.openHits = 0;
   overlay.bracketsHalo.current?.setAttribute("d", "");
   overlay.brackets.current?.setAttribute("d", "");
+  overlay.inferredHalo.current?.setAttribute("d", "");
+  overlay.inferred.current?.setAttribute("d", "");
   overlay.countdown.current?.setAttribute("d", "");
   const group = overlay.group.current;
   if (group !== null) group.style.opacity = "0";
@@ -866,6 +885,8 @@ export interface LiveDiagnostics {
   fill: number | null;
   /** The newest pass's answer ({@link PassAnswer}), or null before the first. */
   answer: PassAnswer | null;
+  /** The tracked page's corners and overlap, as the newest measuring pass said (`lib/corner-check.ts`); null or absent with none. */
+  check?: CornerCheck | null;
 }
 
 /**
@@ -887,9 +908,20 @@ export interface LiveDiagnostics {
 export interface LiveOverlayRefs {
   /** Carries the fade. Give it `opacity: 0` at rest. */
   group: React.MutableRefObject<SVGGElement | null>;
-  /** The four corner brackets, halo under them. Both take `d`. */
+  /**
+   * The corner brackets, halo under them. Both take `d`. A corner something
+   * lies over (`lib/corner-check.ts`) is not among them: an inferred one is
+   * drawn on the two paths below instead, an unknown one not at all.
+   */
   bracketsHalo: React.MutableRefObject<SVGPathElement | null>;
   brackets: React.MutableRefObject<SVGPathElement | null>;
+  /**
+   * The brackets of the corners placed where their edges meet because
+   * something lies over them (inferred): drawn dashed, so the person sees the
+   * page's corner is estimated, not seen. Optional; both take `d`.
+   */
+  inferredHalo: React.MutableRefObject<SVGPathElement | null>;
+  inferred: React.MutableRefObject<SVGPathElement | null>;
   /**
    * The auto-capture countdown: the same brackets, grown from each corner
    * along its marks as the countdown runs (empty `d` when it is not).
@@ -1008,6 +1040,12 @@ interface PassOutcome {
   /** The frame's focus and light, when this pass read them. */
   reading: FrameReading | null;
   /**
+   * What the refinement said about the drawn quad's corners — seen, inferred
+   * or unknown — and whether another sheet overlaps it (`lib/corner-check.ts`);
+   * null when it did not run or gave up.
+   */
+  check?: CornerCheck | null;
+  /**
    * Worker lane: why the pass got no answer — `timeout` (the worker is busy
    * or stuck), `grab` (the frame could not be grabbed, drawn or read), or
    * null when it was answered.
@@ -1039,6 +1077,8 @@ export function useLiveDetect({
   const groupRef = React.useRef<SVGGElement | null>(null);
   const bracketsHaloRef = React.useRef<SVGPathElement | null>(null);
   const bracketsRef = React.useRef<SVGPathElement | null>(null);
+  const inferredHaloRef = React.useRef<SVGPathElement | null>(null);
+  const inferredRef = React.useRef<SVGPathElement | null>(null);
   const countdownRef = React.useRef<SVGPathElement | null>(null);
   const anchorRef = React.useRef<HTMLDivElement | null>(null);
   const ringRef = React.useRef<SVGCircleElement | null>(null);
@@ -1049,6 +1089,8 @@ export function useLiveDetect({
       group: groupRef,
       bracketsHalo: bracketsHaloRef,
       brackets: bracketsRef,
+      inferredHalo: inferredHaloRef,
+      inferred: inferredRef,
       countdown: countdownRef,
       anchor: anchorRef,
       ring: ringRef,
@@ -1588,6 +1630,7 @@ export function useLiveDetect({
       let evidence: EvidenceReading = null;
       let refined: CornerPoints | null = null;
       let refineMs: number | null = null;
+      let check: CornerCheck | null = null;
       if (detection !== null) {
         let pixels: ImageData | null = null;
         try {
@@ -1600,6 +1643,8 @@ export function useLiveDetect({
         if (pixels !== null && quad !== null) {
           const result = refineQuad(pixels, quad, { mode: detection.source === "ml" ? "full" : "local", budgetMs: LIVE_REFINE_BUDGET_MS });
           refineMs = result.ms;
+          // Only an answer that ran to its end says anything about the corners.
+          if (result.reason === "refined" || result.reason === "no-change") check = cornerCheckOf(result);
           if (result.changed) {
             corners = denormalizeQuad(result.quad, canvas.width, canvas.height);
             refined = corners;
@@ -1627,6 +1672,7 @@ export function useLiveDetect({
         detection,
         refined,
         refineMs,
+        check,
         heldEvidence,
         width: canvas.width,
         height: canvas.height,
@@ -1732,6 +1778,7 @@ export function useLiveDetect({
       return {
         detection,
         refined: detection === null ? null : reply.refined,
+        check: detection === null ? null : (reply.check ?? null),
         refineMs: reply.refineMs,
         heldEvidence: reply.heldEvidence,
         width,
@@ -1869,7 +1916,15 @@ export function useLiveDetect({
       const motionScore = motionAgainst(outcome.frameAt, outcome.luma);
       // The frame this describes is the one the pass sampled, not the moment
       // the detector got round to answering.
-      const { accepted, rejected } = accept(outcome.detection, outcome.width, outcome.height, outcome.frameAt, outcome.evidence, outcome.refined);
+      const { accepted, rejected } = accept(
+        outcome.detection,
+        outcome.width,
+        outcome.height,
+        outcome.frameAt,
+        outcome.evidence,
+        outcome.refined,
+        outcome.check ?? null,
+      );
       runtime.answer = passAnswer(outcome.detection, rejected, outcome.evidence);
       // A missed detection on a moved scene ends the hold: the stale
       // horizon exists to carry a stationary page through a flicker, and the
@@ -2250,6 +2305,7 @@ export function useLiveDetect({
       capturedAt: number,
       evidence: EvidenceReading,
       refined: CornerPoints | null = null,
+      check: CornerCheck | null = null,
     ): { accepted: boolean; rejected: string | null } {
       if (detection === null) return { accepted: false, rejected: null };
       const quad = normalizeQuad(detection.corners, width, height);
@@ -2305,6 +2361,16 @@ export function useLiveDetect({
         runtime.locked = false;
         runtime.evidenceMisses = 0;
         runtime.evidenceHits = 0;
+        runtime.check = null;
+        runtime.unknownSince = null;
+        runtime.separateSince = null;
+      }
+      // What the newest measuring pass said about the corners holds until the
+      // next one says otherwise (a pass that ran out of time says nothing).
+      if (check !== null) {
+        runtime.check = check;
+        runtime.unknownSince = hasUnknown(check) ? (runtime.unknownSince ?? capturedAt) : null;
+        runtime.separateSince = check.separate ? (runtime.separateSince ?? capturedAt) : null;
       }
       runtime.target = quad;
       runtime.shown = shown;
@@ -2428,9 +2494,17 @@ export function useLiveDetect({
       const quad = runtime.current;
       if (quad !== null) {
         const cap = bracketCap();
-        const brackets = cornerBracketPath(quad, BRACKET_EDGE_FRACTION, cap);
+        // Seen corners get the solid bracket, inferred ones the dashed, an
+        // unknown one none (`lib/corner-check.ts`).
+        const check = runtime.check;
+        const seen = check === null ? undefined : CORNER_KEYS.map((key) => check.corners[key] === "seen");
+        const inferred = check === null ? null : CORNER_KEYS.map((key) => check.corners[key] === "inferred");
+        const brackets = cornerBracketPath(quad, BRACKET_EDGE_FRACTION, cap, seen);
         overlay.bracketsHalo.current?.setAttribute("d", brackets);
         overlay.brackets.current?.setAttribute("d", brackets);
+        const dashed = inferred === null || !inferred.some(Boolean) ? "" : cornerBracketPath(quad, BRACKET_EDGE_FRACTION, cap, inferred);
+        overlay.inferredHalo.current?.setAttribute("d", dashed);
+        overlay.inferred.current?.setAttribute("d", dashed);
         // The countdown grows along each mark from its corner.
         const progress = runtime.countdown;
         overlay.countdown.current?.setAttribute(
@@ -2495,6 +2569,21 @@ export function useLiveDetect({
       // — at least 2.5 of the loop's interval, which a slow phone stretches.
       const motion = tracking ? motionOf(runtime.sheetReadings, aspect, Math.max(SHAKE_WINDOW_MS, 2.5 * runtime.intervalMs)) : null;
       const reading = runtime.reading !== null && now - runtime.reading.at <= READING_FRESH_MS ? runtime.reading : null;
+      // What lies over the page (`lib/corner-check.ts`). An uncertain page —
+      // a corner inferred or unknown, another sheet over it — is never ready
+      // and never auto-captured (owner rule); its hint is owed only once it
+      // has held on a found page, so a pass that misreads a corner once does
+      // not put words on screen.
+      const check = tracking ? runtime.check : null;
+      const uncertain = isUncertain(check);
+      const occlusion =
+        !tracking || !runtime.locked
+          ? null
+          : runtime.separateSince !== null && now - runtime.separateSince >= OCCLUSION_HINT_AFTER_MS
+            ? "separate"
+            : runtime.unknownSince !== null && now - runtime.unknownSince >= OCCLUSION_HINT_AFTER_MS
+              ? "covered"
+              : null;
       const raw = rawHint(
         {
           now,
@@ -2509,6 +2598,7 @@ export function useLiveDetect({
           sharp: reading?.sharp ?? null,
           bright: reading?.bright ?? null,
           glare: tracking ? runtime.glare : null,
+          occlusion,
         },
         guidance.hints.current,
       );
@@ -2528,9 +2618,10 @@ export function useLiveDetect({
       // moment it appeared is the flicker the debounce exists to prevent),
       // and while the cue is on the slot stays empty.
       const shown = announcedReady ? guidance.hints.value : guidance.hints.update(raw, now);
-      const strict = footing && !covered && raw === null && shown === null && runtime.readyVerdict && reading?.sharp !== false;
-      // A wobble keeps the cue; shaking (the hold-still hint owed) does not.
-      const keep = footing && !covered && shown === null && raw === null;
+      const strict = footing && !covered && !uncertain && raw === null && shown === null && runtime.readyVerdict && reading?.sharp !== false;
+      // A wobble keeps the cue; shaking (the hold-still hint owed) does not —
+      // nor a corner that something lies over.
+      const keep = footing && !covered && !uncertain && shown === null && raw === null;
       const isReady = guidance.ready.update(strict, keep, now);
       // The HUD's reason: the first condition keeping the cue off.
       runtime.blockWhy = isReady
@@ -2539,7 +2630,11 @@ export function useLiveDetect({
           ? "no page locked"
           : covered
             ? "corner under a control"
-            : raw !== null
+            : uncertain
+              ? check?.separate
+                ? "sheets overlap"
+                : `corner ${hasUnknown(check) ? "unknown" : "inferred"}`
+              : raw !== null
               ? `hint ${raw}`
               : shown !== null
                 ? `hint slot ${shown}`
@@ -2585,10 +2680,15 @@ export function useLiveDetect({
                   ? `auto: holding (${runtime.stillWhy ?? "wobble"})`
                   : "auto: waiting for a fresh pass";
         }
-        // One last look at the camera, at the instant of the photo.
-        fire = auto.fire && watch(now);
+        // One last look at the camera, at the instant of the photo — and,
+        // whatever the cue said, never on an uncertain page (owner rule: a
+        // corner inferred or unknown, or another sheet over the page, is for
+        // the person to judge, with the shutter).
+        fire = auto.fire && !uncertain && watch(now);
         if (auto.fire && !fire) {
-          runtime.blockWhy = `auto: cancelled, camera moved (watch ${runtime.watchScore === null ? "–" : runtime.watchScore.toFixed(3)})`;
+          runtime.blockWhy = uncertain
+            ? "auto: cancelled, corner uncertain"
+            : `auto: cancelled, camera moved (watch ${runtime.watchScore === null ? "–" : runtime.watchScore.toFixed(3)})`;
           guidance.ready.update(false, false, now);
           runtime.countdown = null;
         }
@@ -2779,10 +2879,15 @@ export function useLiveDetect({
           ready: announcedReady,
           countdown: runtime.countdown,
           watch: runtime.watchScore,
+          corners: tracking ? provenanceDiagnostic(runtime.check) : null,
+          separate: tracking ? (runtime.check?.separate ?? null) : null,
         });
       }
 
       if (fire) {
+        // What the page's corners were said to be at the fire: never an
+        // uncertain page (owner rule) — the bench checks it held.
+        if (probing()) probe({ type: "auto-fire", t: now, corners: provenanceDiagnostic(runtime.check), separate: runtime.check?.separate ?? null });
         // The same capture as a tap: the capture screen's path, which pauses
         // this loop and opens the confirm screen.
         onAutoCaptureRef.current?.();
@@ -2847,6 +2952,7 @@ export function useLiveDetect({
       passes: passCountRef.current,
       fill: runtime.fill,
       answer: runtime.answer,
+      check: runtime.target === null ? null : runtime.check,
     };
   }, []);
 

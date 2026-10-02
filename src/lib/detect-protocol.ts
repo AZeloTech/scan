@@ -26,6 +26,7 @@
 import type { CornerPoints } from "scanic";
 import type { PaperEvidence } from "@/lib/paper-evidence";
 import type { FrameReading } from "@/lib/hints";
+import type { CornerCheck } from "@/lib/corner-check";
 
 /** Which detector a job asks for. */
 export type DetectorKind = "ml" | "classical";
@@ -188,6 +189,12 @@ export interface ResultReply {
   refined: CornerPoints | null;
   /** What the refinement cost, ms, `null` when it did not run. */
   refineMs: number | null;
+  /**
+   * What the refinement said about the quad's corners (`lib/corner-check.ts`):
+   * seen / inferred / unknown each, and whether another sheet overlaps it.
+   * Absent or null when it did not run to its end.
+   */
+  check?: CornerCheck | null;
   evidence: PaperEvidence | null;
   /** The evidence for `held` on this frame, when the detector found nothing or found a quad away from it. */
   heldEvidence: PaperEvidence | null;

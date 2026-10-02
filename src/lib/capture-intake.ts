@@ -24,6 +24,7 @@
 import { detectInBlob } from "@/lib/flatten";
 import { assessBlob, type GateReading } from "@/lib/capture-gate";
 import { type NormalizedQuad } from "@/lib/quad";
+import type { CornerCheck } from "@/lib/corner-check";
 import type { StillAttention } from "@/lib/still-check";
 import { isAcceptedImageType, prepareCapture, ImagePrepError } from "@/lib/image";
 import { encodeQuality } from "@/lib/encode";
@@ -76,6 +77,12 @@ export interface Capture {
   sizes?: CaptureSizes;
   /** The quad, as fractions of the canonical — the corner editor's start. */
   corners: NormalizedQuad | null;
+  /**
+   * What the capture's refinement said about those corners
+   * (`lib/corner-check.ts`): the confirm screen marks a corner something lay
+   * over as estimated. Absent when not measured (a gallery pick, an edit).
+   */
+  cornerCheck?: CornerCheck;
   /**
    * The on-device "will this OCR?" reading, measured on the full-resolution
    * frame BEFORE any warp. It is the page's only quality verdict — there is

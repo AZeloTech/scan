@@ -5,6 +5,7 @@
  */
 
 import type { LiveDiagnostics } from "@/hooks/useLiveDetect";
+import { CORNER_KEYS } from "@/lib/quad";
 
 export interface HudExtras {
   torch: boolean;
@@ -32,6 +33,11 @@ export function hudLines(d: LiveDiagnostics, x: HudExtras, vibrate: boolean, lan
       : [
           `answer ${d.answer.conf === null ? "none" : `conf ${d.answer.conf.toFixed(2)} · ${d.answer.rejected ?? "taken"}`} · paper ${d.answer.paper === null ? "–" : d.answer.paper ? "yes" : "no"}`,
         ]),
+    ...(d.check != null && (d.check.separate || CORNER_KEYS.some((key) => d.check!.corners[key] !== "seen"))
+      ? [
+          `corners ${CORNER_KEYS.map((key) => d.check!.corners[key][0]).join("")}${d.check.separate ? " · sheets overlap" : ""}`,
+        ]
+      : []),
     ...(d.blocked !== null ? [`why: ${d.blocked}`] : []),
     ...(x.still?.attention ? [`last photo: ${x.still.attention}`] : []),
   ];

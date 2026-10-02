@@ -24,6 +24,11 @@
  *     "Afaste um pouco";
  *  3. the page not filling the viewfinder — "Aproxime" ("Aproxime mais um
  *     pouco" when it already nearly does: {@link FILL_NEAR});
+ *  3b. another sheet overlapping the page — "Separe as folhas"; a corner
+ *     something lies over and its edges cannot place — "Canto coberto —
+ *     afaste a folha de cima" ({@link OcclusionHint}, after
+ *     {@link OCCLUSION_HINT_AFTER_MS}): the page is framed, but what lies
+ *     on it is what keeps it from being ready;
  *  4. too dark — "Pouca luz" (with the torch offered where the camera has one);
  *  5. a reflection washing out part of the page — "Reflexo — incline o
  *     celular";
@@ -67,7 +72,31 @@
 
 import { CORNER_KEYS, type NormalizedQuad } from "@/lib/quad";
 
-export type HintKey = "searching" | "not-found" | "move-back" | "move-closer" | "center" | "low-light" | "glare" | "hold-still";
+export type HintKey =
+  | "searching"
+  | "not-found"
+  | "move-back"
+  | "move-closer"
+  | "center"
+  | "corner-covered"
+  | "separate-sheets"
+  | "low-light"
+  | "glare"
+  | "hold-still";
+
+/**
+ * What lies over the found page (`lib/corner-check.ts`), as the hint slot
+ * hears it: `separate` — another sheet overlaps it ("Separe as folhas");
+ * `covered` — a corner something lies over that its edges do not let anyone
+ * place ("Canto coberto — afaste a folha de cima"). Each only once it has
+ * held {@link OCCLUSION_HINT_AFTER_MS} of locked tracking. A corner that is
+ * covered but placed from its edges (inferred) says nothing here: the dashed
+ * bracket is its cue, and auto-capture holds.
+ */
+export type OcclusionHint = "separate" | "covered" | null;
+
+/** A covered corner or an overlapping sheet must hold this long on a found page before its hint is owed. */
+export const OCCLUSION_HINT_AFTER_MS = 700;
 
 /**
  * No sheet for this long since the loop started (or one was last seen)
@@ -501,6 +530,8 @@ export interface GuidanceInput {
   bright: number | null;
   /** Share of the found sheet's interior clipped white; null unknown. */
   glare: number | null;
+  /** What lies over the found page, once it has held ({@link OcclusionHint}); absent: nothing. */
+  occlusion?: OcclusionHint;
 }
 
 /**
@@ -526,6 +557,8 @@ export function rawHint(input: GuidanceInput, current: HintKey | null, rules: Fr
   // too, wherever the model drew its corners.
   const framing = framingHint(sheet, input, current, rules);
   if (framing !== null) return framing;
+  if (input.occlusion === "separate") return "separate-sheets";
+  if (input.occlusion === "covered") return "corner-covered";
   if (dark) return "low-light";
   if (input.glare !== null && input.glare >= (keep("glare") ? GLARE_EXIT : GLARE_ENTER)) return "glare";
   const shaky = input.motion !== null && input.motion > (keep("hold-still") ? SHAKY_EXIT : SHAKY_ENTER);

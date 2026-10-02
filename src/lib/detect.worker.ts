@@ -34,6 +34,7 @@ import {
 } from "@/lib/detect-protocol";
 import { paperEvidence } from "@/lib/paper-evidence";
 import { refineQuad } from "@/lib/refine";
+import { cornerCheckOf, type CornerCheck } from "@/lib/corner-check";
 import { denormalizeQuad, normalizeQuad } from "@/lib/quad";
 import { HINT_SAMPLE_WIDTH, readFrame, type FrameReading } from "@/lib/hints";
 
@@ -262,6 +263,7 @@ async function run(job: Job): Promise<void> {
     let evidence = null;
     let refined: ResultReply["refined"] = null;
     let refineMs: number | null = null;
+    let check: CornerCheck | null = null;
     if ((job.evidence || job.refineMs > 0) && found.success && found.corners !== null && workContext !== null) {
       const pixels = workContext.getImageData(0, 0, job.width, job.height);
       let corners = found.corners;
@@ -271,6 +273,7 @@ async function run(job: Job): Promise<void> {
         // the overlay draws. The classical detector's is only snapped nearby.
         const result = refineQuad(pixels, quad, { mode: found.detector === "ml" ? "full" : "local", budgetMs: job.refineMs });
         refineMs = result.ms;
+        if (result.reason === "refined" || result.reason === "no-change") check = cornerCheckOf(result);
         if (result.changed) {
           corners = denormalizeQuad(result.quad, job.width, job.height);
           refined = corners;
@@ -304,6 +307,7 @@ async function run(job: Job): Promise<void> {
       luma,
       refined,
       refineMs,
+      check,
       evidence,
       heldEvidence,
       hint,

@@ -170,6 +170,13 @@ export interface AppCopy {
       moveCloser: string;
       /** "Move closer" for a page that already nearly fills the view (`FILL_NEAR`, `lib/guidance.ts`): a small move, not a big one. */
       moveCloserNear: string;
+      /**
+       * A corner something lies over (a sheet, a clip) that its edges do not
+       * let the app place (`lib/corner-check.ts`): move what is on top.
+       */
+      cornerCovered: string;
+      /** Another sheet overlaps the page: separate them. */
+      separateSheets: string;
       lowLight: string;
       glare: string;
       holdStill: string;
@@ -295,6 +302,15 @@ export interface AppCopy {
      * Advisory: the screen and every control work the same either way.
      */
     attention: Record<"no-page" | "corner-outside" | "moved" | "unverified" | "low-resolution", string>;
+    /**
+     * A corner the capture could not see — something lay over it — placed
+     * where its two edges meet (`lib/corner-check.ts`): the pill's sentence
+     * when no other reason takes it, the short badge on that handle, and the
+     * handle's accessible name (the corner's own name before it).
+     */
+    estimatedPill: string;
+    estimatedBadge: string;
+    estimatedHandle: (corner: string) => string;
   };
 
   review: {
@@ -970,6 +986,8 @@ const PT: AppCopy = {
       center: "Centralize a folha",
       moveCloser: "Aproxime",
       moveCloserNear: "Aproxime mais um pouco",
+      cornerCovered: "Canto coberto — afaste a folha de cima",
+      separateSheets: "Separe as folhas",
       lowLight: "Pouca luz",
       glare: "Reflexo — incline o celular",
       holdStill: "Segure firme",
@@ -1054,6 +1072,9 @@ const PT: AppCopy = {
       unverified: "Não deu para conferir a folha inteira — veja os cantos",
       "low-resolution": "Foto em resolução menor — refaça se o texto ficar ilegível",
     },
+    estimatedPill: "Um canto estava coberto — confira o canto estimado",
+    estimatedBadge: "estimado",
+    estimatedHandle: (corner) => `${corner}: canto estimado — confira`,
   },
 
   review: {
@@ -1630,6 +1651,8 @@ const EN: AppCopy = {
       center: "Center the page",
       moveCloser: "Move closer",
       moveCloserNear: "Move a little closer",
+      cornerCovered: "Corner covered — move the sheet on top",
+      separateSheets: "Separate the sheets",
       lowLight: "Low light",
       glare: "Glare — tilt the phone",
       holdStill: "Hold still",
@@ -1715,6 +1738,9 @@ const EN: AppCopy = {
       unverified: "Could not check the whole sheet — look at the corners",
       "low-resolution": "Lower-resolution photo — retake if the text is hard to read",
     },
+    estimatedPill: "A corner was covered — check the estimated corner",
+    estimatedBadge: "estimated",
+    estimatedHandle: (corner) => `${corner}: estimated corner — check it`,
   },
 
   review: {

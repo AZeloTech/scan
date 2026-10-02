@@ -28,8 +28,8 @@ import {
 } from "@/lib/still-capture";
 import {
   detectInCanvas,
+  refineCornersChecked,
   isMlDetectionReady,
-  refineCorners,
   waitForMlIdle,
   type DetectionSource,
   type QuadDetection,
@@ -41,6 +41,7 @@ import { FILL_NEAR, type HintKey } from "@/lib/guidance";
 import { assessSource, type GateReading } from "@/lib/capture-gate";
 import { normalizedCoverage, type NormalizedQuad } from "@/lib/quad";
 import { refineOnCanvas } from "@/lib/refine";
+import { provenanceDiagnostic, type CornerCheck } from "@/lib/corner-check";
 import { flash, shutterPulse } from "@/lib/motion";
 import { probe, probeSetting, probing, type CaptureProbe, type CornersFrom } from "@/lib/probe";
 import { useLiveDetect } from "@/hooks/useLiveDetect";
@@ -776,7 +777,7 @@ export function CaptureStage({
    *     remembering another one.
    *
    * Whichever of the three wins is then **refined** onto the paper's edge on
-   * this frame ({@link refineCorners}) before it seeds the confirm screen: the
+   * this frame ({@link refineCornersChecked}) before it seeds the confirm screen: the
    * detect refines its own answer; a `live` or `fallback` quad — measured on a
    * 640 px sample of an earlier frame — is refined here, as the detector that
    * measured it (`carriedSource`) allows. The priority above is untouched:
@@ -841,9 +842,15 @@ export function CaptureStage({
       }
       const detected = detection?.corners ?? null;
       let corners = resolveCaptureCorners(live, detected, fallback);
+      // What the refinement says about the corners (`lib/corner-check.ts`):
+      // the photo's word — the full-resolution still is authoritative,
+      // whatever the viewfinder said about the same page.
+      let cornerCheck: CornerCheck | null = corners !== null && corners === detected ? (detection?.check ?? null) : null;
       // The detect refined its own answer; a carried quad is refined here.
       if (corners !== null && corners !== detected) {
-        corners = refineCorners(frame, corners, carriedSource, live !== null ? "live" : "fallback");
+        const refined = refineCornersChecked(frame, corners, carriedSource, live !== null ? "live" : "fallback");
+        corners = refined.quad;
+        cornerCheck = refined.check;
       }
       // The photo is checked before it is offered (`lib/still-check.ts`): the
       // page the viewfinder vouched for, mapped onto this image, against the
@@ -986,6 +993,8 @@ export function CaptureStage({
                   overlap: registration.overlap,
                 },
           flag: attention,
+          corners: corners === null ? null : provenanceDiagnostic(cornerCheck),
+          separate: corners === null || cornerCheck === null ? null : cornerCheck.separate,
         });
       }
       onCapture({
@@ -995,6 +1004,7 @@ export function CaptureStage({
         path: path ?? taken,
         attention,
         ...(sizes === undefined ? {} : { sizes }),
+        ...(corners === null || cornerCheck === null ? {} : { cornerCheck }),
       });
     },
     [diagnosticsSink, onCapture, pageNumber, path, urls],
@@ -1422,6 +1432,8 @@ export function CaptureStage({
           rejected: d.answer?.rejected ?? null,
           paper: d.answer?.paper ?? null,
           fill: d.fill,
+          corners: provenanceDiagnostic(d.check),
+          separate: d.check?.separate ?? null,
         });
       }
     };
@@ -1566,6 +1578,29 @@ export function CaptureStage({
                 )}
                 strokeWidth={detect.ready ? 5 : 3.5}
                 strokeLinecap="round"
+                vectorEffect="non-scaling-stroke"
+              />
+              {/* A corner something lies over, placed where its two edges
+                  meet (`lib/corner-check.ts`): the same mark, dashed — the
+                  page's corner is estimated, not seen. Auto-capture holds
+                  while one is up; the confirm screen marks it again. */}
+              <path
+                ref={detect.overlay.inferredHalo}
+                d=""
+                data-scan-inferred-corners=""
+                className="fill-none stroke-night/85"
+                strokeWidth={5.5}
+                strokeLinecap="round"
+                strokeDasharray="5 6"
+                vectorEffect="non-scaling-stroke"
+              />
+              <path
+                ref={detect.overlay.inferred}
+                d=""
+                className="fill-none stroke-warm"
+                strokeWidth={3.5}
+                strokeLinecap="round"
+                strokeDasharray="5 6"
                 vectorEffect="non-scaling-stroke"
               />
               <path
@@ -1883,6 +1918,8 @@ const HINT_TONE: Record<HintKey, "night" | "alert" | "warning"> = {
   "move-back": "night",
   center: "night",
   "move-closer": "night",
+  "corner-covered": "warning",
+  "separate-sheets": "warning",
   "low-light": "warning",
   glare: "night",
   "hold-still": "night",
@@ -1905,6 +1942,10 @@ function hintCopy(hints: ReturnType<typeof useCopy>["capture"]["hints"], key: Hi
       return hints.center;
     case "move-closer":
       return fill !== null && fill >= FILL_NEAR ? hints.moveCloserNear : hints.moveCloser;
+    case "corner-covered":
+      return hints.cornerCovered;
+    case "separate-sheets":
+      return hints.separateSheets;
     case "low-light":
       return hints.lowLight;
     case "glare":

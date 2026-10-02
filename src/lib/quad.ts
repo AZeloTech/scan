@@ -215,12 +215,15 @@ export function cornerBracketPath(
   quad: NormalizedQuad,
   fraction: number,
   cap: BracketCap,
+  /** Which corners (TL, TR, BR, BL) get a bracket; all when absent. */
+  include?: readonly boolean[],
 ): string {
   const corners = cornerList(quad);
   const share = Math.max(0, Math.min(0.5, fraction));
   const capLength = Math.max(0, cap.length);
   const segments: string[] = [];
   for (let index = 0; index < corners.length; index += 1) {
+    if (include !== undefined && include[index] === false) continue;
     const corner = corners[index];
     const neighbours = [
       corners[(index + corners.length - 1) % corners.length],
