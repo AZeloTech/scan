@@ -240,29 +240,34 @@ function render(results) {
       out.push("");
     }
     // 5d+ phase B: what lies over the page, against auto-capture and the hints.
-    const paperRows = Object.entries(results.summary).filter(([, { all: a }]) => a.paperLock || a.paperPageless);
+    const paperRows = Object.entries(results.summary).filter(([, { all: a }]) => a.paperLock || a.paperPageless || a.pagelessLocks);
     if (paperRows.length > 0) {
       const hist = (m) => Object.entries(m ?? {}).sort((x, y) => y[1] - x[1]).map(([k, v]) => `${k} ${v}`).join(", ") || "–";
       out.push("## Paper lock");
       out.push("");
       out.push(
-        "5d-paper: a page presented under the dim warm lamp (`marks.paperLock`, from the end of the approach to the tap). **locked** = the time-weighted " +
-          "share of that window the loop held the page as a found sheet; **first lock** p50 / p90 over runs (a run that never locked counts as never); " +
-          "**dropouts** = locks lost inside the steady windows (the page held still) after the first lock, and the steady time unlocked after it. " +
-          "**passes**: those that read the evidence · said paper · kept (locked, the reading not paper). **verdicts**, then for a surface failure the " +
-          "first clause of each print rule (`print` text on its background, `panels` printed images in a white margin), and for a sides failure the weak sides. " +
-          "A page-less session lists its passes the same way.",
+        "5d-paper: a page presented under the dim warm lamp (`marks.paperLock`, from the end of the approach to the tap). **locked** = the share of " +
+          "that whole window the loop held a found sheet **whose drawn quad was on the presented page** (every corner the frame shows within 8 % of " +
+          "the diagonal, the app's own \"another page\" line; time no sample covers counts as not locked), and in brackets the share also inside the " +
+          "wrong-crop line (3 %); **wrong** = the share it held a found sheet drawn anywhere else (the leaflet, the mat). **first lock** p50 / p90 over runs (a run that never locked counts as never); **dropouts** = locks lost inside the steady windows " +
+          "(the page held still) after the first lock, and the steady time not locked after it. **passes**: every regular pass in the window · no quad · " +
+          "turned away · read the evidence · said paper · kept (locked, the reading not paper). **verdicts**, then for a surface failure the first clause " +
+          "of each print rule (`print` text on its background, `panels` printed images in a white margin), and for a sides failure the weak sides. " +
+          "A page-less session lists its passes the same way; one page-less as a whole (`marks.pageless`: a document on a screen) shows the share of " +
+          "it held as a found sheet at all, in **wrong**, with its runs that locked.",
       );
       out.push("");
-      out.push("| session | runs | locked | first lock p50 / p90 ms | never | dropouts (/min) · steady unlocked | passes · paper · kept | verdicts | print | panels | weak sides |");
-      out.push("|---|---:|---:|---:|---:|---:|---:|---|---|---|---|");
+      out.push("| session | runs | locked | wrong | first lock p50 / p90 ms | never | dropouts (/min) · steady unlocked | passes · no quad · turned away · read · paper · kept | verdicts | print | panels | weak sides |");
+      out.push("|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|");
       for (const [session, { all: a }] of paperRows) {
         const p = a.paperLock;
-        const c = p?.clauses ?? a.paperPageless;
+        const q = a.pagelessLocks;
+        const c = p?.clauses ?? q?.clauses ?? a.paperPageless;
+        const wrong = p ? pct(p.wrongLockShare, 0) : q ? `**${pct(q.lockedShare, 0)}** (${q.runsLocked}/${q.runs} runs)` : "–";
         out.push(
-          `| ${session} | ${p?.runs ?? a.runs} | ${p ? `**${pct(p.lockedShare, 0)}**` : "–"} | ${p ? `${ms(p.firstLockP50)} / ${ms(p.firstLockP90)}` : "–"} | ${p?.neverLocked ?? "–"} | ` +
+          `| ${session} | ${p?.runs ?? q?.runs ?? a.runs} | ${p ? `**${pct(p.lockedShare, 0)}** (${pct(p.exactShare, 0)})` : "–"} | ${wrong} | ${p ? `${ms(p.firstLockP50)} / ${ms(p.firstLockP90)}` : "–"} | ${p?.neverLocked ?? "–"} | ` +
             `${p ? `${p.dropouts} (${p.dropoutsPerMinute === null ? "–" : p.dropoutsPerMinute.toFixed(1)}) · ${pct(p.steadyUnlockedShare, 0)}` : "–"} | ` +
-            `${c ? `${c.passes} · ${c.paper} · ${c.kept}` : "–"} | ${hist(c?.verdicts)} | ${hist(c?.print)} | ${hist(c?.panels)} | ${hist(c?.weakSides)} |`,
+            `${c ? `${c.detects ?? "–"} · ${c.noQuad ?? "–"} · ${c.rejected ?? "–"} · ${c.passes} · ${c.paper} · ${c.kept}` : "–"} | ${hist(c?.verdicts)} | ${hist(c?.print)} | ${hist(c?.panels)} | ${hist(c?.weakSides)} |`,
         );
       }
       out.push("");
@@ -934,10 +939,14 @@ export function summarize(rows) {
     if (Number.isFinite(row.score.falseLockExposure?.share)) entry.exposure.push(row.score.falseLockExposure.share);
     const pl = row.score.paperLock;
     if (pl) {
-      const P = (entry.paperLock ??= { runs: 0, observedMs: 0, lockedMs: 0, first: [], dropouts: 0, steadyMs: 0, steadyUnlockedMs: 0, clauses: null });
+      const P = (entry.paperLock ??= { runs: 0, windowMs: 0, observedMs: 0, lockedMs: 0, exactMs: 0, wrongLockMs: 0, first: [], dropouts: 0, steadyMs: 0, steadyUnlockedMs: 0, clauses: null });
       P.runs += 1;
+      // The whole presented window is the denominator: time no sample covers is not locked.
+      P.windowMs += pl.windowMs ?? pl.observedMs;
       P.observedMs += pl.observedMs;
       P.lockedMs += pl.lockedMs;
+      P.wrongLockMs += pl.wrongLockMs ?? 0;
+      P.exactMs += pl.exactMs ?? 0;
       P.first.push(pl.firstLockMs);
       P.dropouts += pl.dropouts;
       P.steadyMs += pl.steadyMs;
@@ -945,6 +954,17 @@ export function summarize(rows) {
       P.clauses = mergeClauses(P.clauses, pl.clauses);
     }
     if (row.score.paperPageless) entry.paperPageless = mergeClauses(entry.paperPageless ?? null, row.score.paperPageless);
+    const ql = row.score.pagelessLocks;
+    if (ql) {
+      const Q = (entry.pagelessLocks ??= { runs: 0, windowMs: 0, lockedMs: 0, locks: 0, longestMs: 0, runsLocked: 0, clauses: null });
+      Q.runs += 1;
+      Q.windowMs += ql.windowMs;
+      Q.lockedMs += ql.lockedMs;
+      Q.locks += ql.locks;
+      Q.longestMs = Math.max(Q.longestMs, ql.longestMs);
+      if (ql.locks > 0) Q.runsLocked += 1;
+      Q.clauses = mergeClauses(Q.clauses, ql.clauses);
+    }
   }
   const avg = (list) => (list.length > 0 ? list.reduce((s, v) => s + v, 0) / list.length : null);
   /** p50 over runs where a run that never got there counts as never (∞). */
@@ -1040,7 +1060,11 @@ export function summarize(rows) {
             ? {
                 paperLock: {
                   runs: e.paperLock.runs,
-                  lockedShare: e.paperLock.observedMs > 0 ? e.paperLock.lockedMs / e.paperLock.observedMs : null,
+                  // Locked on the presented page itself, over the whole presented window.
+                  lockedShare: e.paperLock.windowMs > 0 ? e.paperLock.lockedMs / e.paperLock.windowMs : null,
+                  wrongLockShare: e.paperLock.windowMs > 0 ? e.paperLock.wrongLockMs / e.paperLock.windowMs : null,
+                  exactShare: e.paperLock.windowMs > 0 ? e.paperLock.exactMs / e.paperLock.windowMs : null,
+                  observedShare: e.paperLock.windowMs > 0 ? e.paperLock.observedMs / e.paperLock.windowMs : null,
                   firstLockP50: p50Never(e.paperLock.first),
                   firstLockP90: p90Never(e.paperLock.first),
                   neverLocked: e.paperLock.first.filter((v) => v === null).length,
@@ -1050,10 +1074,24 @@ export function summarize(rows) {
                   clauses: e.paperLock.clauses,
                 },
                 // The headline --compare gates (larger is worse): the presented time not locked.
-                paperUnlockedShare: e.paperLock.observedMs > 0 ? 1 - e.paperLock.lockedMs / e.paperLock.observedMs : null,
+                paperUnlockedShare: e.paperLock.windowMs > 0 ? 1 - e.paperLock.lockedMs / e.paperLock.windowMs : null,
               }
             : {}),
           ...(e.paperPageless ? { paperPageless: e.paperPageless } : {}),
+          // A session page-less as a whole (a document on a screen): any lock at all, and its headline (larger is worse).
+          ...(e.pagelessLocks
+            ? {
+                pagelessLocks: {
+                  runs: e.pagelessLocks.runs,
+                  runsLocked: e.pagelessLocks.runsLocked,
+                  locks: e.pagelessLocks.locks,
+                  longestMs: e.pagelessLocks.longestMs,
+                  lockedShare: e.pagelessLocks.windowMs > 0 ? e.pagelessLocks.lockedMs / e.pagelessLocks.windowMs : null,
+                  clauses: e.pagelessLocks.clauses,
+                },
+                pagelessLockedShare: e.pagelessLocks.windowMs > 0 ? e.pagelessLocks.lockedMs / e.pagelessLocks.windowMs : null,
+              }
+            : {}),
           leaks:
             e.leaks.length === 0
               ? null
@@ -1081,7 +1119,8 @@ function p90Never(values) {
 /** Two {@link paperClauses} histograms added (the first may be null). */
 function mergeClauses(a, b) {
   if (a === null) return JSON.parse(JSON.stringify(b));
-  const out = { ...a, passes: a.passes + b.passes, paper: a.paper + b.paper, kept: a.kept + b.kept };
+  const out = { ...a };
+  for (const key of ["detects", "noQuad", "rejected", "unread", "passes", "readRejected", "paper", "kept"]) out[key] = (a[key] ?? 0) + (b[key] ?? 0);
   for (const key of ["verdicts", "print", "panels", "weakSides"]) {
     out[key] = { ...a[key] };
     for (const [k, v] of Object.entries(b[key])) out[key][k] = (out[key][k] ?? 0) + v;

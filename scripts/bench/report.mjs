@@ -88,22 +88,42 @@ export const ABSOLUTE_LIMITS = {
 };
 
 /**
- * 5d-paper: the least share of a presented page's time a dim-lamp session
- * must hold it as found, pooled over its runs (`paperLock.lockedShare`) —
- * a floor under the measured level (cpu 1, 8 seeds: owner-case 26–29 %,
- * no leaflet 69–73 %, sheet-over 25–28 %, text 66–69 %; before the margin
- * was judged locally 5 / 29 / 17 / 64 %), so the margin rule going back
- * fails the run (gated at cpu 1 with 8 runs or more: under
- * `--cpu 4` or on fewer seeds it is reported only). Synthetic; the detector's own
- * misses in the dim (no quad, a quad that jumps) are most of what is left.
+ * 5d-paper: the dim-lamp paper lock, gated per CPU rate on runs of
+ * {@link PAPER_LOCK_MIN_RUNS} seeds or more (`paperLock`, pooled over runs;
+ * scored on the presented page only, over the whole presented window:
+ * `session-score.mjs` `scorePaperLock`).
+ *
+ * - `floors`: the least share of the window locked on the page — under the
+ *   measured level by the run-to-run spread, so the margin rule, the
+ *   held-sheet exclusion or the memory going back fails the run.
+ * - `firstLockP50Ms`: the most the median first lock may take (cpu 1 only;
+ *   the spec's 1.5 s).
+ *
+ * The spec's target, 80 % of the presented time locked
+ * ({@link PAPER_LOCK_TARGET}), is reported against every run, not gated:
+ * the dim scenes' detector (no quad on a third of the passes, quads that
+ * jump) holds every page under it, and a gate that always fails gates
+ * nothing — it is the named follow-up (5d-detector), not a floor.
+ *
+ * With `--paper-gate` (npm run bench:paper) the four sessions are
+ * required: one absent, or run on fewer seeds, fails the run instead of
+ * passing silently ungated.
  */
 export const PAPER_LOCK_MIN_RUNS = 8;
-export const PAPER_LOCK_FLOORS = {
-  "dim-owner-case": 0.15,
-  "dim-owner-bare": 0.55,
-  "dim-sheet-over": 0.18,
-  "dim-text-page": 0.5,
+export const PAPER_LOCK_TARGET = 0.8;
+export const PAPER_LOCK_SESSIONS = ["dim-owner-case", "dim-owner-bare", "dim-sheet-over", "dim-text-page"];
+export const PAPER_LOCK_GATES = {
+  1: {
+    floors: { "dim-owner-case": 0.1, "dim-owner-bare": 0.55, "dim-sheet-over": 0.15, "dim-text-page": 0.55 },
+    firstLockP50Ms: 1500,
+  },
+  4: {
+    floors: { "dim-owner-case": 0.1, "dim-owner-bare": 0.45, "dim-sheet-over": 0.08, "dim-text-page": 0.4 },
+    firstLockP50Ms: null,
+  },
 };
+/** @deprecated the cpu-1 floors; {@link PAPER_LOCK_GATES} holds every rate's. */
+export const PAPER_LOCK_FLOORS = PAPER_LOCK_GATES[1].floors;
 
 /** Headline numbers where a larger value is worse, in report order: the detector's, then a session's. */
 const HEADLINES = {
@@ -520,19 +540,46 @@ export function compareSummaries(previous, current, tolerance = REGRESSION_TOLER
  * the key. A key it carries with no number is a breach too: unmeasured is
  * not within limits.
  */
-/** The dim-lamp sessions under their {@link PAPER_LOCK_FLOORS} — a run that has them fails, compared or not. */
+/** The dim-lamp sessions against {@link PAPER_LOCK_GATES} at the run's CPU rate — a run that has them fails, compared or not. */
 export function paperLockViolations(results) {
   const out = [];
-  // The floors were measured at cpu 1 over 8 seeds: a throttled or shorter run is reported, not gated.
-  if (results.suite === "session" && (results.config?.cpu ?? 1) === 1) {
-    for (const [session, floor] of Object.entries(PAPER_LOCK_FLOORS)) {
-      const lock = results.summary?.[session]?.all?.paperLock;
-      if (lock === undefined || lock.runs < PAPER_LOCK_MIN_RUNS) continue;
-      if (lock.lockedShare === null || !Number.isFinite(lock.lockedShare)) out.push(`${session}/all: paperLock.lockedShare has no value (floor ${floor})`);
-      else if (lock.lockedShare < floor) out.push(`${session}/all: paperLock.lockedShare ${lock.lockedShare.toFixed(3)} < floor ${floor}`);
+  if (results.suite !== "session") return out;
+  const cpu = results.config?.cpu ?? 1;
+  const required = results.config?.paperGate === true;
+  const gate = PAPER_LOCK_GATES[cpu];
+  if (gate === undefined) {
+    if (required) out.push(`paper gate: no floors measured at --cpu ${cpu} (only ${Object.keys(PAPER_LOCK_GATES).join(", ")})`);
+    return out;
+  }
+  for (const session of PAPER_LOCK_SESSIONS) {
+    const floor = gate.floors[session];
+    const lock = results.summary?.[session]?.all?.paperLock;
+    if (lock === undefined) {
+      if (required) out.push(`${session}/all: required by --paper-gate, not run`);
+      continue;
+    }
+    if (lock.runs < PAPER_LOCK_MIN_RUNS) {
+      if (required) out.push(`${session}/all: ${lock.runs} runs < ${PAPER_LOCK_MIN_RUNS} required by --paper-gate`);
+      continue;
+    }
+    if (lock.lockedShare === null || !Number.isFinite(lock.lockedShare)) out.push(`${session}/all: paperLock.lockedShare has no value (floor ${floor})`);
+    else if (lock.lockedShare < floor) out.push(`${session}/all: paperLock.lockedShare ${lock.lockedShare.toFixed(3)} < floor ${floor}`);
+    if (gate.firstLockP50Ms !== null && !(lock.firstLockP50 !== null && lock.firstLockP50 <= gate.firstLockP50Ms)) {
+      out.push(`${session}/all: paperLock.firstLockP50 ${lock.firstLockP50 === null ? "never" : Math.round(lock.firstLockP50)} > ${gate.firstLockP50Ms} ms`);
     }
   }
   return out;
+}
+
+/** The spec's 80 % target against each dim-lamp session in the run — reported, not gated ({@link PAPER_LOCK_TARGET}). */
+export function paperTargetLines(results) {
+  if (results.suite !== "session") return [];
+  return PAPER_LOCK_SESSIONS.flatMap((session) => {
+    const lock = results.summary?.[session]?.all?.paperLock;
+    if (lock === undefined || lock.lockedShare === null) return [];
+    const met = lock.lockedShare >= PAPER_LOCK_TARGET;
+    return [`${session}: locked ${(lock.lockedShare * 100).toFixed(0)} % of the presented time — target ${PAPER_LOCK_TARGET * 100} %: ${met ? "met" : "NOT met (reported, not gated: 5d-detector)"}`];
+  });
 }
 
 export function absoluteViolations(results) {

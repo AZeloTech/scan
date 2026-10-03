@@ -93,9 +93,12 @@ export async function runDetectorSuite({ page, throttle, options, outDir, log, e
         const verdictQuad = det.accepted ? det.quad : null;
         // The live loop's paper evidence on the live variant's own quad (what
         // "sheet found" would say about it): kept per row, summarised by the
-        // report's paper line — the families a change to the rules must not lose.
+        // report's paper line — the families a change to the rules must not
+        // lose. An accepted quad only (one the loop would track); a single
+        // still, with no covered-corner input and no lock: what the lock does
+        // with these readings is the session suite's (`paperLock`).
         let paper;
-        if (variant === "ml+live" && det.quad) {
+        if (variant === "ml+live" && det.quad && det.accepted) {
           const [read] = await page.evaluate(([id, q]) => window.__bench.evidence(id, [q]), [scene.id, det.quad]);
           const e = read?.evidence ?? null;
           paper = e === null ? null : { ok: e.ok, sidesSupported: e.sidesSupported, sidesKnown: e.sidesKnown };
@@ -204,5 +207,5 @@ export function paperLine(rows) {
     }
   }
   const parts = Object.entries(by).map(([f, o]) => `${f} ${o.pages > 0 ? `${o.paper}/${o.pages} pages paper` : ""}${o.none > 0 ? `${o.pages > 0 ? ", " : ""}${o.passed}/${o.none} page-less passed` : ""}`);
-  return `paper evidence on the live quads (ml+live, right crops): ${parts.join(" · ")}`;
+  return `paper evidence on the live quads (ml+live, accepted, right crops; one still each, no lock): ${parts.join(" · ")}`;
 }

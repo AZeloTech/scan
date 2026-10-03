@@ -42,7 +42,7 @@ import { buildBenchApp, ensureRuntimeAssets } from "./build-app.mjs";
 import { cpuThrottle, launchChromium } from "./browser.mjs";
 import { isInside, OUT_DIR, realMediaDir, realRunsDir, ROOT } from "./paths.mjs";
 import { prepareRealMedia } from "./real.mjs";
-import { absoluteViolations, checkComparable, compareSummaries, paperLockViolations, RESULTS_SCHEMA } from "./report.mjs";
+import { absoluteViolations, checkComparable, compareSummaries, paperLockViolations, paperTargetLines, RESULTS_SCHEMA } from "./report.mjs";
 import { startServer } from "./server.mjs";
 import { SUITES } from "./suites/index.mjs";
 import { buildScene, frameSize } from "./emulator/index.js";
@@ -54,6 +54,7 @@ const USAGE = `usage: npm run bench -- [--suite detector|session|real-stills|rea
        [--session approach-hold,…] [--stream WxH] [--skip-replay] [--lane main|worker] [--no-frame-cache]
        [--layout rail|standard|classic|filmstrip|onehand|collapse] [--viewport WxH] [--fit cover|contain|maxcrop]
        [--frame-by screen|sensor] [--follow fill|area|off|fill:ENTER:EXIT] [--stream-scale N]
+       [--paper-gate]  (session: the dim-lamp paper sessions are required, 8 seeds or more)
        [--cpu 1|4|6] [--size portrait|landscape|WxH] [--compare results.json]
        [--out dir] [--headed]
 real-stills / real-video need SCAN_REAL_MEDIA=<dir>; their output goes to the cache, never the repo.`;
@@ -117,6 +118,7 @@ function parse() {
       "frame-by": { type: "string" },
       follow: { type: "string" },
       "stream-scale": { type: "string" },
+      "paper-gate": { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
     strict: true,
@@ -163,6 +165,7 @@ function parse() {
     // How the scripted user answers "Aproxime" (`followHint`): undefined is the app's own rule.
     follow: values.follow === undefined ? undefined : parseFollow(values.follow),
     streamScale: parseStreamScale(values["stream-scale"]),
+    paperGate: values["paper-gate"],
   };
 }
 
@@ -408,6 +411,7 @@ async function main() {
                   frameBy: options.frameBy,
                   follow: options.follow === undefined ? DEFAULT_FOLLOW : options.follow,
                   streamScale: options.streamScale,
+                  ...(options.paperGate ? { paperGate: true } : {}),
                 }
               : {}),
           }
@@ -478,9 +482,16 @@ async function main() {
         // Without a baseline the absolute limits still say something.
         const breaches = absoluteViolations(results);
         if (breaches.length > 0) log(`\nbench: absolute limits not met (fails --compare):\n  ${breaches.join("\n  ")}`);
-        // The dim-lamp paper lock floors fail the run on their own (5d-paper).
-        if (paperLockViolations(results).length > 0) exitCode = 1;
       }
+      // The dim-lamp paper lock gates fail the run on their own, compared or
+      // not (5d-paper); the 80 % target is reported beside them.
+      const paperBreaches = paperLockViolations(results);
+      if (paperBreaches.length > 0) {
+        log(`\nbench: paper lock gate not met:\n  ${paperBreaches.join("\n  ")}`);
+        exitCode = 1;
+      }
+      const targets = paperTargetLines(results);
+      if (targets.length > 0) log(`\nbench: paper lock target:\n  ${targets.join("\n  ")}`);
     }
     if (pageErrors.length > 0) {
       log(`\nbench: uncaught page errors:\n  ${pageErrors.slice(0, 5).join("\n  ")}`);

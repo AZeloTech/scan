@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   paperClauses,
   scorePaperLock,
+  scorePagelessLocks,
   frameOnScreen,
   hintSeries,
   hintWindow,
@@ -833,14 +834,66 @@ test("the paper lock: share locked, first lock, dropouts while steady, and the p
   assert.equal(paperClauses({ events }, 4000, 6000).paper, 1);
 });
 
-test("a dim-lamp page held as found less than its floor fails the run", () => {
-  const results = (share, { cpu = 1, runs = 8 } = {}) => ({ suite: "session", config: { cpu }, summary: { "dim-owner-bare": { all: { paperLock: { runs, lockedShare: share } } }, "approach-hold": { all: {} } } });
+test("a dim-lamp page held as found less than its floor fails the run, at cpu 1 and at cpu 4", () => {
+  const results = (share, { cpu = 1, runs = 8, firstLockP50 = 200, paperGate = false, sessions = ["dim-owner-bare"] } = {}) => ({
+    suite: "session",
+    config: { cpu, ...(paperGate ? { paperGate } : {}) },
+    summary: { ...Object.fromEntries(sessions.map((s) => [s, { all: { paperLock: { runs, lockedShare: share, firstLockP50 } } }])), "approach-hold": { all: {} } },
+  });
   assert.deepEqual(absoluteViolations(results(0.71)), []);
   const low = absoluteViolations(results(0.3));
   assert.equal(low.length, 1);
   assert.match(low[0], /dim-owner-bare\/all: paperLock.lockedShare 0.300 < floor/);
   assert.equal(absoluteViolations(results(null)).length, 1);
-  // Measured at cpu 1 over 8 seeds: a throttled or shorter run is not gated.
-  assert.deepEqual(absoluteViolations(results(0.3, { cpu: 4 })), []);
+  // cpu 4 has floors of its own (adv-paper F9): no longer reported only.
+  assert.match(absoluteViolations(results(0.3, { cpu: 4 }))[0], /dim-owner-bare\/all: paperLock.lockedShare 0.300 < floor 0.45/);
+  // The first lock's median at cpu 1: the spec's 1.5 s.
+  assert.match(absoluteViolations(results(0.71, { firstLockP50: 2400 }))[0], /firstLockP50 2400 > 1500/);
+  assert.match(absoluteViolations(results(0.71, { firstLockP50: null }))[0], /firstLockP50 never/);
+  // Fewer seeds: ungated — unless --paper-gate asks for the gate, which also wants every session.
   assert.deepEqual(absoluteViolations(results(0.3, { runs: 3 })), []);
+  const gated = absoluteViolations(results(0.71, { runs: 3, paperGate: true }));
+  assert.ok(gated.some((v) => /dim-owner-bare\/all: 3 runs < 8 required/.test(v)));
+  assert.ok(gated.some((v) => /dim-owner-case\/all: required by --paper-gate, not run/.test(v)));
+  assert.deepEqual(absoluteViolations(results(0.71, { paperGate: true, sessions: ["dim-owner-case", "dim-owner-bare", "dim-sheet-over", "dim-text-page"] })), []);
+  assert.match(absoluteViolations(results(0.71, { cpu: 6, paperGate: true }))[0], /no floors measured at --cpu 6/);
+});
+
+test("the paper lock counts only a lock drawn on the presented page, over the whole window (adv-paper F8)", () => {
+  const FRAME = { width: 720, height: 1280 };
+  const truthAt = () => PAGE;
+  const overlay = (t, locked, quad) => ({ type: "overlay", t, locked, quad: libraryQuad(quad), opacity: 1 });
+  const events = [];
+  // 1000–2000 locked on the page, 2000–3000 locked on something else (the leaflet), then no samples at all to 4000.
+  for (let t = 1000; t < 2000; t += 100) events.push(overlay(t, true, PAGE));
+  for (let t = 2000; t < 3000; t += 100) events.push(overlay(t, true, ELSEWHERE));
+  const s = scorePaperLock({ events }, { from: 1000, to: 4000 }, { truthAt, frame: FRAME });
+  assert.equal(s.windowMs, 3000);
+  assert.equal(s.lockedMs, 1000);
+  // The last sample holds until the gap limit, then the window is unobserved.
+  assert.ok(s.wrongLockMs >= 1000 && s.wrongLockMs < 1500, `wrong ${s.wrongLockMs}`);
+  assert.ok(s.unobservedMs > 500);
+  // A third of the window: the wrong lock is not the page's, and the unobserved stretch is not locked.
+  assert.equal(Math.round(s.lockedShare * 1000), 333);
+  // A lock that never was on the page has no first lock.
+  const wrongOnly = scorePaperLock({ events: events.filter((e) => e.t >= 2000) }, { from: 1000, to: 3000 }, { truthAt, frame: FRAME });
+  assert.equal(wrongOnly.firstLockMs, null);
+  assert.equal(wrongOnly.lockedShare, 0);
+  // The passes: every regular pass counts, with the ones never read named.
+  const detect = (frameAt, ok, accepted, paperWhy = null) => ({ type: "detect", frameAt, ok, accepted, paperWhy, locked: false });
+  const c = paperClauses(
+    { events: [detect(1100, false, false), detect(1200, true, false, { verdict: "ok" }), detect(1300, true, true, { verdict: "ok" }), detect(1400, true, true), { ...detect(1500, true, true), warmUp: true }] },
+    1000,
+    2000,
+  );
+  assert.deepEqual([c.detects, c.noQuad, c.rejected, c.unread, c.passes, c.readRejected, c.paper], [4, 1, 1, 1, 2, 1, 2]);
+});
+
+test("a page-less session's locks are counted, whether or not anything fired", () => {
+  const events = [];
+  for (let t = 0; t < 10000; t += 100) events.push({ type: "overlay", t, locked: (t >= 2000 && t < 3500) || (t >= 6000 && t < 6500), quad: null, opacity: 0 });
+  const q = scorePagelessLocks({ events }, 0, 10000);
+  assert.equal(q.locks, 2);
+  assert.equal(q.longestMs, 1500);
+  assert.equal(Math.round(q.lockedShare * 100), 20);
 });

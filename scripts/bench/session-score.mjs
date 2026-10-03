@@ -553,17 +553,23 @@ export function scoreSession(script, record) {
   }
   if (marks.paperLock !== undefined) {
     const lock = marks.paperLock;
-    out.paperLock = scorePaperLock(record, {
-      from: at(lock.from),
-      to: at(lock.to),
-      steady: (lock.steady ?? [lock]).map((w) => ({ from: at(w.from), to: at(w.to) })),
-    });
+    out.paperLock = scorePaperLock(
+      record,
+      {
+        from: at(lock.from),
+        to: at(lock.to),
+        steady: (lock.steady ?? [lock]).map((w) => ({ from: at(w.from), to: at(w.to) })),
+      },
+      { truthAt: gtAt, frame },
+    );
     const total = out.paperLock.observedMs + out.paperLock.unobservedMs;
     if (total > 0 && out.paperLock.unobservedMs > MAX_UNOBSERVED_SHARE * total) {
       out.missingData.push(`paper lock: ${Math.round(out.paperLock.unobservedMs)} of ${Math.round(total)} ms unobserved`);
     }
   }
   if (marks.negativeFrom !== undefined) out.paperPageless = paperClauses(record, at(marks.negativeFrom), at(marks.negativeTo));
+  // A session that is page-less as a whole (a document on a screen): any lock in it, until the shutter.
+  if (marks.pageless === true) out.pagelessLocks = scorePagelessLocks(record, at(0), at(marks.tapAt ?? script.duration ?? 0));
   out.passes = scorePasses(record, gtAt, frame);
   out.captures = scoreCaptures(withTruth, record);
   out.captures.forEach((capture, index) => {
@@ -1566,20 +1572,33 @@ export function scoreFraming(script, record, gtAt, captures, visibility) {
 /**
  * Why the passes whose frame was sampled in `[from, to]` did or did not read
  * as paper (the probe's `paperWhy`, `src/lib/paper-evidence.ts`
- * `evidenceDiagnostic`): passes that read the evidence, those that said
- * paper, the verdicts (`ok` / `sides` / `surface`), for a surface failure the
- * first clause each print rule failed (`print:` the text rule, `panels:` the
- * printed-images rule), and for a sides failure the sides under the rule's
- * support line. Passes on a locked sheet that did not say paper are `kept`
- * (the lock outlived the reading).
+ * `evidenceDiagnostic`). Every regular pass in the window is counted
+ * (`detects`), and the ones that never got a reading are named: no quad at
+ * all (`noQuad`), a quad turned away (`rejected`: under the floor,
+ * superseded, failed its sanity checks) and an accepted quad with no reading
+ * (`unread`) — so the paper share is never of the read passes alone. Of the
+ * read passes (`passes`): those that said paper, the verdicts (`ok` /
+ * `sides` / `surface`), for a surface failure the first clause each print
+ * rule failed (`print:` the text rule, `panels:` the printed-images rule),
+ * and for a sides failure the sides under the rule's support line; those of
+ * them that were turned away too (`readRejected`); and those on a locked
+ * sheet that did not say paper (`kept`: the lock outlived the reading).
  */
 export function paperClauses(record, from, to) {
-  const out = { passes: 0, paper: 0, kept: 0, verdicts: {}, print: {}, panels: {}, weakSides: {} };
+  const out = { detects: 0, noQuad: 0, rejected: 0, unread: 0, passes: 0, readRejected: 0, paper: 0, kept: 0, verdicts: {}, print: {}, panels: {}, weakSides: {} };
   const bump = (m, k) => (m[k] = (m[k] ?? 0) + 1);
   for (const e of record.events ?? []) {
-    if (e.type !== "detect" || !(e.frameAt >= from && e.frameAt <= to) || !e.paperWhy) continue;
+    if (e.type !== "detect" || e.warmUp || !(e.frameAt >= from && e.frameAt <= to)) continue;
+    out.detects += 1;
+    if (!e.ok) out.noQuad += 1;
+    else if (!e.accepted) out.rejected += 1;
     const w = e.paperWhy;
+    if (!w) {
+      if (e.ok && e.accepted) out.unread += 1;
+      continue;
+    }
     out.passes += 1;
+    if (!e.accepted) out.readRejected += 1;
     if (w.verdict === "ok") out.paper += 1;
     else if (e.locked) out.kept += 1;
     bump(out.verdicts, w.verdict);
@@ -1597,23 +1616,60 @@ export function paperClauses(record, from, to) {
 }
 
 /**
- * The found-sheet lock over a presented page (`marks.paperLock`, page time):
- * the share of the observed window the loop held the page as found (the
- * overlay probe's `locked`, each sample holding until the next, a gap past
- * {@link MAX_SAMPLE_GAP_MS} unobserved), the time from the window's start to
- * the first lock (null: never), the locks lost inside the `steady` windows
- * after that first lock (`dropouts`; the page was held still there) and the
- * steady time spent unlocked after it, and the paper clauses of the window's
- * passes ({@link paperClauses}).
+ * How far (largest visible corner error, share of the frame's diagonal) a
+ * locked quad may lie from the presented page and still be a lock *of that
+ * page*: the app's own "another page" line (`JUMP_RESET_DIAG`). Within
+ * {@link WRONG_CROP_MAX_CORNER_ERROR} it is also a lock a capture could use
+ * as drawn (`exactMs`).
  */
-export function scorePaperLock(record, { from, to, steady = [{ from, to }] }) {
+export const PAPER_LOCK_SAME_SHEET = 0.08;
+
+/**
+ * The found-sheet lock over a presented page (`marks.paperLock`, page time).
+ * A moment counts as **locked** only when the loop held a sheet as found
+ * (the overlay probe's `locked`) *and* the quad it drew was on the presented
+ * page — every corner the frame shows within {@link PAPER_LOCK_SAME_SHEET}
+ * of the truth (`truthAt`, `frame`; {@link visibleDistance}); within the
+ * wrong-crop line as well it is `exactMs`. A lock drawn on anything else
+ * (the leaflet, the mat, a screen) is `wrongLockMs`, never a lock of the
+ * page. Shares are of the **whole window**: time no sample
+ * covers counts as not locked (and a window mostly unobserved is flagged by
+ * the caller). Also: the time from the window's start to the first lock of
+ * the page (null: never), the locks lost inside the `steady` windows after
+ * that first lock (`dropouts`; the page was held still there) and the steady
+ * time not locked after it, and the paper clauses of the window's passes
+ * ({@link paperClauses}). Without `truthAt` every lock counts (old callers).
+ */
+export function scorePaperLock(record, { from, to, steady = [{ from, to }] }, { truthAt = null, frame = null } = {}) {
+  /**
+   * The drawn quad's error from the page: undefined when nothing is drawn
+   * (no quad, or faded under the shown line — not a lock the person sees);
+   * null when it is not on the page at all (no page, nothing to judge).
+   */
+  const errorOf = (e) => {
+    if (truthAt === null) return 0;
+    if (e.quad === null || e.quad === undefined || !(e.opacity >= OVERLAY_SHOWN_OPACITY)) return undefined;
+    const gt = truthAt(e.t);
+    if (gt === null || gt === undefined) return null;
+    return visibleDistance(toPoints(e.quad), gt, frame);
+  };
   const series = (record.events ?? [])
     .filter((e) => e.type === "overlay" && !e.capturing)
-    .map((e) => ({ t: e.t, locked: e.locked === true }));
+    .map((e) => {
+      const error = e.locked === true ? errorOf(e) : undefined;
+      const held = error !== undefined;
+      const page = held && error !== null && error <= PAPER_LOCK_SAME_SHEET;
+      return { t: e.t, locked: page, exact: page && error <= WRONG_CROP_MAX_CORNER_ERROR, wrong: held && !page };
+    });
   const { intervals, observedMs, unobservedMs } = sampleTimeline(series, { from, to });
+  const windowMs = Math.max(0, to - from);
   let lockedMs = 0;
+  let exactMs = 0;
+  let wrongLockMs = 0;
   let firstLock = null;
   for (const interval of intervals) {
+    if (interval.sample.wrong) wrongLockMs += interval.to - interval.from;
+    if (interval.sample.exact) exactMs += interval.to - interval.from;
     if (!interval.sample.locked) continue;
     lockedMs += interval.to - interval.from;
     if (firstLock === null) firstLock = interval.from;
@@ -1625,25 +1681,62 @@ export function scorePaperLock(record, { from, to, steady = [{ from, to }] }) {
     for (const w of steady) {
       const start = Math.max(w.from, firstLock);
       if (start >= w.to) continue;
+      // The whole steady window counts; an unobserved stretch is not locked.
+      steadyMs += w.to - start;
       const timeline = sampleTimeline(series, { from: start, to: w.to });
+      let lockedHere = 0;
       let was = null;
       for (const interval of timeline.intervals) {
-        steadyMs += interval.to - interval.from;
-        if (!interval.sample.locked) steadyUnlockedMs += interval.to - interval.from;
+        if (interval.sample.locked) lockedHere += interval.to - interval.from;
         if (was === true && !interval.sample.locked) dropouts += 1;
         was = interval.sample.locked;
       }
+      steadyUnlockedMs += w.to - start - lockedHere;
     }
   }
   return {
+    windowMs,
     observedMs,
     unobservedMs,
     lockedMs,
-    lockedShare: observedMs > 0 ? lockedMs / observedMs : null,
+    exactMs,
+    wrongLockMs,
+    lockedShare: windowMs > 0 ? lockedMs / windowMs : null,
     firstLockMs: firstLock === null ? null : firstLock - from,
     dropouts,
     steadyMs,
     steadyUnlockedMs,
     clauses: paperClauses(record, from, to),
   };
+}
+
+/**
+ * A page-less session's locks (`marks.pageless`: a screen showing a
+ * document, say — not the paper): the share of the session the loop held
+ * *anything* as a found sheet (`lockedShare`, the whole window), the longest
+ * such lock, and the paper clauses of its passes — so its headline is never
+ * blind to a lock that no auto fire followed.
+ */
+export function scorePagelessLocks(record, from, to) {
+  const series = (record.events ?? [])
+    .filter((e) => e.type === "overlay" && !e.capturing)
+    .map((e) => ({ t: e.t, locked: e.locked === true }));
+  const { intervals } = sampleTimeline(series, { from, to });
+  const windowMs = Math.max(0, to - from);
+  let lockedMs = 0;
+  let run = 0;
+  let longestMs = 0;
+  let locks = 0;
+  let was = false;
+  for (const interval of intervals) {
+    const span = interval.to - interval.from;
+    if (interval.sample.locked) {
+      lockedMs += span;
+      run = was ? run + span : span;
+      if (!was) locks += 1;
+      longestMs = Math.max(longestMs, run);
+    }
+    was = interval.sample.locked;
+  }
+  return { windowMs, lockedMs, lockedShare: windowMs > 0 ? lockedMs / windowMs : null, locks, longestMs, clauses: paperClauses(record, from, to) };
 }
