@@ -834,10 +834,13 @@ test("the paper lock: share locked, first lock, dropouts while steady, and the p
 });
 
 test("a dim-lamp page held as found less than its floor fails the run", () => {
-  const results = (share) => ({ suite: "session", summary: { "dim-owner-bare": { all: { paperLock: { lockedShare: share } } }, "approach-hold": { all: {} } } });
+  const results = (share, { cpu = 1, runs = 8 } = {}) => ({ suite: "session", config: { cpu }, summary: { "dim-owner-bare": { all: { paperLock: { runs, lockedShare: share } } }, "approach-hold": { all: {} } } });
   assert.deepEqual(absoluteViolations(results(0.71)), []);
   const low = absoluteViolations(results(0.3));
   assert.equal(low.length, 1);
   assert.match(low[0], /dim-owner-bare\/all: paperLock.lockedShare 0.300 < floor/);
   assert.equal(absoluteViolations(results(null)).length, 1);
+  // Measured at cpu 1 over 8 seeds: a throttled or shorter run is not gated.
+  assert.deepEqual(absoluteViolations(results(0.3, { cpu: 4 })), []);
+  assert.deepEqual(absoluteViolations(results(0.3, { runs: 3 })), []);
 });

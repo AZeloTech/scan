@@ -93,9 +93,11 @@ export const ABSOLUTE_LIMITS = {
  * a floor under the measured level (cpu 1, 8 seeds: owner-case 25–28 %,
  * no leaflet 70–72 %, sheet-over 25–27 %, text 64–67 %; before the margin
  * was judged locally 5 / 29 / 17 / 64 %), so the margin rule going back
- * fails the run. Synthetic and noisy below 8 seeds; the detector's own
+ * fails the run (gated at cpu 1 with 8 runs or more: under
+ * `--cpu 4` or on fewer seeds it is reported only). Synthetic; the detector's own
  * misses in the dim (no quad, a quad that jumps) are most of what is left.
  */
+export const PAPER_LOCK_MIN_RUNS = 8;
 export const PAPER_LOCK_FLOORS = {
   "dim-owner-case": 0.15,
   "dim-owner-bare": 0.55,
@@ -521,10 +523,11 @@ export function compareSummaries(previous, current, tolerance = REGRESSION_TOLER
 /** The dim-lamp sessions under their {@link PAPER_LOCK_FLOORS} — a run that has them fails, compared or not. */
 export function paperLockViolations(results) {
   const out = [];
-  if (results.suite === "session") {
+  // The floors were measured at cpu 1 over 8 seeds: a throttled or shorter run is reported, not gated.
+  if (results.suite === "session" && (results.config?.cpu ?? 1) === 1) {
     for (const [session, floor] of Object.entries(PAPER_LOCK_FLOORS)) {
       const lock = results.summary?.[session]?.all?.paperLock;
-      if (lock === undefined) continue;
+      if (lock === undefined || lock.runs < PAPER_LOCK_MIN_RUNS) continue;
       if (lock.lockedShare === null || !Number.isFinite(lock.lockedShare)) out.push(`${session}/all: paperLock.lockedShare has no value (floor ${floor})`);
       else if (lock.lockedShare < floor) out.push(`${session}/all: paperLock.lockedShare ${lock.lockedShare.toFixed(3)} < floor ${floor}`);
     }
