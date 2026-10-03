@@ -112,6 +112,19 @@ import {
 import { QuadOneEuro } from "@/lib/one-euro";
 import { CadenceController, type CadenceProfile } from "@/lib/cadence";
 import { classicalQuadSane, coveredCorners, evidenceDiagnostic, PAPER, paperEvidence, paperSurface, type CoveredCorner, type EvidenceDiagnostic, type PaperEvidence } from "@/lib/paper-evidence";
+import {
+  AUTO_PAPER_FRESH_MS,
+  autoPaperFresh,
+  autoPaperWhy,
+  freshPaperMemory,
+  noteCovered,
+  notePaperReading,
+  PAPER_MEMORY_MS,
+  paperMemoryExpired,
+  paperRemembered,
+  resetPaperMemory,
+  type PaperMemory,
+} from "@/lib/paper-memory";
 import { refineQuad } from "@/lib/refine";
 import { cornerCheckOf, hasUnknown, isUncertain, provenanceDiagnostic, type CornerCheck } from "@/lib/corner-check";
 import { FireTimeline, phasesBefore, type TimelineMarks } from "@/lib/fire-timeline";
@@ -377,26 +390,19 @@ const RECALL_MS = 10_000;
 const KEEP_SIDE_SUPPORT = 0.8;
 const KEEP_FORESHORTENING = 0.75;
 
-/**
+/*
  * A sheet found on paper evidence keeps its lock for a while when only its
  * surface stops reading as paper (5d-paper): dim, uneven light — a lamp to
  * one side, a hand's shadow on the margin, a leaflet over a corner — turns
  * an imaging report's surface reading off for seconds at a time while its
- * four edges stay as clear as ever. While every side stays on its edges
- * (all four judged, each at least {@link KEEP_SIDE_SUPPORT}), the quad stays
- * within {@link PAPER_MEMORY_DRIFT_DIAG} of where it last read as paper, and
- * that reading is at most {@link PAPER_MEMORY_MS} old, a "not paper" reading
- * is neither a hit nor a miss — at any tilt. It ends with the scene moving
- * (a broken hold), another page (a jump), the quad drifting off, or the
- * time without paper running out. It keeps the overlay and the lock only:
- * auto-capture still needs a reading that said paper within
- * {@link AUTO_PAPER_FRESH_MS}. Entering "found" still needs the evidence,
- * whole — a black keyboard read head-on has four strong edges too.
+ * four edges stay as clear as ever. The lock's memory, its hard expiry
+ * ({@link PAPER_MEMORY_MS} after the last paper reading, frame time, on
+ * every path that holds a lock) and auto-capture's paper footing
+ * ({@link AUTO_PAPER_FRESH_MS}: the sheet's newest reading said paper,
+ * after the last motion) are `lib/paper-memory.ts`. Memory keeps the overlay
+ * and the lock only; entering "found" still needs the evidence, whole — a
+ * black keyboard read head-on has four strong edges too.
  */
-const PAPER_MEMORY_MS = 5000;
-const PAPER_MEMORY_DRIFT_DIAG = 0.06;
-/** Auto-capture fires only on a locked sheet that read as paper at most this long ago. */
-const AUTO_PAPER_FRESH_MS = 1500;
 
 /**
  * A missed pass whose reading of the held sheet says "not paper" ends the
@@ -596,10 +602,12 @@ interface Runtime {
   evidenceHits: number;
   /** Pixels cannot be read on this device: evidence is not required. */
   evidenceUnavailable: boolean;
-  /** When the tracked sheet last read as paper on an accepted pass (`performance.now()`), or null. */
-  paperAt: number | null;
-  /** The quad (as drawn) of that reading: the lock's memory ({@link PAPER_MEMORY_MS}) holds near it. */
-  paperQuad: NormalizedQuad | null;
+  /**
+   * The tracked sheet's paper readings, by frame time (`lib/paper-memory.ts`):
+   * the lock's memory and expiry, auto-capture's paper footing, the covered
+   * corners a held-sheet reading leaves out. Forgotten with the sheet.
+   */
+  paper: PaperMemory;
   /** Consecutive worker passes that timed out, and that could not grab or read their frame. */
   workerTimeouts: number;
   workerGrabFailures: number;
@@ -791,8 +799,7 @@ function freshRuntime(): Runtime {
     evidenceMisses: 0,
     evidenceHits: 0,
     evidenceUnavailable: false,
-    paperAt: null,
-    paperQuad: null,
+    paper: freshPaperMemory(),
     workerTimeouts: 0,
     workerGrabFailures: 0,
     lastFrameAt: 0,
@@ -910,6 +917,7 @@ function clearTracking(runtime: Runtime, overlay: LiveOverlayRefs): void {
   runtime.locked = false;
   runtime.evidenceMisses = 0;
   runtime.evidenceHits = 0;
+  resetPaperMemory(runtime.paper);
   runtime.filter.reset();
   runtime.sheetReadings = [];
   runtime.glare = null;
@@ -958,6 +966,10 @@ function invalidateConfirmation(runtime: Runtime, now: number): void {
   runtime.watchMoved = false;
   runtime.watchScores = [];
   runtime.motionAt = now;
+  // Auto's paper footing goes with it (a reading on the new camera is owed);
+  // the lock stays bounded by its last paper reading's frame time.
+  runtime.paper.readAt = null;
+  runtime.paper.lastOk = null;
 }
 
 /** The countdown ring (see {@link LiveOverlayRefs.ring}) at a progress, or empty. */
@@ -1194,6 +1206,8 @@ interface PassOutcome {
   refineMs: number | null;
   /** On a miss: the evidence for the quad the overlay was holding, on this frame (`null`: not read). */
   heldEvidence: PaperEvidence | null;
+  /** The detection's covered corners, as its refinement measured them (null: not measured). */
+  covered?: CoveredCorner[] | null;
   width: number;
   height: number;
   /** When the frame was sampled (main thread's clock). */
@@ -1669,6 +1683,7 @@ export function useLiveDetect({
     runtime.locked = false;
     runtime.evidenceMisses = 0;
     runtime.evidenceHits = 0;
+    resetPaperMemory(runtime.paper);
 
     // ── 1. detection chain ───────────────────────────────────────────────────
 
@@ -1679,6 +1694,18 @@ export function useLiveDetect({
     function heldQuad(width: number, height: number): CornerPoints | null {
       if (!runtime.locked || runtime.displayTarget === null || runtime.evidenceUnavailable) return null;
       return denormalizeQuad(runtime.displayTarget, width, height);
+    }
+
+    /**
+     * The held sheet's covered corners, for its reading on a missed pass: the
+     * region the reading that found it left out (a leaflet over a corner) is
+     * left out again — while that measurement is of this sheet (forgotten
+     * with it) and at most {@link PAPER_MEMORY_MS} older than the frame.
+     */
+    function heldCovered(frameAt: number): CoveredCorner[] {
+      const memory = runtime.paper;
+      if (memory.coveredAt === null || frameAt - memory.coveredAt > PAPER_MEMORY_MS) return [];
+      return memory.covered;
     }
 
     /** The sample size for this video: its long edge at {@link SAMPLE_LONG_EDGE}. */
@@ -1829,6 +1856,7 @@ export function useLiveDetect({
       let refined: CornerPoints | null = null;
       let refineMs: number | null = null;
       let check: CornerCheck | null = null;
+      let measuredCovered: CoveredCorner[] | null = null;
       if (detection !== null) {
         let pixels: ImageData | null = null;
         try {
@@ -1844,7 +1872,10 @@ export function useLiveDetect({
           refineMs = result.ms;
           // Only an answer that ran to its end says anything about the corners.
           check = cornerCheckOf(result);
-          if (result.measured) covered = coveredCorners(result.corners);
+          if (result.measured) {
+            covered = coveredCorners(result.corners);
+            measuredCovered = covered;
+          }
           if (result.changed) {
             corners = denormalizeQuad(result.quad, canvas.width, canvas.height);
             refined = corners;
@@ -1862,7 +1893,7 @@ export function useLiveDetect({
       if (held !== null && heldAt !== null && (foundAt === null || quadJump(foundAt, heldAt, canvas.height / canvas.width) > JUMP_RESET_DIAG)) {
         try {
           const pixels = canvas.getContext("2d", { willReadFrequently: true })?.getImageData(0, 0, canvas.width, canvas.height) ?? null;
-          heldEvidence = pixels === null ? null : paperEvidence(pixels.data, canvas.width, canvas.height, held);
+          heldEvidence = pixels === null ? null : paperEvidence(pixels.data, canvas.width, canvas.height, held, PAPER, heldCovered(started));
         } catch {
           heldEvidence = null;
         }
@@ -1874,6 +1905,7 @@ export function useLiveDetect({
         refineMs,
         check,
         heldEvidence,
+        covered: measuredCovered,
         width: canvas.width,
         height: canvas.height,
         frameAt: started,
@@ -1961,6 +1993,7 @@ export function useLiveDetect({
           refineMs: LIVE_REFINE_BUDGET_MS,
           evidence: !runtime.evidenceUnavailable,
           held: heldQuad(width, height),
+          heldCovered: heldCovered(frameAt),
           hint: frameAt - hintRef.current.at >= HINT_EVERY_MS,
         },
         profile.budgetMs,
@@ -1981,6 +2014,7 @@ export function useLiveDetect({
         check: detection === null ? null : (reply.check ?? null),
         refineMs: reply.refineMs,
         heldEvidence: reply.heldEvidence,
+        covered: detection === null ? null : (reply.covered ?? null),
         width,
         height,
         frameAt,
@@ -2133,8 +2167,15 @@ export function useLiveDetect({
         outcome.evidence,
         outcome.refined,
         outcome.check ?? null,
+        outcome.covered ?? null,
       );
       runtime.answer = passAnswer(outcome.detection, rejected, outcome.evidence);
+      // The held sheet's own reading on this frame (a missed pass, or a quad
+      // found elsewhere and not taken): what auto-capture's footing and the
+      // lock's memory know of the sheet now.
+      if (!accepted && runtime.locked && outcome.heldEvidence !== null) {
+        notePaperReading(runtime.paper, outcome.frameAt, outcome.heldEvidence.ok, null);
+      }
       // A missed detection on a moved scene ends the hold: the stale
       // horizon exists to carry a stationary page through a flicker, and the
       // probe is what proves the page was not stationary. The capture buffer
@@ -2152,7 +2193,7 @@ export function useLiveDetect({
       const heldGone =
         runtime.locked && outcome.heldEvidence !== null && !outcome.heldEvidence.ok && (outcome.detection !== null || (motionScore ?? 0) >= HELD_RELEASE_MOTION)
           ? true
-          : outcome.detection === null && heldLost(outcome.heldEvidence);
+          : outcome.detection === null && heldLost(outcome.heldEvidence, outcome.frameAt);
       const holdBroken = (outcome.detection === null && motionBreaksHold(motionScore)) || (!accepted && heldGone);
       if (holdBroken) runtime.dropFast = true;
       if (holdBroken) {
@@ -2163,7 +2204,16 @@ export function useLiveDetect({
         runtime.locked = false;
         runtime.evidenceMisses = 0;
         runtime.evidenceHits = 0;
+        resetPaperMemory(runtime.paper);
         runtime.filter.reset();
+      } else if (runtime.locked && !runtime.evidenceUnavailable && paperMemoryExpired(runtime.paper, outcome.frameAt)) {
+        // The hard bound on every path that holds a lock — memory, the
+        // steep-tilt allowance, passes that read nothing: no paper reading
+        // within PAPER_MEMORY_MS of this frame and the sheet is not found
+        // any more, now, not after two more readings.
+        runtime.locked = false;
+        runtime.evidenceMisses = 0;
+        runtime.evidenceHits = 0;
       }
       noteGuidance(outcome, accepted, rejected, holdBroken, motionScore, watchLuma);
       // The diagnostics HUD's numbers: a few floats, kept whether or not it is shown.
@@ -2403,7 +2453,7 @@ export function useLiveDetect({
         queueMs: outcome.queueMs,
         evidence: outcome.evidence === "unavailable" ? null : outcome.evidence,
         paperWhy: outcome.evidence === null || outcome.evidence === "unavailable" ? null : evidenceDiagnostic(outcome.evidence),
-        paperAgeMs: runtime.locked && runtime.paperAt !== null ? performance.now() - runtime.paperAt : null,
+        paperAgeMs: runtime.locked && runtime.paper.paperAt !== null ? performance.now() - runtime.paper.paperAt : null,
         refinedQuad:
           detection === null || outcome.refined === null || outcome.refined === undefined
             ? null
@@ -2435,34 +2485,42 @@ export function useLiveDetect({
      * A missed pass's reading of the held sheet. Answers true once
      * {@link LOCK_RELEASE_MISSES} readings in a row say it is no longer there.
      */
-    function heldLost(evidence: PaperEvidence | null): boolean {
+    function heldLost(evidence: PaperEvidence | null, frameAt: number): boolean {
       if (evidence === null || !runtime.locked) return false;
       if (evidence.ok) {
         runtime.evidenceMisses = 0;
         return false;
       }
+      // Past the memory's bound a "not paper" reading ends the hold at once.
+      if (paperMemoryExpired(runtime.paper, frameAt)) return true;
       const held = runtime.shown;
       const size = videoSizeRef.current;
-      if (held !== null && size !== null && size.width > 0 && remembered(evidence, held, size.height / size.width, performance.now())) return false;
+      if (held !== null && size !== null && size.width > 0 && remembered(evidence, held, size.height / size.width, frameAt)) return false;
       runtime.evidenceMisses += 1;
       return runtime.evidenceMisses >= LOCK_RELEASE_MISSES;
     }
 
     /**
-     * The lock's memory ({@link PAPER_MEMORY_MS}): a reading that is not
-     * paper does not count against the found sheet when it read as paper
-     * recently, near `quad`, and every side is still on its edges.
+     * The lock's memory (`paperRemembered`, `lib/paper-memory.ts`): a reading
+     * that is not paper, on the frame sampled at `frameAt`, does not count
+     * against the found sheet when it read as paper within
+     * {@link PAPER_MEMORY_MS} of that frame, near `quad`, every side is still
+     * on its edges, none is open to the frame's edge, every corner is in view
+     * and none is unknown.
      */
-    function remembered(evidence: PaperEvidence, quad: NormalizedQuad, aspect: number, now: number): boolean {
-      return (
-        runtime.locked &&
-        runtime.paperAt !== null &&
-        runtime.paperQuad !== null &&
-        now - runtime.paperAt <= PAPER_MEMORY_MS &&
-        quadJump(runtime.paperQuad, quad, aspect) <= PAPER_MEMORY_DRIFT_DIAG &&
-        evidence.sidesKnown === 4 &&
-        evidence.sideSupport.every((support) => support !== null && support >= KEEP_SIDE_SUPPORT)
-      );
+    function remembered(evidence: PaperEvidence, quad: NormalizedQuad, aspect: number, frameAt: number): boolean {
+      const memory = runtime.paper;
+      if (!runtime.locked || memory.paperQuad === null) return false;
+      const check = runtime.check;
+      return paperRemembered(memory, {
+        frameAt,
+        drift: quadJump(memory.paperQuad, quad, aspect),
+        sidesKnown: evidence.sidesKnown,
+        sideSupport: evidence.sideSupport,
+        open: evidence.open,
+        unknownCorner: check !== null && (hasUnknown(check) || check.separate),
+        border: borderMargin(toVisible(quad, visibleRef.current)),
+      });
     }
 
     /**
@@ -2480,7 +2538,7 @@ export function useLiveDetect({
      * ({@link KEEP_SIDE_SUPPORT}) does not lose a reading to its surface
      * alone.
      */
-    function updateLock(evidence: EvidenceReading, shown: NormalizedQuad, aspect: number): void {
+    function updateLock(evidence: EvidenceReading, shown: NormalizedQuad, aspect: number, frameAt: number): void {
       if (evidence === "unavailable") {
         runtime.evidenceUnavailable = true;
         runtime.locked = true;
@@ -2501,11 +2559,11 @@ export function useLiveDetect({
       const convincing = runtime.locked
         ? evidence.ok
         : evidence.ok && evidence.sideSupport.every((support) => support === null || support >= ENTRY_SIDE_SUPPORT);
+      // Dated by its frame: a reply that arrives late describes a frame from before.
+      notePaperReading(runtime.paper, frameAt, convincing, shown);
       if (convincing) {
         runtime.evidenceMisses = 0;
         runtime.evidenceHits += 1;
-        runtime.paperAt = now;
-        runtime.paperQuad = shown;
         // Only a reading with every side the frame shows standing on its
         // edges: the model flipping between a page and a corner pulled
         // onto the table must not be drawn on every other flip.
@@ -2520,6 +2578,14 @@ export function useLiveDetect({
       }
       runtime.evidenceHits = 0;
       if (!runtime.locked) return;
+      // No paper reading within the memory's bound: let go at once, whatever
+      // would have held it below.
+      if (paperMemoryExpired(runtime.paper, frameAt)) {
+        runtime.locked = false;
+        runtime.evidenceMisses = 0;
+        runtime.evidenceHits = 0;
+        return;
+      }
       // Steeply tilted and still on its edges, all round: the surface
       // reading is what failed, not the sheet. Neither a hit nor a miss.
       const onEdges =
@@ -2533,7 +2599,7 @@ export function useLiveDetect({
       // Found on paper a moment ago, still on its edges all round, still
       // there: the surface reading is what failed (dim, uneven light), not
       // the sheet. Neither a hit nor a miss; not a found reading either.
-      if (remembered(evidence, shown, aspect, now)) return;
+      if (remembered(evidence, shown, aspect, frameAt)) return;
       runtime.evidenceMisses += 1;
       if (runtime.evidenceMisses >= LOCK_RELEASE_MISSES) {
         runtime.locked = false;
@@ -2567,6 +2633,7 @@ export function useLiveDetect({
       evidence: EvidenceReading,
       refined: CornerPoints | null = null,
       check: CornerCheck | null = null,
+      covered: CoveredCorner[] | null = null,
     ): { accepted: boolean; rejected: string | null } {
       if (detection === null) return { accepted: false, rejected: null };
       const quad = normalizeQuad(detection.corners, width, height);
@@ -2622,6 +2689,7 @@ export function useLiveDetect({
         runtime.locked = false;
         runtime.evidenceMisses = 0;
         runtime.evidenceHits = 0;
+        resetPaperMemory(runtime.paper);
         runtime.check = null;
         runtime.checkAt = null;
         runtime.checkQuad = null;
@@ -2631,6 +2699,7 @@ export function useLiveDetect({
       // What the newest measuring pass said about the corners holds until the
       // next one says otherwise (a pass that ran out of time says nothing).
       if (check !== null) {
+        if (covered !== null) noteCovered(runtime.paper, capturedAt, covered);
         runtime.check = check;
         runtime.checkAt = capturedAt;
         runtime.checkQuad = shown;
@@ -2645,7 +2714,7 @@ export function useLiveDetect({
       // answer on the paper's edges, never the display filter's — dated by
       // the frame it describes: the same clock the stale horizon reads, so an
       // age computed against it means what a capture thinks it means.
-      updateLock(evidence, shown, aspect);
+      updateLock(evidence, shown, aspect, capturedAt);
       runtime.lastAccepted = {
         quad: shown,
         capturedAt,
@@ -2934,9 +3003,12 @@ export function useLiveDetect({
       // on a later frame, and a countdown restarted on every one never
       // finished (bench present-auto: 3 s of "camera moved" / "countdown 0 %").
       // A camera that really left the page loses the footing at that pass.
-      // Auto-capture stands on a sheet that read as paper lately, not on the
-      // lock's memory of it ({@link AUTO_PAPER_FRESH_MS}).
-      const paperFresh = runtime.evidenceUnavailable || (runtime.paperAt !== null && now - runtime.paperAt <= AUTO_PAPER_FRESH_MS);
+      // Auto-capture stands on the sheet's own newest reading — paper, within
+      // AUTO_PAPER_FRESH_MS, on a frame after the last motion — never on the
+      // lock's memory of it: a lid slid in at the same outline reads "not
+      // paper" and that takes auto away at once (`lib/paper-memory.ts`).
+      const paperFresh = runtime.evidenceUnavailable || autoPaperFresh(runtime.paper, now, runtime.motionAt);
+      const paperWhy = paperFresh ? null : (autoPaperWhy(runtime.paper, now, runtime.motionAt) ?? "paper not read lately");
       const settledStrict = footed && paperFresh && !covered && !uncertain && raw === null && shown === null && runtime.settledVerdict && reading?.sharp !== false;
       const settledKeep = footed && paperFresh && !covered && !uncertain && shown === null && raw === null;
       guidance.settled.update(settledStrict, settledKeep, now);
@@ -3011,7 +3083,7 @@ export function useLiveDetect({
               ? sheet === null || !tracking
                 ? "auto: no sheet"
                 : !paperFresh
-                  ? "auto: paper not read lately"
+                  ? `auto: ${paperWhy}`
                   : `auto: ${runtime.stillWhy ?? (raw !== null ? `hint ${raw}` : "not steady")}`
               : auto.countdown < 1
                 ? `auto: countdown ${Math.round(auto.countdown * 100)} %`
@@ -3030,7 +3102,7 @@ export function useLiveDetect({
         fire = auto.fire && !uncertain && paperFresh && watch(now);
         if (auto.fire && !fire) {
           runtime.blockWhy = !paperFresh
-            ? "auto: cancelled, paper not read lately"
+            ? `auto: cancelled, ${paperWhy}`
             : uncertain
             ? measured
               ? "auto: cancelled, corner uncertain"
@@ -3221,6 +3293,7 @@ export function useLiveDetect({
         runtime.locked = false;
         runtime.evidenceMisses = 0;
         runtime.evidenceHits = 0;
+        resetPaperMemory(runtime.paper);
         runtime.filter.reset();
       }
       // Drawn only once found: a tracked quad without paper behind it is a
@@ -3368,7 +3441,7 @@ export function useLiveDetect({
       passes: passCountRef.current,
       fill: runtime.fill,
       answer: runtime.answer,
-      paperAgeMs: runtime.locked && runtime.paperAt !== null ? Math.round(performance.now() - runtime.paperAt) : null,
+      paperAgeMs: runtime.locked && runtime.paper.paperAt !== null ? Math.round(performance.now() - runtime.paper.paperAt) : null,
       check: runtime.target === null ? null : runtime.check,
     };
   }, []);

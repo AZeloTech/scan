@@ -53,6 +53,7 @@ import { forgetMlReady, markMlReady, ML_WEAK_CONFIDENCE } from "@/lib/ml-detecti
 import { mlDetectorOptions, type AssetUrls } from "@/lib/runtime-config";
 import { probe, probeSetting, probing } from "@/lib/probe";
 import type { CornerPoints } from "scanic";
+import type { CoveredCorner } from "@/lib/paper-evidence";
 
 /**
  * How long a new worker has to say hello. Its first message is sent as its
@@ -348,6 +349,7 @@ export interface LaneJob {
   refineMs: number;
   evidence: boolean;
   held: CornerPoints | null;
+  heldCovered?: CoveredCorner[];
   hint: boolean;
 }
 

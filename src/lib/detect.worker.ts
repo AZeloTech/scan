@@ -264,6 +264,7 @@ async function run(job: Job): Promise<void> {
     let refined: ResultReply["refined"] = null;
     let refineMs: number | null = null;
     let check: CornerCheck | null = null;
+    let measuredCovered: CoveredCorner[] | null = null;
     if ((job.evidence || job.refineMs > 0) && found.success && found.corners !== null && workContext !== null) {
       const pixels = workContext.getImageData(0, 0, job.width, job.height);
       let corners = found.corners;
@@ -276,7 +277,10 @@ async function run(job: Job): Promise<void> {
         const result = refineQuad(pixels, quad, { mode: found.detector === "ml" ? "full" : "local", budgetMs: job.refineMs });
         refineMs = result.ms;
         check = cornerCheckOf(result);
-        if (result.measured) covered = coveredCorners(result.corners);
+        if (result.measured) {
+          covered = coveredCorners(result.corners);
+          measuredCovered = covered;
+        }
         if (result.changed) {
           corners = denormalizeQuad(result.quad, job.width, job.height);
           refined = corners;
@@ -289,7 +293,7 @@ async function run(job: Job): Promise<void> {
     let heldEvidence = null;
     if (job.evidence && job.held !== null && workContext !== null && (!found.success || found.corners === null || movedAway(found.corners, job.held, job.width, job.height))) {
       const pixels = workContext.getImageData(0, 0, job.width, job.height);
-      heldEvidence = paperEvidence(pixels.data, job.width, job.height, job.held);
+      heldEvidence = paperEvidence(pixels.data, job.width, job.height, job.held, PAPER, job.heldCovered ?? []);
     }
     stretch(started);
     const computeMs = performance.now() - started;
@@ -311,6 +315,7 @@ async function run(job: Job): Promise<void> {
       refined,
       refineMs,
       check,
+      covered: measuredCovered,
       evidence,
       heldEvidence,
       hint,

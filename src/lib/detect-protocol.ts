@@ -24,7 +24,7 @@
  */
 
 import type { CornerPoints } from "scanic";
-import type { PaperEvidence } from "@/lib/paper-evidence";
+import type { CoveredCorner, PaperEvidence } from "@/lib/paper-evidence";
 import type { FrameReading } from "@/lib/hints";
 import type { CornerCheck } from "@/lib/corner-check";
 
@@ -103,6 +103,12 @@ export interface DetectMessage {
    * where it was. `null`: none.
    */
   held: CornerPoints | null;
+  /**
+   * The held sheet's covered corners (`coveredCorners`): its reading on this
+   * frame leaves the same region out as the reading that found it did.
+   * Absent: none.
+   */
+  heldCovered?: CoveredCorner[];
   /**
    * Also answer the viewfinder's hint reading of this frame (`readFrame`,
    * `lib/hints.ts`: sharpness and light) — on the worker lane the live loop
@@ -195,6 +201,8 @@ export interface ResultReply {
    * Absent or null when it did not run to its end.
    */
   check?: CornerCheck | null;
+  /** The refined quad's covered corners (`coveredCorners`); absent or null when the refinement did not run to its end. */
+  covered?: CoveredCorner[] | null;
   evidence: PaperEvidence | null;
   /** The evidence for `held` on this frame, when the detector found nothing or found a quad away from it. */
   heldEvidence: PaperEvidence | null;
