@@ -24,10 +24,28 @@ freezes at 1.0.
   restarting the countdown, and a fire it vetoes is not counted as the
   page's one fire. The detection worker reads faster near a fire and while
   a framing hint is being followed. It never fires sooner than 1.2 s after
-  the page was found. Every safety check stays (a fresh confirming frame, the
-  camera watch at the fire, certain corners, once per page). Synthetic bench,
-  a person who follows the hints: from a steady page to the fire, p50 1.1 s →
-  0.66 s (cpu 1) and 4.0 s → 1.6 s (cpu 4). `onDiagnostics`: the ready and
+  the page was found, and only on a frame read after that; any motion seen
+  (a camera-watch trip, the watch's score jumping over its own baseline on
+  the page, a pass that lost the page, readings that moved) starts over the
+  wait for a frame read after it, stillness gathered after it and 150 ms of
+  the camera seen quiet before the shutter. The short countdown is lost when
+  the readings stop agreeing. Every safety check stays (a fresh confirming
+  frame, the camera watch at the fire, certain corners, once per page). A
+  motion that starts after the newest frame the app has is not seen by any of
+  this. Synthetic bench, a person who follows the hints: from a steady page to
+  the fire, p50 1.1 s → 0.73 s (cpu 1) and 4.0 s → 1.5 s (cpu 4).
+- **One automatic capture per presentation.** After a fire, auto-capture
+  re-arms only for a sheet somewhere else or once the page has been gone for
+  a second — no longer after two seconds of the phone moving over the same
+  page, nor on the view's light changing (each took a page held through the
+  confirm screen a second time). A page swapped in at the same spot without
+  leaving the view is taken with the shutter.
+- **"Mova o celular" for a corner under a control** points towards the
+  control (moving the phone that way moves the picture off it), not by the
+  page's centre.
+- A detection pass whose answer arrives after the loop, the detection lane
+  or the camera stream changed is dropped, with what was confirmed before
+  the lane or stream change. `onDiagnostics`: the ready and
   auto events carry `phases`, where the time went (numbers only).
 
 ### Added
