@@ -64,6 +64,8 @@ export const REGRESSION_TOLERANCE = {
   staleStuck: 0,
   // 5d-paper: the presented time a dim-lamp page was not held as found.
   paperUnlockedShare: 0.05,
+  // A session page-less as a whole (a document on a screen): the share of it held as a found sheet.
+  pagelessLockedShare: 0.05,
   // Real media, GT-free: a real image that stopped being detected at all, the
   // quad moving more between consecutive frames of a clip, the replayed
   // overlay spending more of the clip off the page the detector sees.
@@ -114,11 +116,14 @@ export const PAPER_LOCK_TARGET = 0.8;
 export const PAPER_LOCK_SESSIONS = ["dim-owner-case", "dim-owner-bare", "dim-sheet-over", "dim-text-page"];
 export const PAPER_LOCK_GATES = {
   1: {
-    floors: { "dim-owner-case": 0.1, "dim-owner-bare": 0.55, "dim-sheet-over": 0.15, "dim-text-page": 0.55 },
+    // Measured (on the page, whole window, 8 seeds): 17 / 66 / 21 / 67 %; before 5d-paper 4 / 28 / 14 / 63 %.
+    floors: { "dim-owner-case": 0.12, "dim-owner-bare": 0.58, "dim-sheet-over": 0.15, "dim-text-page": 0.6 },
     firstLockP50Ms: 1500,
   },
   4: {
-    floors: { "dim-owner-case": 0.1, "dim-owner-bare": 0.45, "dim-sheet-over": 0.08, "dim-text-page": 0.4 },
+    // Measured (8 seeds; owner and sheet-over two runs): 9–10 / 55 / 12–15 / 54 %; the code before the
+    // adv-paper fixes, run twice: 7–17 / 56 / 10–15 / 50 %; before 5d-paper 1 / 25 / 8 / 52 %.
+    floors: { "dim-owner-case": 0.05, "dim-owner-bare": 0.45, "dim-sheet-over": 0.08, "dim-text-page": 0.4 },
     firstLockP50Ms: null,
   },
 };
@@ -138,6 +143,7 @@ const HEADLINES = {
     "falseLockExposure",
     "staleStuck",
     "paperUnlockedShare",
+    "pagelessLockedShare",
   ],
   // Real media: the labelled verdicts where labels exist ("–" where not), then the GT-free ones.
   "real-stills": ["wrongRate", "missRate", "falsePositiveRate", "cornerErrorP50", "undetectedRate"],

@@ -18,9 +18,10 @@
  *    held it (memory, the steep-tilt allowance, passes that read nothing).
  *  - **Auto** ({@link autoPaperFresh}): auto-capture stands on the sheet's
  *    *current* reading — the newest reading of it said paper, within
- *    {@link AUTO_PAPER_FRESH_MS}, on a frame after the last motion. A
- *    contrary reading (a lid slid in at the same outline) takes that away at
- *    once, whatever the lock's memory keeps.
+ *    {@link AUTO_PAPER_FRESH_MS} (the countdown); for the fire, on a frame
+ *    after the last motion too. A contrary reading (a lid slid in at the
+ *    same outline) takes that away at once, whatever the lock's memory
+ *    keeps.
  *
  * Pure: tested in `paper-memory.test.ts`.
  */

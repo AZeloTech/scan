@@ -103,18 +103,24 @@ freezes at 1.0.
   margin is now judged against its own level along each side and against
   the page's brightest print next to it, and the region near a covered
   corner is left out; such a page must hold some print (a white lid with a
-  logo does not). Synthetic bench (dim warm lamp, 8 seeds): the share of a
-  presented page's time it is found went from 5 to 26 % for the field
-  case, 29 to 69 % for the same report without the leaflet, 17 to 28 % for
-  sheet-over reports; the passes reading as paper from 20 to 66 %, 32 to
-  80 % and 31 to 61 %. Page-less scenes read as paper less often than
-  before, and none locked or fired. Most of what is left is the page
-  detector itself in the dim (no outline, or one that jumps).
+  logo does not). Synthetic bench (dim warm lamp, 8 seeds, cpu 1): the
+  share of a presented page's time it is found — drawn on that page, over
+  the whole time it is presented — went from 4 to 17 % for the field case
+  (TL corner covered), 28 to 66 % for the same report without the leaflet,
+  14 to 21 % for sheet-over reports; the passes reading as paper from 20 to
+  66 %, 32 to 78 % and 31 to 59 %. The 80 % this was aimed at is not met:
+  most of what is left is the page detector itself in the dim (no outline
+  on a third of the passes, or one that jumps).
 - **A found page is not dropped for a few readings of its surface.** Once
   a page has read as paper, a reading that is not paper does not count
-  against it for up to 5 s while all four of its edges stay clear and it
-  stays where it was. Auto-capture does not lean on this: it fires only
-  on a page that read as paper within the last 1.5 s.
+  against it for up to 5 s while all four of its edges stay clear, every
+  corner stays in view (none unknown, no side running off the frame) and
+  it stays where it was. 5 s after its last paper reading a page is let go
+  at once, however it was being held. Auto-capture does not lean on this:
+  it counts down and fires only while the page's own newest reading says
+  paper, taken within the last 1.5 s (for the fire, on a frame after the
+  last movement) — a cover or lid slid in at the same outline stops it at
+  once.
 - **A very large photo is read as well as the viewfinder reads it.** The
   page detector squeezed a 4000 px still to its small input with a
   medium-quality resample and lost confidence on it, so a manual capture

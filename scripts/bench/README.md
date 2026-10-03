@@ -324,11 +324,11 @@ what the session suite measures. In order of a pass:
    (`printMinInk`): white lids, boxes and mats with a few solid marks read
    0.02–0.08 and the black keyboard of `empty-desk-sweep` seed 3 0.07–0.09,
    every imaging report on the bench 0.1 and up. On the `paper` sessions
-   (cpu 1, 8 seeds) the share of the presented time locked went 5 → 26 %
-   (owner-case), 29 → 69 % (no leaflet), 17 → 28 % (sheet-over reports),
-   64 → 69 % (text), first lock p50 0–254 ms where the page was found at
-   all, and the passes that read paper 20 → 66 %, 32 → 80 %, 31 → 61 %,
-   84 → 83 %; what is left is mostly the model in the dim — no quad (26–41 %
+   (cpu 1, 8 seeds) the share of the presented time locked on the page
+   went 4 → 17 % (owner-case), 28 → 66 % (no leaflet), 14 → 21 %
+   (sheet-over reports), 63 → 67 % (text), first lock p50 0–462 ms where
+   the page was found at all, and the passes that read paper 20 → 66 %,
+   32 → 78 %, 31 → 59 %, 84 → 85 %; what is left is mostly the model in the dim — no quad (26–41 %
    of passes on the reports, 27 % on the text page) or a quad that jumps
    more than 8 % between passes (up to 20 %), which resets the lock. Page-
    less readings passing as paper went down, not up (paper-lookalikes 6 →
@@ -359,10 +359,21 @@ what the session suite measures. In order of a pass:
    carrying a quad with a corner pulled onto the table (`steep-tilt` seed 2,
    whose sides stay at 5–65 %). A third (5d-paper), at any tilt: a sheet
    that read as paper at most 5 s ago, whose quad is within 6 % of the
-   diagonal of where it did and whose four sides are all judged and 80 %
-   supported, does not lose a reading to its surface either — memory for
-   the overlay and the lock only: auto-capture's countdown and fire need a
-   reading that said paper within 1.5 s ("auto: paper not read lately"). A pass that finds nothing reads the
+   diagonal of where it did, whose four sides are all judged and 80 %
+   supported, none open to the frame's edge, every corner in view and none
+   unknown, does not lose a reading to its surface either. All three are
+   bounded by one hard expiry: 5 s after its last paper reading (frame
+   time) a found sheet is let go at once, whatever held it. Memory is for
+   the overlay and the lock only: auto-capture's countdown and fire need
+   the sheet's own newest reading (accepted or held) to say paper, within
+   1.5 s, and the fire that reading from a frame after the last motion
+   ("auto: paper: newest not paper", "… not read lately", "… since
+   motion"; not the countdown, which a tremor's motion would restart at
+   every trip — cpu-4 `present-auto` steady→fire went to 2.2 s that way),
+   so a lid slid in at the same outline stops it at once
+   (`lib/paper-memory.ts`). A missed pass's
+   reading of the held sheet leaves out the covered-corner region the
+   reading that found it did. A pass that finds nothing reads the
    evidence where the found sheet was drawn: a page slid away — on a white
    table the motion probe barely sees it go — leaves no edges there, and two
    such readings end the hold (on `page-swap` the stale overlay's p95 went
@@ -707,7 +718,7 @@ moving) — scored as "not owed" fires:
 | session | what happens |
 |---|---|
 | `still-lookalikes-auto` | no document: a closed white laptop, a white woven place mat, a white box, a cream book, a white cutting board and a white plastic folder, each held still (0.25 % tremor) 3.6 s — every automatic capture is a false fire |
-| `screen-page-auto` | a phone and then a tablet lying screen up, each showing a page, held still 4.5 s — scored page-less (a screen is not the paper); whether a person means to scan a document on a screen is an owner's call |
+| `screen-page-auto` | a phone and then a tablet lying screen up, each showing a page, held still 4.5 s — scored page-less (a screen is not the paper: owner, 2026-09-28, auto only; the screen veto is 5c). Its locks are counted (`pagelessLocks`, headline `pagelessLockedShare`): the paper evidence has no material check, and a displayed document locks for much of the session; on the bench nothing fires only because the screens are small ("Aproxime") |
 | `half-out-auto` | about half of the page outside the view (two corners gone), still 6.5 s — "Afaste um pouco" owed, no automatic capture; backs off and holds |
 | `overlap-auto` | a second page laid over the first (offset 15–50 %), both in view, still 9 s; the top page is the scan — a capture of the bottom page or of both is wrong |
 | `slow-drift-auto` | the camera panning steadily across the page for 6 s at 0.8–3.2 % of the diagonal a second — `noFire` while it moves |
@@ -728,10 +739,18 @@ by seed alone, so `dim-owner-case` and `dim-owner-bare` light the same report
 alike. Each page session comes in over 1.5 s, holds with a 0.4 % tremor,
 drifts 4 % aside at 4.5 s and back by 5.9 s, holds; auto-capture off, the
 shutter at 9 s. Scored by `scorePaperLock` over `marks.paperLock` (report
-section **Paper lock**): the share of the presented time locked, the first
-lock, locks lost while steady, and the paper clauses of the passes. A run
-with a session under its floor (`PAPER_LOCK_FLOORS`, `report.mjs`) fails,
-compared or not — run them with `--seeds 8`.
+section **Paper lock**): the share of the whole presented window the loop
+held a found sheet **drawn on the presented page** (every visible corner
+within 8 % of the diagonal — the app's own "another page" line; within the
+3 % wrong-crop line shown in brackets; time no sample covers is not
+locked), a lock drawn anywhere else (**wrong**), the first lock, locks lost
+while steady, and every pass of the window: no quad, turned away, read,
+paper, kept. A run with a session under its floor or a first lock p50 over
+1.5 s (`PAPER_LOCK_GATES`, `report.mjs`; cpu 1 and cpu 4 each have their
+own) fails, compared or not; fewer than 8 seeds is reported only, unless
+`--paper-gate` (`npm run bench:paper`) requires all four sessions and
+their seeds. The spec's 80 % target is printed against every run and not
+gated: no session meets it yet (5d-detector).
 
 | session | what happens |
 |---|---|
