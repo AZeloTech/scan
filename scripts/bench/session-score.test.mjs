@@ -832,3 +832,12 @@ test("the paper lock: share locked, first lock, dropouts while steady, and the p
   assert.equal(none.dropouts, 0);
   assert.equal(paperClauses({ events }, 4000, 6000).paper, 1);
 });
+
+test("a dim-lamp page held as found less than its floor fails the run", () => {
+  const results = (share) => ({ suite: "session", summary: { "dim-owner-bare": { all: { paperLock: { lockedShare: share } } }, "approach-hold": { all: {} } } });
+  assert.deepEqual(absoluteViolations(results(0.71)), []);
+  const low = absoluteViolations(results(0.3));
+  assert.equal(low.length, 1);
+  assert.match(low[0], /dim-owner-bare\/all: paperLock.lockedShare 0.300 < floor/);
+  assert.equal(absoluteViolations(results(null)).length, 1);
+});

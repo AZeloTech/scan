@@ -42,7 +42,7 @@ import { buildBenchApp, ensureRuntimeAssets } from "./build-app.mjs";
 import { cpuThrottle, launchChromium } from "./browser.mjs";
 import { isInside, OUT_DIR, realMediaDir, realRunsDir, ROOT } from "./paths.mjs";
 import { prepareRealMedia } from "./real.mjs";
-import { absoluteViolations, checkComparable, compareSummaries, RESULTS_SCHEMA } from "./report.mjs";
+import { absoluteViolations, checkComparable, compareSummaries, paperLockViolations, RESULTS_SCHEMA } from "./report.mjs";
 import { startServer } from "./server.mjs";
 import { SUITES } from "./suites/index.mjs";
 import { buildScene, frameSize } from "./emulator/index.js";
@@ -478,6 +478,8 @@ async function main() {
         // Without a baseline the absolute limits still say something.
         const breaches = absoluteViolations(results);
         if (breaches.length > 0) log(`\nbench: absolute limits not met (fails --compare):\n  ${breaches.join("\n  ")}`);
+        // The dim-lamp paper lock floors fail the run on their own (5d-paper).
+        if (paperLockViolations(results).length > 0) exitCode = 1;
       }
     }
     if (pageErrors.length > 0) {

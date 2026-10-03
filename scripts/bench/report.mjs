@@ -87,6 +87,22 @@ export const ABSOLUTE_LIMITS = {
   "real-video": { unidentifiedCaptures: 0 },
 };
 
+/**
+ * 5d-paper: the least share of a presented page's time a dim-lamp session
+ * must hold it as found, pooled over its runs (`paperLock.lockedShare`) —
+ * a floor under the measured level (cpu 1, 8 seeds: owner-case 25–28 %,
+ * no leaflet 70–72 %, sheet-over 25–27 %, text 64–67 %; before the margin
+ * was judged locally 5 / 29 / 17 / 64 %), so the margin rule going back
+ * fails the run. Synthetic and noisy below 8 seeds; the detector's own
+ * misses in the dim (no quad, a quad that jumps) are most of what is left.
+ */
+export const PAPER_LOCK_FLOORS = {
+  "dim-owner-case": 0.15,
+  "dim-owner-bare": 0.55,
+  "dim-sheet-over": 0.18,
+  "dim-text-page": 0.5,
+};
+
 /** Headline numbers where a larger value is worse, in report order: the detector's, then a session's. */
 const HEADLINES = {
   detector: ["wrongRate", "missRate", "falsePositiveRate", "cornerErrorP50", "severeRate", "contentClippedRate"],
@@ -502,9 +518,23 @@ export function compareSummaries(previous, current, tolerance = REGRESSION_TOLER
  * the key. A key it carries with no number is a breach too: unmeasured is
  * not within limits.
  */
+/** The dim-lamp sessions under their {@link PAPER_LOCK_FLOORS} — a run that has them fails, compared or not. */
+export function paperLockViolations(results) {
+  const out = [];
+  if (results.suite === "session") {
+    for (const [session, floor] of Object.entries(PAPER_LOCK_FLOORS)) {
+      const lock = results.summary?.[session]?.all?.paperLock;
+      if (lock === undefined) continue;
+      if (lock.lockedShare === null || !Number.isFinite(lock.lockedShare)) out.push(`${session}/all: paperLock.lockedShare has no value (floor ${floor})`);
+      else if (lock.lockedShare < floor) out.push(`${session}/all: paperLock.lockedShare ${lock.lockedShare.toFixed(3)} < floor ${floor}`);
+    }
+  }
+  return out;
+}
+
 export function absoluteViolations(results) {
   const limits = ABSOLUTE_LIMITS[results.suite] ?? {};
-  const out = [];
+  const out = paperLockViolations(results);
   for (const [family, byVariant] of Object.entries(results.summary ?? {})) {
     for (const [variant, summary] of Object.entries(byVariant)) {
       for (const [key, limit] of Object.entries(limits)) {
