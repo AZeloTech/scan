@@ -357,3 +357,17 @@ test("a covered corner's region is left out of the margin and the bright end", (
   assert.ok(out.marginUniform! > open.marginUniform!, `${open.marginUniform} → ${out.marginUniform}`);
   assert.ok(out.ok, JSON.stringify(evidenceDiagnostic(out)));
 });
+
+test("a white lid with a few solid marks is not a page of printed images: too little ink", () => {
+  const noise = rng(9);
+  // A white box or a laptop lid: even, bright, three solid dark marks (a logo, a label).
+  const mark = (x: number, y: number): boolean =>
+    [[120, 200], [210, 300], [150, 360]].some(([mx, my]) => Math.abs(x - mx) < 9 && Math.abs(y - my) < 9);
+  const data = image((x, y) => (inPage(x, y) ? (mark(x, y) ? 40 : 222) + noise() * 6 : 90 + noise() * 20));
+  const e = paperEvidence(data, W, H, quad)!;
+  assert.ok(!e.ok, JSON.stringify(evidenceDiagnostic(e)));
+  assert.ok(e.ink < PAPER.printMinInk, `ink ${e.ink}`);
+  assert.equal(imagesFailure(e), "ink-low");
+  // The same marks on a page of panels is ink enough.
+  assert.equal(imagesFailure(e, { ...PAPER, printMinInk: 0 }), null);
+});

@@ -151,6 +151,13 @@ export interface EvidenceRules {
   printSolidInk: number;
   printBackground: number;
   /**
+   * …and a page of printed images has that much ink at least: a white box,
+   * a laptop or a mat with a logo or a few solid marks reads 0.02–0.08,
+   * every imaging report on the bench 0.1 and up (5d-paper: with the margin
+   * judged locally, the band no longer turned those away on its own).
+   */
+  printMinInk: number;
+  /**
    * The margin judged locally (5d-paper): its evenness against its own
    * running level along each side, its brightness against the interior's
    * bright end next to it — so a lamp to one side or a hand's shadow over
@@ -214,6 +221,7 @@ export const PAPER: EvidenceRules = {
   printMarginRelative: 0.9,
   printSolidInk: 0.2,
   printBackground: 0.25,
+  printMinInk: 0.06,
   marginLocal: true,
 };
 
@@ -821,6 +829,7 @@ export type ImagesClause =
   | "margin-relative"
   | "solid-ink"
   | "background"
+  | "ink-low"
   | "ink-high"
   | "ink-spread";
 
@@ -843,6 +852,7 @@ export function imagesFailure(e: EvidenceNumbers, rules: EvidenceRules = PAPER):
   if (!(e.marginRelative >= rules.printMarginRelative)) return "margin-relative";
   if (!(e.solidInk >= rules.printSolidInk)) return "solid-ink";
   if (!(e.background >= rules.printBackground)) return "background";
+  if (!(e.ink >= rules.printMinInk)) return "ink-low";
   if (!(e.ink <= rules.maxInk)) return "ink-high";
   if (!(e.inkSpread >= rules.minInkSpread)) return "ink-spread";
   return null;

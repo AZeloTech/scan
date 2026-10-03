@@ -358,7 +358,7 @@ export interface ScanDiagnosticsEvidence {
     | "ink-of-rest"
     | "texture"
     | null;
-  failPanels: "no-margin" | "margin-uniform" | "margin-relative" | "solid-ink" | "background" | "ink-high" | "ink-spread" | null;
+  failPanels: "no-margin" | "margin-uniform" | "margin-relative" | "solid-ink" | "background" | "ink-low" | "ink-high" | "ink-spread" | null;
 }
 
 /** A size in pixels. */
