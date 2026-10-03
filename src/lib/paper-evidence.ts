@@ -152,9 +152,10 @@ export interface EvidenceRules {
   printBackground: number;
   /**
    * …and a page of printed images has that much ink at least: a white box,
-   * a laptop or a mat with a logo or a few solid marks reads 0.02–0.08,
-   * every imaging report on the bench 0.1 and up (5d-paper: with the margin
-   * judged locally, the band no longer turned those away on its own).
+   * a laptop or a mat with a logo or a few solid marks reads 0.02–0.08, a
+   * black keyboard whose deck reads as the margin 0.07–0.09, every imaging
+   * report on the bench 0.1 and up (5d-paper: with the margin judged
+   * locally, the band no longer turned those away on its own).
    */
   printMinInk: number;
   /**
@@ -221,7 +222,7 @@ export const PAPER: EvidenceRules = {
   printMarginRelative: 0.9,
   printSolidInk: 0.2,
   printBackground: 0.25,
-  printMinInk: 0.06,
+  printMinInk: 0.1,
   marginLocal: true,
 };
 
