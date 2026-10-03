@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  brightNear,
   classicalQuadSane,
   coveredCorners,
   evidenceDiagnostic,
@@ -18,6 +19,7 @@ import {
   sidesOnFrameBorder,
 } from "./paper-evidence.ts";
 import type { CornerPoints } from "scanic";
+import { cornerCheckOf, isUncertain } from "./corner-check.ts";
 
 const W = 360;
 const H = 640;
@@ -370,4 +372,56 @@ test("a white lid with a few solid marks is not a page of printed images: too li
   assert.equal(imagesFailure(e), "ink-low");
   // The same marks on a page of panels is ink enough.
   assert.equal(imagesFailure(e, { ...PAPER, printMinInk: 0 }), null);
+});
+
+test("a margin sample is held against the bright end on its own side of the page, never the row before's far end", () => {
+  // Left column of blocks dim (120), every other block bright (220): the left
+  // margin's insets (0.02–0.05) lie before the sampled interior (0.07), and
+  // must read the left column, on every row — not the previous row's
+  // rightmost block (adv-paper F6).
+  const leftDim = Array.from({ length: 36 }, (_, b) => (b % 6 === 0 ? 120 : 220));
+  for (const v of [0.1, 0.3, 0.5, 0.7, 0.9]) {
+    for (const u of [0.02, 0.035, 0.05]) assert.equal(brightNear(leftDim, u, v), 120, `u ${u} v ${v}`);
+    for (const u of [0.95, 0.965, 0.98]) assert.equal(brightNear(leftDim, u, v), 220, `u ${u} v ${v}`);
+  }
+  // The mirror: right column dim.
+  const rightDim = Array.from({ length: 36 }, (_, b) => (b % 6 === 5 ? 120 : 220));
+  for (const v of [0.1, 0.5, 0.9]) {
+    assert.equal(brightNear(rightDim, 0.02, v), 220);
+    assert.equal(brightNear(rightDim, 0.98, v), 120);
+  }
+  // A block with nothing measured is left out, the weights renormalised.
+  const holes = Array.from({ length: 36 }, (_, b) => (b === 7 ? Number.NaN : 200));
+  assert.equal(brightNear(holes, 0.3, 0.3), 200);
+});
+
+test("printed images under a lamp from either side: the margin's ratio holds both ways", () => {
+  const noise = rng(11);
+  const fromLeft = (x: number, y: number): number => 0.3 + 0.7 * ((x - 40) / 280);
+  const fromRight = (x: number, y: number): number => 0.3 + 0.7 * ((320 - x) / 280);
+  for (const [name, light] of [["left", fromLeft], ["right", fromRight]] as const) {
+    const data = image((x, y) => (inPage(x, y) ? report(x, y, noise) : 55 + noise() * 20) * light(x, y));
+    const e = paperEvidence(data, W, H, quad)!;
+    assert.ok(e.marginRelative! >= PAPER.printMarginRelative, `${name}: ${JSON.stringify(evidenceDiagnostic(e))}`);
+    assert.ok(e.ok, `${name}: ${JSON.stringify(evidenceDiagnostic(e))}`);
+  }
+});
+
+test("a region is left out only where the same refinement calls a corner covered — the page auto-capture will not take", () => {
+  // adv-paper F4: the exclusion and the owner rule's "uncertain" come from one
+  // refinement result. Any corner not seen leaves a region out *and* makes
+  // the check uncertain (auto never fires); every corner seen leaves nothing out.
+  const seen = { provenance: "seen", runs: [1, 1] as [number, number] };
+  for (const provenance of ["inferred", "unknown"] as const) {
+    for (let corner = 0; corner < 4; corner += 1) {
+      const reports = [seen, seen, seen, seen].map((r, i) => (i === corner ? { provenance, runs: [0.7, 0.5] as [number, number] } : r));
+      assert.equal(coveredCorners(reports).length, 1);
+      const check = cornerCheckOf({ corners: reports, occlusion: { separate: false }, measured: true } as never);
+      assert.equal(isUncertain(check), true);
+    }
+  }
+  assert.deepEqual(coveredCorners([seen, seen, seen, seen]), []);
+  assert.equal(isUncertain(cornerCheckOf({ corners: [seen, seen, seen, seen], occlusion: { separate: false }, measured: true } as never)), false);
+  // Unmeasured: nothing left out, and uncertain all the same (fails closed).
+  assert.equal(isUncertain(cornerCheckOf({ corners: [], occlusion: { separate: false }, measured: false } as never)), true);
 });

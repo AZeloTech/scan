@@ -510,7 +510,7 @@ function measureInterior(data: Uint8ClampedArray, width: number, height: number,
  * brights ({@link measureInterior}) interpolated at the nearest point of the
  * sampled interior, blocks with nothing measured left out.
  */
-function brightNear(blockBright: number[], u: number, v: number): number | null {
+export function brightNear(blockBright: number[], u: number, v: number): number | null {
   const at = (x: number) => Math.max(0, Math.min(BLOCKS - 1, ((Math.max(INSET, Math.min(1 - INSET, x)) - INSET) / (1 - 2 * INSET)) * BLOCKS - 0.5));
   const fx = at(u);
   const fy = at(v);
