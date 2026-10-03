@@ -3004,13 +3004,17 @@ export function useLiveDetect({
       // finished (bench present-auto: 3 s of "camera moved" / "countdown 0 %").
       // A camera that really left the page loses the footing at that pass.
       // Auto-capture stands on the sheet's own newest reading — paper, within
-      // AUTO_PAPER_FRESH_MS, on a frame after the last motion — never on the
-      // lock's memory of it: a lid slid in at the same outline reads "not
-      // paper" and that takes auto away at once (`lib/paper-memory.ts`).
+      // AUTO_PAPER_FRESH_MS — never on the lock's memory of it: a lid slid in
+      // at the same outline reads "not paper" and that takes auto away at
+      // once (`lib/paper-memory.ts`). The countdown runs on that; the fire
+      // also wants the paper reading from a frame after the last motion. Not
+      // the countdown: like the camera watch, a tremor's motion at a slow
+      // cadence would restart it on every trip and it would never finish.
+      const paperCurrent = runtime.evidenceUnavailable || autoPaperFresh(runtime.paper, now, null);
       const paperFresh = runtime.evidenceUnavailable || autoPaperFresh(runtime.paper, now, runtime.motionAt);
       const paperWhy = paperFresh ? null : (autoPaperWhy(runtime.paper, now, runtime.motionAt) ?? "paper not read lately");
-      const settledStrict = footed && paperFresh && !covered && !uncertain && raw === null && shown === null && runtime.settledVerdict && reading?.sharp !== false;
-      const settledKeep = footed && paperFresh && !covered && !uncertain && shown === null && raw === null;
+      const settledStrict = footed && paperCurrent && !covered && !uncertain && raw === null && shown === null && runtime.settledVerdict && reading?.sharp !== false;
+      const settledKeep = footed && paperCurrent && !covered && !uncertain && shown === null && raw === null;
       guidance.settled.update(settledStrict, settledKeep, now);
       runtime.timeline.update(now, {
         lock: tracking,
@@ -3082,7 +3086,7 @@ export function useLiveDetect({
             : auto.countdown === null
               ? sheet === null || !tracking
                 ? "auto: no sheet"
-                : !paperFresh
+                : !paperCurrent
                   ? `auto: ${paperWhy}`
                   : `auto: ${runtime.stillWhy ?? (raw !== null ? `hint ${raw}` : "not steady")}`
               : auto.countdown < 1
