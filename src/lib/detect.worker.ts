@@ -32,7 +32,7 @@ import {
   type WorkerMlOptions,
   type WorkerToMain,
 } from "@/lib/detect-protocol";
-import { paperEvidence } from "@/lib/paper-evidence";
+import { coveredCorners, PAPER, paperEvidence, type CoveredCorner } from "@/lib/paper-evidence";
 import { refineQuad } from "@/lib/refine";
 import { cornerCheckOf, type CornerCheck } from "@/lib/corner-check";
 import { denormalizeQuad, normalizeQuad } from "@/lib/quad";
@@ -268,18 +268,21 @@ async function run(job: Job): Promise<void> {
       const pixels = workContext.getImageData(0, 0, job.width, job.height);
       let corners = found.corners;
       const quad = job.refineMs > 0 ? normalizeQuad(corners, job.width, job.height) : null;
+      // A corner something lies over: its region is left out of the margin's evidence.
+      let covered: CoveredCorner[] = [];
       if (quad !== null) {
         // The model's quad onto the paper's edges, on this very frame — what
         // the overlay draws. The classical detector's is only snapped nearby.
         const result = refineQuad(pixels, quad, { mode: found.detector === "ml" ? "full" : "local", budgetMs: job.refineMs });
         refineMs = result.ms;
         check = cornerCheckOf(result);
+        if (result.measured) covered = coveredCorners(result.corners);
         if (result.changed) {
           corners = denormalizeQuad(result.quad, job.width, job.height);
           refined = corners;
         }
       }
-      if (job.evidence) evidence = paperEvidence(pixels.data, job.width, job.height, corners);
+      if (job.evidence) evidence = paperEvidence(pixels.data, job.width, job.height, corners, PAPER, covered);
     }
     // Nothing found — or a quad found somewhere else entirely: is the page
     // the overlay holds still there?

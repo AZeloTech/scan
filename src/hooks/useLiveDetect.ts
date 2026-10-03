@@ -111,7 +111,7 @@ import {
 } from "@/lib/quad";
 import { QuadOneEuro } from "@/lib/one-euro";
 import { CadenceController, type CadenceProfile } from "@/lib/cadence";
-import { classicalQuadSane, evidenceDiagnostic, PAPER, paperEvidence, paperSurface, type EvidenceDiagnostic, type PaperEvidence } from "@/lib/paper-evidence";
+import { classicalQuadSane, coveredCorners, evidenceDiagnostic, PAPER, paperEvidence, paperSurface, type CoveredCorner, type EvidenceDiagnostic, type PaperEvidence } from "@/lib/paper-evidence";
 import { refineQuad } from "@/lib/refine";
 import { cornerCheckOf, hasUnknown, isUncertain, provenanceDiagnostic, type CornerCheck } from "@/lib/corner-check";
 import { FireTimeline, phasesBefore, type TimelineMarks } from "@/lib/fire-timeline";
@@ -1814,18 +1814,20 @@ export function useLiveDetect({
         }
         let corners = detection.corners;
         const quad = pixels === null ? null : normalizeQuad(corners, canvas.width, canvas.height);
+        let covered: CoveredCorner[] = [];
         if (pixels !== null && quad !== null) {
           const result = refineQuad(pixels, quad, { mode: detection.source === "ml" ? "full" : "local", budgetMs: LIVE_REFINE_BUDGET_MS });
           refineMs = result.ms;
           // Only an answer that ran to its end says anything about the corners.
           check = cornerCheckOf(result);
+          if (result.measured) covered = coveredCorners(result.corners);
           if (result.changed) {
             corners = denormalizeQuad(result.quad, canvas.width, canvas.height);
             refined = corners;
           }
         }
         if (!runtime.evidenceUnavailable) {
-          evidence = pixels === null ? "unavailable" : paperEvidence(pixels.data, canvas.width, canvas.height, corners);
+          evidence = pixels === null ? "unavailable" : paperEvidence(pixels.data, canvas.width, canvas.height, corners, PAPER, covered);
         }
       }
       let heldEvidence: PaperEvidence | null = null;

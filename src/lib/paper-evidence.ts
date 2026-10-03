@@ -150,6 +150,14 @@ export interface EvidenceRules {
   printMarginRelative: number;
   printSolidInk: number;
   printBackground: number;
+  /**
+   * The margin judged locally (5d-paper): its evenness against its own
+   * running level along each side, its brightness against the interior's
+   * bright end next to it — so a lamp to one side or a hand's shadow over
+   * the margin is not "uneven" or "darker than the page". False: against the
+   * band's single median and the whole interior's bright end, as before.
+   */
+  marginLocal: boolean;
 }
 
 /**
@@ -206,6 +214,7 @@ export const PAPER: EvidenceRules = {
   printMarginRelative: 0.9,
   printSolidInk: 0.2,
   printBackground: 0.25,
+  marginLocal: true,
 };
 
 /** The step's boxes, and how far from the side it is looked for — shares of the frame's short side. */
@@ -318,7 +327,14 @@ export interface EvidenceSamples {
   clipped?: number;
   /** The interior's bright end (95th percentile luma), and the border band's median luma and evenness (absent: not measured). */
   bright?: number;
-  margin?: { luma: number; uniform: number } | null;
+  /**
+   * The border band ({@link measureMargin}): its median luma; its evenness
+   * against that median (`flatUniform`) and against its own local level
+   * (`uniform`); that level over the interior's bright end next to it
+   * (`relative`). Older samples carry `luma` and `uniform` only, `uniform`
+   * then the flat one.
+   */
+  margin?: { luma: number; uniform: number; flatUniform?: number; relative?: number | null } | null;
 }
 
 /**
@@ -398,7 +414,7 @@ function measureSides(data: Uint8ClampedArray, width: number, height: number, c:
  * medians (so a lighting gradient or a shadow across the page is background,
  * not ink), and each sample's residual from it.
  */
-function measureInterior(data: Uint8ClampedArray, width: number, height: number, c: Point[]) {
+function measureInterior(data: Uint8ClampedArray, width: number, height: number, c: Point[], excluded: (u: number, v: number) => boolean) {
   const across = (Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y) + Math.hypot(c[2].x - c[3].x, c[2].y - c[3].y)) / 2;
   const down = (Math.hypot(c[3].x - c[0].x, c[3].y - c[0].y) + Math.hypot(c[2].x - c[1].x, c[2].y - c[1].y)) / 2;
   const cols = Math.max(GRID_MIN, Math.min(GRID_MAX, Math.round(across / 3)));
@@ -456,31 +472,178 @@ function measureInterior(data: Uint8ClampedArray, width: number, height: number,
       blockOf[at] = Math.min(BLOCKS - 1, Math.floor((j * BLOCKS) / rows)) * BLOCKS + Math.min(BLOCKS - 1, Math.floor((i * BLOCKS) / cols));
     }
   }
-  const lit = Array.from(grid).filter((y) => !Number.isNaN(y)).sort((a, b) => a - b);
+  // The bright end, overall and per block — leaving out the region near a
+  // covered corner (`excluded`): what lies over it is not the page.
+  const lit: number[] = [];
+  const perBlock: number[][] = Array.from({ length: BLOCKS * BLOCKS }, () => []);
+  for (let j = 0; j < rows; j += 1) {
+    const v = INSET + ((1 - 2 * INSET) * (j + 0.5)) / rows;
+    for (let i = 0; i < cols; i += 1) {
+      const u = INSET + ((1 - 2 * INSET) * (i + 0.5)) / cols;
+      const y = grid[j * cols + i];
+      if (Number.isNaN(y) || excluded(u, v)) continue;
+      lit.push(y);
+      perBlock[blockOf[j * cols + i]].push(y);
+    }
+  }
+  lit.sort((a, b) => a - b);
   const bright = lit.length === 0 ? 0 : lit[Math.min(lit.length - 1, Math.floor(lit.length * 0.95))];
-  return { residuals, cols, rows, inFrame, blockOf, blockMedians: known, clipped: inFrame > 0 ? clipped / inFrame : 0, bright };
+  const blockBright = perBlock.map((values) => {
+    if (values.length < 4) return Number.NaN;
+    values.sort((a, b) => a - b);
+    return values[Math.min(values.length - 1, Math.floor(values.length * 0.95))];
+  });
+  return { residuals, cols, rows, inFrame, blockOf, blockMedians: known, clipped: inFrame > 0 ? clipped / inFrame : 0, bright, blockBright };
 }
 
 /**
- * The border band just inside the quad's sides ({@link MARGIN_INSETS}, over
- * the middle of each side): its median luma and the share of it within
- * {@link MARGIN_BAND} of that — a page's white margin is one even material.
+ * The bright end of the interior near (u, v) (quad shares): the block
+ * brights ({@link measureInterior}) interpolated at the nearest point of the
+ * sampled interior, blocks with nothing measured left out.
  */
-function measureMargin(data: Uint8ClampedArray, width: number, height: number, c: Point[]): { luma: number; uniform: number } | null {
+function brightNear(blockBright: number[], u: number, v: number): number | null {
+  const at = (x: number) => Math.max(0, Math.min(BLOCKS - 1, ((Math.max(INSET, Math.min(1 - INSET, x)) - INSET) / (1 - 2 * INSET)) * BLOCKS - 0.5));
+  const fx = at(u);
+  const fy = at(v);
+  const x0 = Math.floor(fx);
+  const y0 = Math.floor(fy);
+  let sum = 0;
+  let weight = 0;
+  for (const [bx, by, w] of [
+    [x0, y0, (1 - (fx - x0)) * (1 - (fy - y0))],
+    [Math.min(BLOCKS - 1, x0 + 1), y0, (fx - x0) * (1 - (fy - y0))],
+    [x0, Math.min(BLOCKS - 1, y0 + 1), (1 - (fx - x0)) * (fy - y0)],
+    [Math.min(BLOCKS - 1, x0 + 1), Math.min(BLOCKS - 1, y0 + 1), (fx - x0) * (fy - y0)],
+  ] as const) {
+    const b = blockBright[by * BLOCKS + bx];
+    if (!Number.isFinite(b) || w <= 0) continue;
+    sum += b * w;
+    weight += w;
+  }
+  return weight > 0 ? sum / weight : null;
+}
+
+/** Positions each side of the border band's local level is taken over, each way ({@link measureMargin}). */
+const MARGIN_LOCAL = 5;
+
+/**
+ * The border band just inside the quad's sides ({@link MARGIN_INSETS}, over
+ * the middle of each side), outside any region near a covered corner
+ * (`excluded`): its median luma and the share of it within
+ * {@link MARGIN_BAND} of that (`flatUniform`, `luma`: a page's white margin
+ * is one even material) — and the same judged locally, so a lamp's gradient
+ * or a hand's soft shadow across the margin is not unevenness: each sample
+ * against the median of its own side's samples within {@link MARGIN_LOCAL}
+ * positions (`uniform`), and that local level against the interior's bright
+ * end next to it (`relative`, the median over the band; null when no block
+ * near it was measured).
+ */
+function measureMargin(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  c: Point[],
+  excluded: (u: number, v: number) => boolean,
+  blockBright: number[],
+): { luma: number; flatUniform: number; uniform: number; relative: number | null } | null {
   const values: number[] = [];
-  for (const d of MARGIN_INSETS) {
-    for (let i = 0; i < MARGIN_SAMPLES; i += 1) {
-      const t = 0.08 + (0.84 * (i + 0.5)) / MARGIN_SAMPLES;
-      for (const [u, v] of [[t, d], [t, 1 - d], [d, t], [1 - d, t]]) {
+  // Per side (top, bottom, left, right), per position along it: the samples at each inset and where they are.
+  const bySide: { u: number; v: number; ys: number[] }[][] = [[], [], [], []];
+  for (let i = 0; i < MARGIN_SAMPLES; i += 1) {
+    const t = 0.08 + (0.84 * (i + 0.5)) / MARGIN_SAMPLES;
+    const spots: [number, number][] = [[t, MARGIN_INSETS[1]], [t, 1 - MARGIN_INSETS[1]], [MARGIN_INSETS[1], t], [1 - MARGIN_INSETS[1], t]];
+    for (let side = 0; side < 4; side += 1) {
+      const ys: number[] = [];
+      for (const d of MARGIN_INSETS) {
+        const [u, v] = side === 0 ? [t, d] : side === 1 ? [t, 1 - d] : side === 2 ? [d, t] : [1 - d, t];
+        if (excluded(u, v)) continue;
         const p = inside(c, u, v);
         const y = luma(data, width, height, p.x, p.y);
-        if (y !== null) values.push(y);
+        if (y === null) continue;
+        values.push(y);
+        ys.push(y);
       }
+      if (ys.length > 0) bySide[side].push({ u: spots[side][0], v: spots[side][1], ys });
     }
   }
   if (values.length < MARGIN_SAMPLES) return null;
   const middle = median(values);
-  return { luma: middle, uniform: values.filter((y) => Math.abs(y - middle) <= MARGIN_BAND).length / values.length };
+  let near = 0;
+  let judged = 0;
+  const ratios: number[] = [];
+  for (const run of bySide) {
+    for (let k = 0; k < run.length; k += 1) {
+      const local = median(run.slice(Math.max(0, k - MARGIN_LOCAL), k + MARGIN_LOCAL + 1).flatMap((spot) => spot.ys));
+      for (const y of run[k].ys) {
+        judged += 1;
+        if (Math.abs(y - local) <= MARGIN_BAND) near += 1;
+      }
+      const bright = brightNear(blockBright, run[k].u, run[k].v);
+      if (bright !== null && bright > 0) ratios.push(local / bright);
+    }
+  }
+  return {
+    luma: middle,
+    flatUniform: values.filter((y) => Math.abs(y - middle) <= MARGIN_BAND).length / values.length,
+    uniform: judged > 0 ? near / judged : 0,
+    relative: ratios.length > 0 ? median(ratios) : null,
+  };
+}
+
+/**
+ * A corner something lies over (`refine.ts`'s inferred or unknown corner),
+ * for {@link measureEvidence}: `corner` 0–3 (TL, TR, BR, BL) and `along`, the
+ * share of each of its two sides (the one before it, the one after it) not
+ * seen running up to it.
+ */
+export interface CoveredCorner {
+  corner: number;
+  along: [number, number];
+}
+
+/** Past the unseen run, this much more of a side (a share of it) is left out; and at most this much. */
+const COVER_PAD = 0.06;
+const COVER_MAX = 0.6;
+/** A covered corner with no run measured at all: this much of each side. */
+const COVER_DEFAULT = 0.35;
+
+/**
+ * The covered corners of a refinement's corner reports (`RefineResult.corners`,
+ * TL, TR, BR, BL), for {@link paperEvidence}: each corner not `seen`, with the
+ * unseen share of its two sides (`1 − runs`).
+ */
+export function coveredCorners(reports: readonly { provenance: string; runs: readonly [number, number] }[] | null | undefined): CoveredCorner[] {
+  if (!reports) return [];
+  const out: CoveredCorner[] = [];
+  reports.forEach((report, corner) => {
+    if (report === undefined || report.provenance === "seen") return;
+    const unseen = report.runs.map((r) => Math.max(0, Math.min(1, 1 - r)));
+    out.push({ corner, along: unseen[0] === 1 && unseen[1] === 1 ? [COVER_DEFAULT, COVER_DEFAULT] : [unseen[0], unseen[1]] });
+  });
+  return out;
+}
+
+/**
+ * Whether (u, v) (quad shares) lies near a covered corner: within the unseen
+ * run of both its sides, plus {@link COVER_PAD}.
+ */
+function coveredRegion(covered: readonly CoveredCorner[]): (u: number, v: number) => boolean {
+  if (covered.length === 0) return () => false;
+  const boxes = covered.map(({ corner, along }) => {
+    const [before, after] = along.map((a) => Math.min(COVER_MAX, a + COVER_PAD));
+    // The side before TL runs up the left edge (v), the one after it along the top (u); and round the quad.
+    switch (corner) {
+      case 0:
+        return (u: number, v: number) => u <= after && v <= before;
+      case 1:
+        return (u: number, v: number) => u >= 1 - before && v <= after;
+      case 2:
+        return (u: number, v: number) => v >= 1 - before && u >= 1 - after;
+      default:
+        return (u: number, v: number) => u <= before && v >= 1 - after;
+    }
+  });
+  return (u, v) => boxes.some((inBox) => inBox(u, v));
 }
 
 /**
@@ -493,14 +656,16 @@ export function measureEvidence(
   width: number,
   height: number,
   quad: CornerPoints,
+  covered: readonly CoveredCorner[] = [],
 ): EvidenceSamples | null {
   if (width <= 0 || height <= 0 || data.length < width * height * 4) return null;
   const c = corners(quad);
   if (c.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return null;
+  const excluded = coveredRegion(covered);
   const { sides, lengths } = measureSides(data, width, height, c);
-  const { inFrame, ...texture } = measureInterior(data, width, height, c);
+  const { inFrame, blockBright, ...texture } = measureInterior(data, width, height, c, excluded);
   if (inFrame === 0) return null;
-  return { sides, sideLengths: lengths, ...texture, blocks: BLOCKS * BLOCKS, margin: measureMargin(data, width, height, c) };
+  return { sides, sideLengths: lengths, ...texture, blocks: BLOCKS * BLOCKS, margin: measureMargin(data, width, height, c, excluded, blockBright) };
 }
 
 /**
@@ -593,8 +758,15 @@ export function judgeEvidence(samples: EvidenceSamples, rules: EvidenceRules = P
     inkSpread: spread,
     solidInk: inkSamples > 0 ? solid / inkSamples : 0,
     backgroundSpread: blockRange,
-    marginUniform: samples.margin == null ? null : samples.margin.uniform,
-    marginRelative: samples.margin == null || !(samples.bright! > 0) ? null : samples.margin.luma / samples.bright!,
+    marginUniform: samples.margin == null ? null : rules.marginLocal ? samples.margin.uniform : (samples.margin.flatUniform ?? samples.margin.uniform),
+    marginRelative:
+      samples.margin == null
+        ? null
+        : rules.marginLocal && samples.margin.relative !== undefined
+          ? samples.margin.relative
+          : !(samples.bright! > 0)
+            ? null
+            : samples.margin.luma / samples.bright!,
     paperLuma: median(samples.blockMedians),
     brightLuma: samples.bright ?? null,
   };
@@ -764,8 +936,9 @@ export function paperEvidence(
   height: number,
   quad: CornerPoints,
   rules: EvidenceRules = PAPER,
+  covered: readonly CoveredCorner[] = [],
 ): PaperEvidence | null {
-  const samples = measureEvidence(data, width, height, quad);
+  const samples = measureEvidence(data, width, height, quad, covered);
   if (samples === null) return null;
   const evidence = judgeEvidence(samples, rules);
   return { ...evidence, open: openSides(data, width, height, quad, evidence.sideSupport, median(samples.blockMedians)) };
