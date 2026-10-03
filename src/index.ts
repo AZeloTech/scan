@@ -23,6 +23,7 @@ export type {
   ScanCaptureLayout,
   ScanDiagnosticsEvent,
   ScanDiagnosticsPayload,
+  ScanDiagnosticsEvidence,
   ScanDiagnosticsSize,
   ScanDiagnosticsVersion,
 } from "./types";

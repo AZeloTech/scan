@@ -43,6 +43,33 @@ const EVERY_PAYLOAD: ScanDiagnosticsPayload[] = [
     ready: false,
     autoArmed: true,
     why: "auto: countdown 40 %",
+    conf: 0.998,
+    rejected: null,
+    paper: false,
+    evidence: {
+      sideT: 0.95,
+      sideR: 1,
+      sideB: 0.9,
+      sideL: 0.85,
+      sidesKnown: 4,
+      background: 0.41,
+      ink: 0.33,
+      counterInk: 0.02,
+      inkSpread: 0.81,
+      solidInk: 0.74,
+      backgroundSpread: 0.22,
+      marginUniform: 0.52,
+      marginRelative: 0.86,
+      paperLevel: 141,
+      brightLevel: 168,
+      verdict: "surface",
+      failPrint: "background",
+      failPanels: "margin-uniform",
+    },
+    paperAgeMs: 2400,
+    fill: 0.71,
+    corners: { tl: "inferred", tr: "seen", br: "seen", bl: "seen" },
+    separate: false,
   },
   { type: "visible", x: 0.2, y: 0, width: 0.6, height: 1, fit: "cover" },
   { type: "hint", id: "move-closer", shown: false, ms: 1200, fill: 0.712 },
@@ -153,7 +180,8 @@ test("no event carries image data: numbers, booleans, enums and plain objects on
       }
     });
     const json = JSON.stringify(event);
-    assert.ok(json.length < 600, `${event.type} is ${json.length} bytes`);
+    // A pass sample carries the paper evidence's numbers: the widest event, still well under a kilobyte.
+    assert.ok(json.length < (event.type === "pass" ? 1000 : 600), `${event.type} is ${json.length} bytes`);
   }
 });
 

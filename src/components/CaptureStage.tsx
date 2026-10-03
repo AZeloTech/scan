@@ -1439,6 +1439,8 @@ export function CaptureStage({
           conf: d.answer?.conf ?? null,
           rejected: d.answer?.rejected ?? null,
           paper: d.answer?.paper ?? null,
+          evidence: d.answer?.evidence ?? null,
+          paperAgeMs: d.paperAgeMs ?? null,
           fill: d.fill,
           corners: provenanceDiagnostic(d.check),
           separate: d.check?.separate ?? null,

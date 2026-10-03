@@ -54,7 +54,7 @@ export const PASS_WINDOW_MS = 1000;
  */
 export const MAX_DEPTH = 4;
 
-/** Most keys one object in an event may carry; the widest the library builds (a pass sample) has 12. */
+/** Most keys one object in an event may carry; the widest the library builds (a pass sample) has 20. */
 export const MAX_KEYS = 24;
 
 /** Longest string an event may carry — a reason line, never a sentence. */

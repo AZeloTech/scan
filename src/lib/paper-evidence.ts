@@ -63,6 +63,13 @@ export interface PaperEvidence {
   marginUniform?: number | null;
   marginRelative?: number | null;
   /**
+   * The paper's own level — the median of the interior's block medians
+   * (0–255 luma) — and the interior's bright end the margin was held
+   * against; for the diagnostics stream, not the verdict. Absent: not measured.
+   */
+  paperLuma?: number;
+  brightLuma?: number | null;
+  /**
    * Share of the interior clipped white ({@link GLARE_LUMA} and up) — a
    * lamp's reflection washing the print out. Not part of the verdict: it is
    * what the viewfinder's "reflection" hint reads (`lib/guidance.ts`).
@@ -588,6 +595,8 @@ export function judgeEvidence(samples: EvidenceSamples, rules: EvidenceRules = P
     backgroundSpread: blockRange,
     marginUniform: samples.margin == null ? null : samples.margin.uniform,
     marginRelative: samples.margin == null || !(samples.bright! > 0) ? null : samples.margin.luma / samples.bright!,
+    paperLuma: median(samples.blockMedians),
+    brightLuma: samples.bright ?? null,
   };
   // A reflection is a hot spot: blocks of the interior washed white while a
   // good part of the page is not. A page exposed to the top of the range is
@@ -600,7 +609,7 @@ export function judgeEvidence(samples: EvidenceSamples, rules: EvidenceRules = P
 }
 
 /** The decision over the numbers (the glare share is not one of them). */
-export function paperLike(e: Omit<PaperEvidence, "ok" | "glare" | "open">, rules: EvidenceRules = PAPER): boolean {
+export function paperLike(e: EvidenceNumbers, rules: EvidenceRules = PAPER): boolean {
   const sidesNeeded = Math.min(rules.minSides, Math.max(2, e.sidesKnown - 1));
   return e.sidesKnown >= 2 && e.sidesSupported >= sidesNeeded && paperSurface(e, rules);
 }
@@ -610,40 +619,139 @@ export function paperLike(e: Omit<PaperEvidence, "ok" | "glare" | "open">, rules
  * the sides say — what a page the frame cuts off still shows (its cut sides
  * run along the frame's edge, where there is no step to find).
  */
-export function paperSurface(e: Omit<PaperEvidence, "ok" | "glare" | "open">, rules: EvidenceRules = PAPER): boolean {
+export function paperSurface(e: EvidenceNumbers, rules: EvidenceRules = PAPER): boolean {
   return printText(e, rules) || printedImages(e, rules);
+}
+
+/** The numbers a verdict is judged on. */
+type EvidenceNumbers = Omit<PaperEvidence, "ok" | "glare" | "open">;
+
+/**
+ * The first clause of the text rule ({@link printText}) a reading fails, or
+ * null when it passes — in the rule's own order, so a histogram of them says
+ * what keeps a page from reading as text on paper.
+ */
+export type TextClause =
+  | "background"
+  | "ink-low"
+  | "ink-high"
+  | "ink-spread"
+  | "counter-ink"
+  | "background-spread"
+  | "solid-ink"
+  | "ink-of-rest"
+  | "texture";
+
+/** The first clause of the printed-images rule ({@link printedImages}) a reading fails, or null when it passes. */
+export type ImagesClause =
+  | "no-margin"
+  | "margin-uniform"
+  | "margin-relative"
+  | "solid-ink"
+  | "background"
+  | "ink-high"
+  | "ink-spread";
+
+export function textFailure(e: EvidenceNumbers, rules: EvidenceRules = PAPER): TextClause | null {
+  if (!(e.background >= rules.minBackground)) return "background";
+  if (!(e.ink >= (e.background >= rules.faintBackground ? rules.faintInk : rules.minInk))) return "ink-low";
+  if (!(e.ink <= rules.maxInk)) return "ink-high";
+  if (!(e.inkSpread >= rules.minInkSpread)) return "ink-spread";
+  if (!(e.counterInk <= e.ink * rules.maxCounterRatio + rules.counterFloor)) return "counter-ink";
+  if (!(e.backgroundSpread <= rules.maxBackgroundSpread)) return "background-spread";
+  if (!(e.solidInk <= rules.maxSolidInk)) return "solid-ink";
+  if (!(e.background >= rules.marginalBackground || e.ink >= rules.minInkOfRest * (1 - e.background))) return "ink-of-rest";
+  if (e.ink < rules.textureInk && e.inkSpread > rules.textureSpread) return "texture";
+  return null;
+}
+
+export function imagesFailure(e: EvidenceNumbers, rules: EvidenceRules = PAPER): ImagesClause | null {
+  if (e.marginUniform == null || e.marginRelative == null) return "no-margin";
+  if (!(e.marginUniform >= rules.printMarginUniform)) return "margin-uniform";
+  if (!(e.marginRelative >= rules.printMarginRelative)) return "margin-relative";
+  if (!(e.solidInk >= rules.printSolidInk)) return "solid-ink";
+  if (!(e.background >= rules.printBackground)) return "background";
+  if (!(e.ink <= rules.maxInk)) return "ink-high";
+  if (!(e.inkSpread >= rules.minInkSpread)) return "ink-spread";
+  return null;
 }
 
 /**
  * A page of printed images ({@link EvidenceRules.printMarginUniform}): solid
  * print inside a white margin as bright as anything on the sheet.
  */
-function printedImages(e: Omit<PaperEvidence, "ok" | "glare" | "open">, rules: EvidenceRules): boolean {
-  return (
-    e.marginUniform != null &&
-    e.marginRelative != null &&
-    e.marginUniform >= rules.printMarginUniform &&
-    e.marginRelative >= rules.printMarginRelative &&
-    e.solidInk >= rules.printSolidInk &&
-    e.background >= rules.printBackground &&
-    e.ink <= rules.maxInk &&
-    e.inkSpread >= rules.minInkSpread
-  );
+function printedImages(e: EvidenceNumbers, rules: EvidenceRules): boolean {
+  return imagesFailure(e, rules) === null;
 }
 
 /** Text and line print on the sheet's own background — the rules the evidence was set on. */
-function printText(e: Omit<PaperEvidence, "ok" | "glare" | "open">, rules: EvidenceRules): boolean {
-  return (
-    e.background >= rules.minBackground &&
-    e.ink >= (e.background >= rules.faintBackground ? rules.faintInk : rules.minInk) &&
-    e.ink <= rules.maxInk &&
-    e.inkSpread >= rules.minInkSpread &&
-    e.counterInk <= e.ink * rules.maxCounterRatio + rules.counterFloor &&
-    e.backgroundSpread <= rules.maxBackgroundSpread &&
-    e.solidInk <= rules.maxSolidInk &&
-    (e.background >= rules.marginalBackground || e.ink >= rules.minInkOfRest * (1 - e.background)) &&
-    !(e.ink < rules.textureInk && e.inkSpread > rules.textureSpread)
-  );
+function printText(e: EvidenceNumbers, rules: EvidenceRules): boolean {
+  return textFailure(e, rules) === null;
+}
+
+/**
+ * Why a reading is or is not paper, as one enum: `ok`, `sides` (too few
+ * sides on edges — whatever the surface says) or `surface` (the sides hold;
+ * neither print rule does).
+ */
+export type EvidenceVerdict = "ok" | "sides" | "surface";
+
+export function evidenceVerdict(e: EvidenceNumbers, rules: EvidenceRules = PAPER): EvidenceVerdict {
+  const sidesNeeded = Math.min(rules.minSides, Math.max(2, e.sidesKnown - 1));
+  if (!(e.sidesKnown >= 2 && e.sidesSupported >= sidesNeeded)) return "sides";
+  return paperSurface(e, rules) ? "ok" : "surface";
+}
+
+/**
+ * One reading's numbers for the diagnostics stream (`pass` events'
+ * `evidence`): rounded, metadata only — per-side support (null: the frame
+ * cut it off), the surface's shares, the margin's two numbers, the paper's
+ * level and the bright end, and which rule and clause failed.
+ */
+export interface EvidenceDiagnostic {
+  sideT: number | null;
+  sideR: number | null;
+  sideB: number | null;
+  sideL: number | null;
+  sidesKnown: number;
+  background: number;
+  ink: number;
+  counterInk: number;
+  inkSpread: number;
+  solidInk: number;
+  backgroundSpread: number;
+  marginUniform: number | null;
+  marginRelative: number | null;
+  paperLevel: number | null;
+  brightLevel: number | null;
+  verdict: EvidenceVerdict;
+  failPrint: TextClause | null;
+  failPanels: ImagesClause | null;
+}
+
+export function evidenceDiagnostic(e: PaperEvidence, rules: EvidenceRules = PAPER): EvidenceDiagnostic {
+  const r2 = (v: number | null | undefined): number | null => (v == null || !Number.isFinite(v) ? null : Math.round(v * 100) / 100);
+  const r0 = (v: number | null | undefined): number | null => (v == null || !Number.isFinite(v) ? null : Math.round(v));
+  return {
+    sideT: r2(e.sideSupport[0]),
+    sideR: r2(e.sideSupport[1]),
+    sideB: r2(e.sideSupport[2]),
+    sideL: r2(e.sideSupport[3]),
+    sidesKnown: e.sidesKnown,
+    background: r2(e.background) ?? 0,
+    ink: r2(e.ink) ?? 0,
+    counterInk: r2(e.counterInk) ?? 0,
+    inkSpread: r2(e.inkSpread) ?? 0,
+    solidInk: r2(e.solidInk) ?? 0,
+    backgroundSpread: r2(e.backgroundSpread) ?? 0,
+    marginUniform: r2(e.marginUniform),
+    marginRelative: r2(e.marginRelative),
+    paperLevel: r0(e.paperLuma),
+    brightLevel: r0(e.brightLuma),
+    verdict: evidenceVerdict(e, rules),
+    failPrint: textFailure(e, rules),
+    failPanels: imagesFailure(e, rules),
+  };
 }
 
 /**

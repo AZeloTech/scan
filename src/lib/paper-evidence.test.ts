@@ -3,7 +3,11 @@ import test from "node:test";
 
 import {
   classicalQuadSane,
+  evidenceDiagnostic,
+  evidenceVerdict,
   GLARE_LUMA,
+  imagesFailure,
+  textFailure,
   minInteriorAngle,
   PAPER,
   paperEvidence,
@@ -252,4 +256,33 @@ test("the classical detector's usual failures are not shown", () => {
   assert.ok(minInteriorAngle(skewed) < 35);
   assert.equal(classicalQuadSane(skewed, W, H, null), false);
   assert.equal(classicalQuadSane(quad, W, H, null), true);
+});
+
+test("the diagnostics name the rule and the clause a reading fails, and agree with the verdict", () => {
+  const noise = rng(1);
+  const ok = paperEvidence(image((x, y) => (inPage(x, y) ? (printed(x, y) ? 60 : 225) + noise() * 6 : 55 + noise() * 20)), W, H, quad);
+  assert.ok(ok !== null && ok.ok);
+  const d = evidenceDiagnostic(ok);
+  assert.equal(d.verdict, "ok");
+  assert.equal(d.failPrint, null);
+  assert.equal(d.sidesKnown, 4);
+  assert.ok(d.sideT !== null && d.sideT >= 0.55);
+  assert.ok(d.paperLevel !== null && Math.abs(d.paperLevel - 228) <= 4, `paper level ${d.paperLevel}`);
+  // Rounded: two decimals for shares, whole levels.
+  for (const value of [d.background, d.ink, d.inkSpread, d.marginUniform ?? 0]) assert.equal(Math.round(value * 100) / 100, value);
+  // A blank lid: four edges, no print — the surface fails, on ink.
+  const lid = paperEvidence(image((x, y) => (inPage(x, y) ? 170 + noise() * 6 : 55 + noise() * 20)), W, H, quad);
+  assert.ok(lid !== null && !lid.ok);
+  assert.equal(evidenceVerdict(lid), "surface");
+  assert.equal(textFailure(lid), "ink-low");
+  assert.notEqual(imagesFailure(lid), null);
+  // A quad across a textured desk: no edges, whatever the surface.
+  const desk = paperEvidence(image(() => 120 + noise() * 60), W, H, quad);
+  assert.ok(desk !== null && !desk.ok);
+  assert.equal(evidenceVerdict(desk), "sides");
+  // The clause functions are the verdict: paper exactly when the sides hold and one rule passes.
+  for (const e of [ok, lid, desk]) {
+    assert.equal(e.ok, evidenceVerdict(e) === "ok");
+    if (evidenceVerdict(e) !== "sides") assert.equal(e.ok, textFailure(e) === null || imagesFailure(e) === null);
+  }
 });

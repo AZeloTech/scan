@@ -21,7 +21,7 @@ test("the diagnostics HUD says what the loop is doing, in numbers only", () => {
       blocked: "auto: countdown 40 %",
       passes: 12,
       fill: 0.846,
-      answer: { conf: 0.914, rejected: null, paper: true },
+      answer: { conf: 0.914, rejected: null, paper: true, evidence: null },
     },
     { torch: false, autoOffered: true, autoOn: true, autoFires: 2, still: { width: 2250, height: 4000, attention: "corner-outside" } },
     false,

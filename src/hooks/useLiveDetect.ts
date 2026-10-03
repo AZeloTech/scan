@@ -111,7 +111,7 @@ import {
 } from "@/lib/quad";
 import { QuadOneEuro } from "@/lib/one-euro";
 import { CadenceController, type CadenceProfile } from "@/lib/cadence";
-import { classicalQuadSane, PAPER, paperEvidence, paperSurface, type PaperEvidence } from "@/lib/paper-evidence";
+import { classicalQuadSane, evidenceDiagnostic, PAPER, paperEvidence, paperSurface, type EvidenceDiagnostic, type PaperEvidence } from "@/lib/paper-evidence";
 import { refineQuad } from "@/lib/refine";
 import { cornerCheckOf, hasUnknown, isUncertain, provenanceDiagnostic, type CornerCheck } from "@/lib/corner-check";
 import { FireTimeline, phasesBefore, type TimelineMarks } from "@/lib/fire-timeline";
@@ -575,6 +575,8 @@ interface Runtime {
   evidenceHits: number;
   /** Pixels cannot be read on this device: evidence is not required. */
   evidenceUnavailable: boolean;
+  /** When the tracked sheet last read as paper on an accepted pass (`performance.now()`), or null. */
+  paperAt: number | null;
   /** Consecutive worker passes that timed out, and that could not grab or read their frame. */
   workerTimeouts: number;
   workerGrabFailures: number;
@@ -738,14 +740,18 @@ export interface PassAnswer {
   conf: number | null;
   rejected: string | null;
   paper: boolean | null;
+  /** The numbers behind `paper` (`evidenceDiagnostic`); null when not read. */
+  evidence: EvidenceDiagnostic | null;
 }
 
 /** {@link PassAnswer} from a pass's detection, the loop's verdict on it and its evidence. */
 function passAnswer(detection: FrameDetection | null, rejected: string | null, evidence: EvidenceReading): PassAnswer {
+  const read = evidence === null || evidence === "unavailable" ? null : evidence;
   return {
     conf: detection === null ? null : (detection.confidence ?? null),
     rejected,
-    paper: evidence === null || evidence === "unavailable" ? null : evidence.ok,
+    paper: read === null ? null : read.ok,
+    evidence: read === null ? null : evidenceDiagnostic(read),
   };
 }
 
@@ -762,6 +768,7 @@ function freshRuntime(): Runtime {
     evidenceMisses: 0,
     evidenceHits: 0,
     evidenceUnavailable: false,
+    paperAt: null,
     workerTimeouts: 0,
     workerGrabFailures: 0,
     lastFrameAt: 0,
@@ -1022,6 +1029,8 @@ export interface LiveDiagnostics {
   fill: number | null;
   /** The newest pass's answer ({@link PassAnswer}), or null before the first. */
   answer: PassAnswer | null;
+  /** Milliseconds since the locked sheet last read as paper; null when nothing is locked or it never has. */
+  paperAgeMs?: number | null;
   /** The tracked page's corners and overlap, as the newest measuring pass said (`lib/corner-check.ts`); null or absent with none. */
   check?: CornerCheck | null;
 }
@@ -2447,6 +2456,7 @@ export function useLiveDetect({
       if (convincing) {
         runtime.evidenceMisses = 0;
         runtime.evidenceHits += 1;
+        runtime.paperAt = now;
         // Only a reading with every side the frame shows standing on its
         // edges: the model flipping between a page and a corner pulled
         // onto the table must not be drawn on every other flip.
@@ -3298,6 +3308,7 @@ export function useLiveDetect({
       passes: passCountRef.current,
       fill: runtime.fill,
       answer: runtime.answer,
+      paperAgeMs: runtime.locked && runtime.paperAt !== null ? Math.round(performance.now() - runtime.paperAt) : null,
       check: runtime.target === null ? null : runtime.check,
     };
   }, []);

@@ -319,6 +319,48 @@ export interface ScanDiagnosticsPhases {
   intervalMs?: number | null;
 }
 
+/**
+ * One pass's paper evidence, rounded (`pass` events): per-side edge support
+ * (top, right, bottom, left of the quad; 0–1, null when the frame cut the
+ * side off), the interior's shares (background, ink, counter-ink, ink
+ * spread, solid ink, background spread), the border band's evenness and
+ * brightness against the interior's bright end, the paper's median level and
+ * the bright end (0–255), and why it is or is not paper: `verdict` (`ok`,
+ * `sides`, `surface`) and, for each of the two print rules — print on the
+ * paper's own background (`failPrint`) and printed images in a white margin
+ * (`failPanels`) — the first clause it fails (null: it passes). Numbers and enums only.
+ */
+export interface ScanDiagnosticsEvidence {
+  sideT: number | null;
+  sideR: number | null;
+  sideB: number | null;
+  sideL: number | null;
+  sidesKnown: number;
+  background: number;
+  ink: number;
+  counterInk: number;
+  inkSpread: number;
+  solidInk: number;
+  backgroundSpread: number;
+  marginUniform: number | null;
+  marginRelative: number | null;
+  paperLevel: number | null;
+  brightLevel: number | null;
+  verdict: "ok" | "sides" | "surface";
+  failPrint:
+    | "background"
+    | "ink-low"
+    | "ink-high"
+    | "ink-spread"
+    | "counter-ink"
+    | "background-spread"
+    | "solid-ink"
+    | "ink-of-rest"
+    | "texture"
+    | null;
+  failPanels: "no-margin" | "margin-uniform" | "margin-relative" | "solid-ink" | "background" | "ink-high" | "ink-spread" | null;
+}
+
 /** A size in pixels. */
 export interface ScanDiagnosticsSize {
   width: number;
@@ -395,6 +437,18 @@ export type ScanDiagnosticsPayload =
       corners?: ScanDiagnosticsCorners | null;
       /** Another sheet overlaps the tracked page; null with no page or none measured. */
       separate?: boolean | null;
+      /**
+       * The newest pass's paper evidence numbers behind `paper`
+       * ({@link ScanDiagnosticsEvidence}); null when not read. Added in 0.x
+       * without a version bump: an optional field, older readers ignore it.
+       */
+      evidence?: ScanDiagnosticsEvidence | null;
+      /**
+       * Milliseconds since the tracked page last read as paper (`paper`
+       * true), when it is locked; null otherwise. A lock may outlive its
+       * surface reading for a while; auto-capture may not.
+       */
+      paperAgeMs?: number | null;
     }
   /** The part of the frame the person can see changed (fractions of the frame). */
   | { type: "visible"; x: number; y: number; width: number; height: number; fit: string }
