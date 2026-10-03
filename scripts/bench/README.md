@@ -308,6 +308,38 @@ what the session suite measures. In order of a pass:
    "reflection" hint's `glare`) and how many edgeless sides have the page's
    own paper running on past them to the frame's edge (`open`: a page cut
    off whose quad the model drew short of the edge).
+   **5d-paper, the margin judged locally.** A page of printed images (an
+   imaging report) passes only on the printed-images rule, whose margin
+   clauses were absolute: the band within 18 levels of its single median,
+   and that median at least 0.9 of the interior's 95th percentile. Under one
+   warm lamp to the side, a hand's shadow on the margin or a leaflet over a
+   corner, both failed pass after pass (the field case: "no page locked"
+   for a minute). Now each margin sample is held against the running median
+   of its own side (±5 of its 40 positions, all three insets) and that local
+   level against the 95th percentile of the interior blocks next to it; a
+   corner the refinement calls inferred or unknown has the region near it
+   (each side's unseen run plus 6 %) left out of the margin and the bright
+   end (`coveredCorners`). With the band no longer turning them away, a
+   page of printed images must also hold ink 0.1 of its interior
+   (`printMinInk`): white lids, boxes and mats with a few solid marks read
+   0.02–0.08 and the black keyboard of `empty-desk-sweep` seed 3 0.07–0.09,
+   every imaging report on the bench 0.1 and up. On the `paper` sessions
+   (cpu 1, 8 seeds) the share of the presented time locked went 5 → 26 %
+   (owner-case), 29 → 69 % (no leaflet), 17 → 28 % (sheet-over reports),
+   64 → 69 % (text), first lock p50 0–254 ms where the page was found at
+   all, and the passes that read paper 20 → 66 %, 32 → 80 %, 31 → 61 %,
+   84 → 83 %; what is left is mostly the model in the dim — no quad (26–41 %
+   of passes on the reports, 27 % on the text page) or a quad that jumps
+   more than 8 % between passes (up to 20 %), which resets the lock. Page-
+   less readings passing as paper went down, not up (paper-lookalikes 6 →
+   1 of ~350, the dim desk 8 → 10 of ~290 with no lock, against 2 locked
+   before), and on the families' live quads (`ml+live`, 20 seeds) not one
+   verdict changed. The margin no longer keeps a lid or a mat out on its
+   own (a blank lid's border is even and as bright as its middle): the ink
+   rules do (`ink-low`, `solid-ink` on the dim desk's passes). The `pass`
+   diagnostics event and the probe's `paperWhy` name the verdict and the
+   first clause each rule
+   failed (`evidenceDiagnostic`).
 6. **Found**: two readings in a row that say paper, with every visible side
    at least 30 % supported (a quad with a corner pulled onto the text has a
    side with no edge under it at all); let go after two readings that do not
@@ -325,7 +357,12 @@ what the session suite measures. In order of a pass:
    from a black keyboard seen head-on, whose four edges are as strong and
    which, kept "found", was carried into an `empty-desk-sweep` capture). The 80 % bar is what keeps both from
    carrying a quad with a corner pulled onto the table (`steep-tilt` seed 2,
-   whose sides stay at 5–65 %). A pass that finds nothing reads the
+   whose sides stay at 5–65 %). A third (5d-paper), at any tilt: a sheet
+   that read as paper at most 5 s ago, whose quad is within 6 % of the
+   diagonal of where it did and whose four sides are all judged and 80 %
+   supported, does not lose a reading to its surface either — memory for
+   the overlay and the lock only: auto-capture's countdown and fire need a
+   reading that said paper within 1.5 s ("auto: paper not read lately"). A pass that finds nothing reads the
    evidence where the found sheet was drawn: a page slid away — on a white
    table the motion probe barely sees it go — leaves no edges there, and two
    such readings end the hold (on `page-swap` the stale overlay's p95 went
@@ -680,6 +717,29 @@ moving) — scored as "not owed" fires:
 | `hover-far`, `hover-edge`, `hover-light` | the page's size, its corner margin and the exposure swinging across the too-far, cut-off and low-light thresholds — the hint's churn |
 | `covered-corner-auto` | 5d+ phase B: the field case (F8 `owner-case`: a white leaflet over the top-left corner of a stacked imaging report on a leather mat, tilted 30–45°): comes in over 1.5 s, holds with a tremor, drifts 4 % aside and back; the covered corner can only be estimated, so no automatic capture is owed at all (`marks.covered`); the shutter at 8 s works. Its report section, **Covered corners**: automatic captures the app had itself called uncertain (`auto-fire` probe; must be 0) and fires on a covered page (must be 0), the time some corner was unknown / inferred / two sheets on the overlay, and "Canto coberto" shown while a corner was unknown (right) or not (wrong) |
 | `whip-off-auto` | six times: held on the page 0.9–1.9 s (the countdown under way), then whipped off to bare desk in 200 ms and kept off 1.5 s — a capture off the page, or on the way, is a false fire |
+
+**The `paper` group** — **not in a plain run**; `--session paper` runs all
+five (5d-paper: the paper gate in dim, uneven light, from the field
+description of 2026-10-02). One warm lamp: exposure ×0.15–0.4, sensor gain
+2–5 (its noise with it), 2700–3200 K with 30–55 % of the cast left by the
+white balance, a one-sided gradient of 0.5–0.9 across the page, and on two
+seeds in three a hand's or phone's shadow over one margin; the lamp is drawn
+by seed alone, so `dim-owner-case` and `dim-owner-bare` light the same report
+alike. Each page session comes in over 1.5 s, holds with a 0.4 % tremor,
+drifts 4 % aside at 4.5 s and back by 5.9 s, holds; auto-capture off, the
+shutter at 9 s. Scored by `scorePaperLock` over `marks.paperLock` (report
+section **Paper lock**): the share of the presented time locked, the first
+lock, locks lost while steady, and the paper clauses of the passes. A run
+with a session under its floor (`PAPER_LOCK_FLOORS`, `report.mjs`) fails,
+compared or not — run them with `--seeds 8`.
+
+| session | what happens |
+|---|---|
+| `dim-owner-case` | F8 `owner-case`: a stacked imaging report on a leather mat, a white leaflet over its top-left corner, tilted 30–45° |
+| `dim-owner-bare` | the same report, mat, tilt and lamp with the leaflet taken away |
+| `dim-sheet-over` | F8 `sheet-over` seeds whose page is an imaging report (any corner covered 5–35 %, any desk, tilt 0–45°) |
+| `dim-text-page` | an F1/F2 text page |
+| `dim-lamp-desk-auto` | an F6 desk (laptop lid, keyboard, place mat, notebook, clutter) under the same lamp, auto on: every lock is a false lock, every automatic capture a false fire |
 
 The report's **Guidance** table gives, per session: each hint window's share
 with the owed hint / another hint (wrong) / none, and the time from the

@@ -85,8 +85,36 @@ freezes at 1.0.
   seeds a setting) the covered corner is within 3 % of the diagonal in
   100 % of `owner-case` captures (was 60 %) and in 97 % of covered scenes
   over every setting (was 70 %).
+- **`onDiagnostics`: why a page is or is not paper.** `pass` samples carry
+  `evidence` — the paper evidence's numbers behind `paper` (per-side edge
+  support, sides judged, the interior's background / ink / counter-ink /
+  ink spread / solid ink / background spread, the margin's evenness and
+  brightness, the paper's level and the bright end; rounded) with
+  `verdict` (`ok`, `sides`, `surface`) and the first clause each print
+  rule failed (`failPrint`, `failPanels`) — and `paperAgeMs`, how long
+  since the locked page last read as paper. Numbers and enums only; no
+  version bump (optional fields).
 
 ### Fixed
+- **An imaging report is found in dim, uneven light.** Under one lamp to
+  the side, a hand's shadow over a margin or a leaflet over a corner, a
+  page of dark image panels read as "not paper" pass after pass and was
+  never found ("no page locked"), though the shutter worked. Its white
+  margin is now judged against its own level along each side and against
+  the page's brightest print next to it, and the region near a covered
+  corner is left out; such a page must hold some print (a white lid with a
+  logo does not). Synthetic bench (dim warm lamp, 8 seeds): the share of a
+  presented page's time it is found went from 5 to 26 % for the field
+  case, 29 to 69 % for the same report without the leaflet, 17 to 28 % for
+  sheet-over reports; the passes reading as paper from 20 to 66 %, 32 to
+  80 % and 31 to 61 %. Page-less scenes read as paper less often than
+  before, and none locked or fired. Most of what is left is the page
+  detector itself in the dim (no outline, or one that jumps).
+- **A found page is not dropped for a few readings of its surface.** Once
+  a page has read as paper, a reading that is not paper does not count
+  against it for up to 5 s while all four of its edges stay clear and it
+  stays where it was. Auto-capture does not lean on this: it fires only
+  on a page that read as paper within the last 1.5 s.
 - **A very large photo is read as well as the viewfinder reads it.** The
   page detector squeezed a 4000 px still to its small input with a
   medium-quality resample and lost confidence on it, so a manual capture

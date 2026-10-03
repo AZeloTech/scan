@@ -90,8 +90,8 @@ export const ABSOLUTE_LIMITS = {
 /**
  * 5d-paper: the least share of a presented page's time a dim-lamp session
  * must hold it as found, pooled over its runs (`paperLock.lockedShare`) —
- * a floor under the measured level (cpu 1, 8 seeds: owner-case 25–28 %,
- * no leaflet 70–72 %, sheet-over 25–27 %, text 64–67 %; before the margin
+ * a floor under the measured level (cpu 1, 8 seeds: owner-case 26–29 %,
+ * no leaflet 69–73 %, sheet-over 25–28 %, text 66–69 %; before the margin
  * was judged locally 5 / 29 / 17 / 64 %), so the margin rule going back
  * fails the run (gated at cpu 1 with 8 runs or more: under
  * `--cpu 4` or on fewer seeds it is reported only). Synthetic; the detector's own
