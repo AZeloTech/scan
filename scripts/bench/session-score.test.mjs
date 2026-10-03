@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  paperClauses,
+  scorePaperLock,
   frameOnScreen,
   hintSeries,
   hintWindow,
@@ -798,4 +800,35 @@ test("a still cut to the preview's field of view is scored in the crop's own fra
   // A page reaching past the crop is no longer whole in it.
   const wide = cropStillTruth({ ...still, corners: [[0.05, 0.1], [0.75, 0.1], [0.75, 0.9], [0.05, 0.9]] }, { x: 375, y: 0, width: 2250, height: 4000 });
   assert.equal(wide.whole, false);
+});
+
+test("the paper lock: share locked, first lock, dropouts while steady, and the passes' clauses", () => {
+  const overlay = (t, locked) => ({ type: "overlay", t, locked, quad: null, opacity: 0 });
+  const events = [];
+  // Unlocked 1000–1500, locked 1500–2400, lost 2400–2600 (steady), locked again to 3000.
+  for (let t = 1000; t < 3000; t += 100) events.push(overlay(t, (t >= 1500 && t < 2400) || t >= 2600));
+  const why = (verdict, failPrint = null, failPanels = null, sideL = 0.9) => ({ verdict, failPrint, failPanels, sideT: 0.9, sideR: 0.9, sideB: 0.9, sideL });
+  events.push({ type: "detect", frameAt: 1100, locked: false, paperWhy: why("surface", "background", "margin-uniform") });
+  events.push({ type: "detect", frameAt: 1500, locked: true, paperWhy: why("ok") });
+  events.push({ type: "detect", frameAt: 2000, locked: true, paperWhy: why("surface", "background", "margin-relative") });
+  events.push({ type: "detect", frameAt: 2500, locked: false, paperWhy: why("sides", null, null, 0.2) });
+  events.push({ type: "detect", frameAt: 5000, locked: false, paperWhy: why("ok") });
+  const s = scorePaperLock({ events }, { from: 1000, to: 3000, steady: [{ from: 2000, to: 3000 }] });
+  assert.equal(Math.round(s.lockedShare * 100), 65);
+  assert.equal(s.firstLockMs, 500);
+  assert.equal(s.dropouts, 1);
+  assert.equal(s.steadyUnlockedMs, 200);
+  assert.equal(s.clauses.passes, 4);
+  assert.equal(s.clauses.paper, 1);
+  assert.equal(s.clauses.kept, 1);
+  assert.deepEqual(s.clauses.verdicts, { surface: 2, ok: 1, sides: 1 });
+  assert.deepEqual(s.clauses.print, { background: 2 });
+  assert.deepEqual(s.clauses.panels, { "margin-uniform": 1, "margin-relative": 1 });
+  assert.deepEqual(s.clauses.weakSides, { L: 1 });
+  // Never locked: no first lock, no dropouts.
+  const none = scorePaperLock({ events: events.map((e) => (e.type === "overlay" ? { ...e, locked: false } : e)) }, { from: 1000, to: 3000 });
+  assert.equal(none.firstLockMs, null);
+  assert.equal(none.lockedShare, 0);
+  assert.equal(none.dropouts, 0);
+  assert.equal(paperClauses({ events }, 4000, 6000).paper, 1);
 });

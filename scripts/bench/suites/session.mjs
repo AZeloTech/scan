@@ -240,6 +240,33 @@ function render(results) {
       out.push("");
     }
     // 5d+ phase B: what lies over the page, against auto-capture and the hints.
+    const paperRows = Object.entries(results.summary).filter(([, { all: a }]) => a.paperLock || a.paperPageless);
+    if (paperRows.length > 0) {
+      const hist = (m) => Object.entries(m ?? {}).sort((x, y) => y[1] - x[1]).map(([k, v]) => `${k} ${v}`).join(", ") || "–";
+      out.push("## Paper lock");
+      out.push("");
+      out.push(
+        "5d-paper: a page presented under the dim warm lamp (`marks.paperLock`, from the end of the approach to the tap). **locked** = the time-weighted " +
+          "share of that window the loop held the page as a found sheet; **first lock** p50 / p90 over runs (a run that never locked counts as never); " +
+          "**dropouts** = locks lost inside the steady windows (the page held still) after the first lock, and the steady time unlocked after it. " +
+          "**passes**: those that read the evidence · said paper · kept (locked, the reading not paper). **verdicts**, then for a surface failure the " +
+          "first clause of each print rule (`print` text on its background, `panels` printed images in a white margin), and for a sides failure the weak sides. " +
+          "A page-less session lists its passes the same way.",
+      );
+      out.push("");
+      out.push("| session | runs | locked | first lock p50 / p90 ms | never | dropouts (/min) · steady unlocked | passes · paper · kept | verdicts | print | panels | weak sides |");
+      out.push("|---|---:|---:|---:|---:|---:|---:|---|---|---|---|");
+      for (const [session, { all: a }] of paperRows) {
+        const p = a.paperLock;
+        const c = p?.clauses ?? a.paperPageless;
+        out.push(
+          `| ${session} | ${p?.runs ?? a.runs} | ${p ? `**${pct(p.lockedShare, 0)}**` : "–"} | ${p ? `${ms(p.firstLockP50)} / ${ms(p.firstLockP90)}` : "–"} | ${p?.neverLocked ?? "–"} | ` +
+            `${p ? `${p.dropouts} (${p.dropoutsPerMinute === null ? "–" : p.dropoutsPerMinute.toFixed(1)}) · ${pct(p.steadyUnlockedShare, 0)}` : "–"} | ` +
+            `${c ? `${c.passes} · ${c.paper} · ${c.kept}` : "–"} | ${hist(c?.verdicts)} | ${hist(c?.print)} | ${hist(c?.panels)} | ${hist(c?.weakSides)} |`,
+        );
+      }
+      out.push("");
+    }
     const covered = Object.entries(results.summary).filter(
       ([, { all: a }]) => a.guidance && (a.guidance.firesOnCovered > 0 || a.guidance.firesUncertain > 0 || Object.values(a.guidance.occlusion ?? {}).some((v) => v > 0)),
     );
@@ -905,6 +932,19 @@ export function summarize(rows) {
     if (Number.isFinite(row.score.staleAfterSwapMs)) entry.stale.push(row.score.staleAfterSwapMs);
     if (row.score.falseLocksPerMinute !== undefined) entry.falseLocks.push(row.score.falseLocksPerMinute);
     if (Number.isFinite(row.score.falseLockExposure?.share)) entry.exposure.push(row.score.falseLockExposure.share);
+    const pl = row.score.paperLock;
+    if (pl) {
+      const P = (entry.paperLock ??= { runs: 0, observedMs: 0, lockedMs: 0, first: [], dropouts: 0, steadyMs: 0, steadyUnlockedMs: 0, clauses: null });
+      P.runs += 1;
+      P.observedMs += pl.observedMs;
+      P.lockedMs += pl.lockedMs;
+      P.first.push(pl.firstLockMs);
+      P.dropouts += pl.dropouts;
+      P.steadyMs += pl.steadyMs;
+      P.steadyUnlockedMs += pl.steadyUnlockedMs;
+      P.clauses = mergeClauses(P.clauses, pl.clauses);
+    }
+    if (row.score.paperPageless) entry.paperPageless = mergeClauses(entry.paperPageless ?? null, row.score.paperPageless);
   }
   const avg = (list) => (list.length > 0 ? list.reduce((s, v) => s + v, 0) / list.length : null);
   /** p50 over runs where a run that never got there counts as never (∞). */
@@ -995,6 +1035,25 @@ export function summarize(rows) {
           remountToLockP50: p50Never(e.remountLock),
           remountNeverLocked: e.remountLock.filter((v) => v === null).length,
           guidance: summarizeGuidance(e.guidance),
+          // 5d-paper: the found-sheet lock over presented pages, pooled over runs.
+          ...(e.paperLock
+            ? {
+                paperLock: {
+                  runs: e.paperLock.runs,
+                  lockedShare: e.paperLock.observedMs > 0 ? e.paperLock.lockedMs / e.paperLock.observedMs : null,
+                  firstLockP50: p50Never(e.paperLock.first),
+                  firstLockP90: p90Never(e.paperLock.first),
+                  neverLocked: e.paperLock.first.filter((v) => v === null).length,
+                  dropouts: e.paperLock.dropouts,
+                  dropoutsPerMinute: e.paperLock.steadyMs > 0 ? (e.paperLock.dropouts * 60000) / e.paperLock.steadyMs : null,
+                  steadyUnlockedShare: e.paperLock.steadyMs > 0 ? e.paperLock.steadyUnlockedMs / e.paperLock.steadyMs : null,
+                  clauses: e.paperLock.clauses,
+                },
+                // The headline --compare gates (larger is worse): the presented time not locked.
+                paperUnlockedShare: e.paperLock.observedMs > 0 ? 1 - e.paperLock.lockedMs / e.paperLock.observedMs : null,
+              }
+            : {}),
+          ...(e.paperPageless ? { paperPageless: e.paperPageless } : {}),
           leaks:
             e.leaks.length === 0
               ? null
@@ -1009,6 +1068,25 @@ export function summarize(rows) {
       },
     ]),
   );
+}
+
+/** Nearest-rank p90 over runs where a run that never got there counts as never (∞); null when that is never. */
+function p90Never(values) {
+  if (values.length === 0) return null;
+  const sorted = values.map((v) => (v === null ? Infinity : v)).sort((a, b) => a - b);
+  const value = sorted[Math.min(sorted.length - 1, Math.ceil(0.9 * sorted.length) - 1)];
+  return Number.isFinite(value) ? value : null;
+}
+
+/** Two {@link paperClauses} histograms added (the first may be null). */
+function mergeClauses(a, b) {
+  if (a === null) return JSON.parse(JSON.stringify(b));
+  const out = { ...a, passes: a.passes + b.passes, paper: a.paper + b.paper, kept: a.kept + b.kept };
+  for (const key of ["verdicts", "print", "panels", "weakSides"]) {
+    out[key] = { ...a[key] };
+    for (const [k, v] of Object.entries(b[key])) out[key][k] = (out[key][k] ?? 0) + v;
+  }
+  return out;
 }
 
 /** A session's guidance numbers, pooled over its runs (time-weighted where they are times). */

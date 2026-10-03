@@ -551,6 +551,19 @@ export function scoreSession(script, record) {
     // shows, exactly as a crop of the same frame would be.
     out.partial = windowed("page cut off", overlayAccuracy(series, { from: at(marks.partialFrom), to: at(marks.partialTo), frame }));
   }
+  if (marks.paperLock !== undefined) {
+    const lock = marks.paperLock;
+    out.paperLock = scorePaperLock(record, {
+      from: at(lock.from),
+      to: at(lock.to),
+      steady: (lock.steady ?? [lock]).map((w) => ({ from: at(w.from), to: at(w.to) })),
+    });
+    const total = out.paperLock.observedMs + out.paperLock.unobservedMs;
+    if (total > 0 && out.paperLock.unobservedMs > MAX_UNOBSERVED_SHARE * total) {
+      out.missingData.push(`paper lock: ${Math.round(out.paperLock.unobservedMs)} of ${Math.round(total)} ms unobserved`);
+    }
+  }
+  if (marks.negativeFrom !== undefined) out.paperPageless = paperClauses(record, at(marks.negativeFrom), at(marks.negativeTo));
   out.passes = scorePasses(record, gtAt, frame);
   out.captures = scoreCaptures(withTruth, record);
   out.captures.forEach((capture, index) => {
@@ -1548,4 +1561,89 @@ export function scoreFraming(script, record, gtAt, captures, visibility) {
     return { trigger: c.trigger, tapAt: c.tapAt, fill: fillAt(at(c.tapAt)), px, dpi: px.short / A4_SHORT_IN };
   });
   return { rule: FRAMING_RULE, holds, closerOnsets, captures: shots };
+}
+
+/**
+ * Why the passes whose frame was sampled in `[from, to]` did or did not read
+ * as paper (the probe's `paperWhy`, `src/lib/paper-evidence.ts`
+ * `evidenceDiagnostic`): passes that read the evidence, those that said
+ * paper, the verdicts (`ok` / `sides` / `surface`), for a surface failure the
+ * first clause each print rule failed (`print:` the text rule, `panels:` the
+ * printed-images rule), and for a sides failure the sides under the rule's
+ * support line. Passes on a locked sheet that did not say paper are `kept`
+ * (the lock outlived the reading).
+ */
+export function paperClauses(record, from, to) {
+  const out = { passes: 0, paper: 0, kept: 0, verdicts: {}, print: {}, panels: {}, weakSides: {} };
+  const bump = (m, k) => (m[k] = (m[k] ?? 0) + 1);
+  for (const e of record.events ?? []) {
+    if (e.type !== "detect" || !(e.frameAt >= from && e.frameAt <= to) || !e.paperWhy) continue;
+    const w = e.paperWhy;
+    out.passes += 1;
+    if (w.verdict === "ok") out.paper += 1;
+    else if (e.locked) out.kept += 1;
+    bump(out.verdicts, w.verdict);
+    if (w.verdict === "surface") {
+      bump(out.print, w.failPrint ?? "ok");
+      bump(out.panels, w.failPanels ?? "ok");
+    }
+    if (w.verdict === "sides") {
+      for (const [key, side] of [["sideT", "T"], ["sideR", "R"], ["sideB", "B"], ["sideL", "L"]]) {
+        if (w[key] !== null && w[key] !== undefined && w[key] < 0.55) bump(out.weakSides, side);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * The found-sheet lock over a presented page (`marks.paperLock`, page time):
+ * the share of the observed window the loop held the page as found (the
+ * overlay probe's `locked`, each sample holding until the next, a gap past
+ * {@link MAX_SAMPLE_GAP_MS} unobserved), the time from the window's start to
+ * the first lock (null: never), the locks lost inside the `steady` windows
+ * after that first lock (`dropouts`; the page was held still there) and the
+ * steady time spent unlocked after it, and the paper clauses of the window's
+ * passes ({@link paperClauses}).
+ */
+export function scorePaperLock(record, { from, to, steady = [{ from, to }] }) {
+  const series = (record.events ?? [])
+    .filter((e) => e.type === "overlay" && !e.capturing)
+    .map((e) => ({ t: e.t, locked: e.locked === true }));
+  const { intervals, observedMs, unobservedMs } = sampleTimeline(series, { from, to });
+  let lockedMs = 0;
+  let firstLock = null;
+  for (const interval of intervals) {
+    if (!interval.sample.locked) continue;
+    lockedMs += interval.to - interval.from;
+    if (firstLock === null) firstLock = interval.from;
+  }
+  let dropouts = 0;
+  let steadyMs = 0;
+  let steadyUnlockedMs = 0;
+  if (firstLock !== null) {
+    for (const w of steady) {
+      const start = Math.max(w.from, firstLock);
+      if (start >= w.to) continue;
+      const timeline = sampleTimeline(series, { from: start, to: w.to });
+      let was = null;
+      for (const interval of timeline.intervals) {
+        steadyMs += interval.to - interval.from;
+        if (!interval.sample.locked) steadyUnlockedMs += interval.to - interval.from;
+        if (was === true && !interval.sample.locked) dropouts += 1;
+        was = interval.sample.locked;
+      }
+    }
+  }
+  return {
+    observedMs,
+    unobservedMs,
+    lockedMs,
+    lockedShare: observedMs > 0 ? lockedMs / observedMs : null,
+    firstLockMs: firstLock === null ? null : firstLock - from,
+    dropouts,
+    steadyMs,
+    steadyUnlockedMs,
+    clauses: paperClauses(record, from, to),
+  };
 }

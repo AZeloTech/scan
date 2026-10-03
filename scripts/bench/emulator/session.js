@@ -2763,3 +2763,196 @@ registerSession({
     };
   },
 });
+
+/* ── 5d-paper: the paper gate in dim, uneven light ──────────────────────── */
+
+/**
+ * A warm, dim, one-lamp room (the field case of 2026-10-02 evening, from its
+ * description): exposure ×0.15–0.4 (the session's `light`), the sensor's gain
+ * 2–5 (its noise with it), 2700–3200 K with a good part of the cast left by
+ * the white balance, the lamp to one side (a strong gradient across the
+ * page), and — two seeds in three — the shadow of the hand or the phone over
+ * one side's margin. Mutates `scene`; returns the exposure.
+ */
+function dimLamp(rng, scene, layer, pose) {
+  const dim = rng.range(0.15, 0.4);
+  const gain = rng.range(2, 5);
+  scene.lighting = {
+    ...scene.lighting,
+    temperature: rng.range(2700, 3200),
+    whiteBalanceResidual: rng.range(0.3, 0.55),
+    gradient: { angle: rng.range(0, 360), amount: rng.range(0.5, 0.9), scale: 400, at: layer === null ? [...pose.target] : [...layer.center] },
+  };
+  scene.post = { ...scene.post, noise: { ...scene.post.noise, shot: scene.post.noise.shot * Math.sqrt(gain), read: scene.post.noise.read * gain } };
+  if (layer !== null && rng.chance(0.67)) {
+    const camera = cameraFromPose(pose, scene.frame);
+    const px = projectRect(camera, layer);
+    const k = rng.int(0, 3);
+    const a = px[k];
+    const b = px[(k + 1) % 4];
+    const cx = px.reduce((s, p) => s + p.u, 0) / 4;
+    const cy = px.reduce((s, p) => s + p.v, 0) / 4;
+    const mid = [(a.u + b.u) / 2, (a.v + b.v) / 2];
+    const length = Math.hypot(b.u - a.u, b.v - a.v);
+    let n = [-(b.v - a.v) / length, (b.u - a.u) / length];
+    if ((mid[0] - cx) * n[0] + (mid[1] - cy) * n[1] < 0) n = [-n[0], -n[1]];
+    const reach = Math.min(scene.frame.width, scene.frame.height);
+    const across = reach * rng.range(0.1, 0.18);
+    const along = rng.range(-0.25, 0.25) * length;
+    const dir = [(b.u - a.u) / length, (b.v - a.v) / length];
+    scene.blobs = [
+      ...(scene.blobs ?? []),
+      {
+        kind: "shadow",
+        center: [mid[0] + dir[0] * along + n[0] * across * 0.5, mid[1] + dir[1] * along + n[1] * across * 0.5],
+        radius: [length * rng.range(0.25, 0.45), across],
+        angle: (Math.atan2(dir[1], dir[0]) * 180) / Math.PI,
+        strength: rng.range(0.3, 0.55),
+        softness: rng.range(0.6, 0.9),
+      },
+    ];
+  }
+  return dim;
+}
+
+/**
+ * A page presented in the dim lamp light and held: the camera comes in over
+ * 1.5 s, holds with a hand's tremor, drifts 4 % aside at 4.5 s and back by
+ * 5.9 s, holds; the shutter at 9 s. Auto-capture stays off: the measure is
+ * the found-sheet lock itself (`marks.paperLock`, scored by
+ * `scorePaperLock`), and a fire would end the presentation.
+ */
+function dimPresentation(rng, scene, layer, dim) {
+  const rest = scene.camera;
+  const far = farPose(rng.fork("far"), rest, { distance: [1.25, 1.45], off: [20, 50] });
+  const drift = rng.fork("drift");
+  const bearing = drift.range(0, Math.PI * 2);
+  const by = 0.04 * Math.max(...layer.size);
+  const aside = { ...rest, target: [rest.target[0] + Math.cos(bearing) * by, rest.target[1] + Math.sin(bearing) * by] };
+  return {
+    scene,
+    duration: 10000,
+    camera: [
+      { t: 0, pose: far },
+      { t: 300, pose: far },
+      { t: 1800, pose: rest },
+      { t: 4500, pose: rest },
+      { t: 5200, pose: aside },
+      { t: 5900, pose: rest },
+    ],
+    tremor: [
+      { t: 0, amplitude: 0.008 },
+      { t: 1800, amplitude: 0.004 },
+    ],
+    light: [{ t: 0, exposure: dim, gradient: 0 }],
+    actions: [{ at: 9000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+    marks: {
+      ...NO_GUIDANCE,
+      tapAt: 9000,
+      exposure: dim,
+      stable: [1800, 5900],
+      // Presented from the end of the approach to the tap; steady (dropouts
+      // count here) outside the drift.
+      paperLock: { from: 1800, to: 8950, steady: [{ from: 1800, to: 4500 }, { from: 5900, to: 8950 }] },
+    },
+  };
+}
+
+/** The first F8 `sheet-over` seed at or after `from` whose page is an imaging report. */
+function f8ReportSeed(from) {
+  for (let s = Math.max(1, from); s < from + 600; s += 1) {
+    const scene = buildScene("F8", s);
+    if (scene.setting === "sheet-over" && pageOf(scene).layer.document?.type === "imaging-report") return s;
+  }
+  throw new Error("no F8 sheet-over imaging report");
+}
+
+/** An F8 scene for a dim session: its page framed with room for the drift, the occluder kept or taken away. */
+function dimF8(seed, size, { setting, occluder }) {
+  const scene = buildScene("F8", setting === "owner-case" ? f8Seed("owner-case", 1 + 6 * (seed - 1)) : f8ReportSeed(1 + 6 * (seed - 1)), { size });
+  if (!occluder) scene.layers = scene.layers.filter((layer) => layer.occluder === undefined);
+  const found = pageOf(scene);
+  scene.camera = withMargin(scene.camera, scene.frame, found.layer, 0.05);
+  return { scene, found };
+}
+
+for (const [id, title, describe, make] of [
+  [
+    "dim-owner-case",
+    "the field case in a dim warm room",
+    "F8 owner-case (a stacked imaging report on a leather mat, a white leaflet over its top-left corner, tilted 30–45°) under one warm lamp: exposure ×0.15–0.4, sensor gain 2–5, 2700–3200 K, the lamp to one side, a hand's shadow over one margin on two seeds in three; comes in, holds, drifts 4 % and back; auto off; shutter at 9 s",
+    (seed, size) => dimF8(seed, size, { setting: "owner-case", occluder: true }),
+  ],
+  [
+    "dim-owner-bare",
+    "the field case's report, no leaflet, in a dim warm room",
+    "dim-owner-case with the leaflet taken away: the same imaging report, mat, tilt and lamp, every corner in view",
+    (seed, size) => dimF8(seed, size, { setting: "owner-case", occluder: false }),
+  ],
+  [
+    "dim-sheet-over",
+    "a sheet over an imaging report's corner in a dim warm room",
+    "F8 sheet-over seeds whose page is an imaging report (any corner covered 5–35 %, any desk, tilt 0–45°) under the dim warm lamp; comes in, holds, drifts and back; auto off; shutter at 9 s",
+    (seed, size) => dimF8(seed, size, { setting: "sheet-over", occluder: true }),
+  ],
+  [
+    "dim-text-page",
+    "a plain text page in a dim warm room",
+    "an F1/F2 text page under the dim warm lamp; comes in, holds, drifts and back; auto off; shutter at 9 s",
+    (seed, size, family) => framedScene(seed, size, family, 0.06),
+  ],
+]) {
+  registerSession({
+    id,
+    title,
+    inDefault: false,
+    group: "paper",
+    describe,
+    build(rng, { seed, size, family }) {
+      const { scene, found } = make(seed, size, family);
+      // The lamp by seed alone: dim-owner-case and dim-owner-bare light the same report alike.
+      const dim = dimLamp(rngFor("dim-lamp", seed), scene, found.layer, scene.camera);
+      return dimPresentation(rng, scene, found.layer, dim);
+    },
+  });
+}
+
+registerSession({
+  id: "dim-lamp-desk-auto",
+  title: "a desk with no page under the dim warm lamp",
+  inDefault: false,
+  group: "paper",
+  describe:
+    "an F6 desk (a laptop lid, a keyboard, a place mat, a notebook or clutter; no document) under the dim warm lamp of the dim-* sessions, held 4 s, drifted and held again; auto-capture on: every automatic capture is a false fire, every lock a false lock",
+  build(rng, { seed, size }) {
+    const scene = buildScene("F6", seed + 200, { size });
+    const dim = dimLamp(rng.fork("lamp"), scene, null, scene.camera);
+    const rest = scene.camera;
+    const drift = rng.fork("drift");
+    const bearing = drift.range(0, Math.PI * 2);
+    const aside = { ...rest, target: [rest.target[0] + Math.cos(bearing) * 20, rest.target[1] + Math.sin(bearing) * 20] };
+    return {
+      scene,
+      duration: 10000,
+      autoCapture: true,
+      camera: [
+        { t: 0, pose: rest },
+        { t: 4500, pose: rest },
+        { t: 5200, pose: aside },
+      ],
+      tremor: [{ t: 0, amplitude: 0.004 }],
+      light: [{ t: 0, exposure: dim, gradient: 0 }],
+      primary: [{ t: 0, page: 0 }],
+      actions: [{ at: 9000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        ...NO_GUIDANCE,
+        negativeFrom: 0,
+        negativeTo: 8950,
+        tapAt: 9000,
+        exposure: dim,
+        hints: [{ name: "no page (dim lamp)", from: 600, to: 8950, expect: [...SEARCHING, "low-light"], conditionFrom: 0 }],
+        pageless: true,
+      },
+    };
+  },
+});

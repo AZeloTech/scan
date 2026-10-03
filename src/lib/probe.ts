@@ -41,7 +41,7 @@ import type { NormalizedQuad } from "@/lib/quad";
 import type { CornerReport, OcclusionReport, SideReport } from "@/lib/refine";
 import type { ScanDiagnosticsCorners } from "@/types";
 import type { LaneReason } from "@/lib/detect-protocol";
-import type { PaperEvidence } from "@/lib/paper-evidence";
+import type { EvidenceDiagnostic, PaperEvidence } from "@/lib/paper-evidence";
 import type { FrameReading } from "@/lib/hints";
 import { probeListener, probeListenerSetting } from "@/lib/probe-hook";
 
@@ -108,8 +108,12 @@ export interface DetectProbe {
   refineMs?: number | null;
   /** The paper evidence for the drawn quad, when it was read. */
   evidence?: PaperEvidence | null;
+  /** The evidence's verdict and failing clauses, rounded as the diagnostics stream sends them (`evidenceDiagnostic`). */
+  paperWhy?: EvidenceDiagnostic | null;
   /** After this pass the tracked quad counts as a found sheet. */
   locked?: boolean;
+  /** Since the found sheet last read as paper (ms), when one is found. */
+  paperAgeMs?: number | null;
   /** Why an answer that cleared the floor was not taken (a classical quad that failed its sanity checks, say). */
   rejected?: string | null;
   /** The evidence read where the found sheet was held, when this pass looked there. */

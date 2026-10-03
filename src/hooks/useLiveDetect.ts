@@ -2376,6 +2376,8 @@ export function useLiveDetect({
         computeMs: outcome.computeMs,
         queueMs: outcome.queueMs,
         evidence: outcome.evidence === "unavailable" ? null : outcome.evidence,
+        paperWhy: outcome.evidence === null || outcome.evidence === "unavailable" ? null : evidenceDiagnostic(outcome.evidence),
+        paperAgeMs: runtime.locked && runtime.paperAt !== null ? performance.now() - runtime.paperAt : null,
         refinedQuad:
           detection === null || outcome.refined === null || outcome.refined === undefined
             ? null

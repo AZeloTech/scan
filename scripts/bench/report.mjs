@@ -62,6 +62,8 @@ export const REGRESSION_TOLERANCE = {
   pagelessCaptureRate: 0,
   falseLockExposure: 0.05,
   staleStuck: 0,
+  // 5d-paper: the presented time a dim-lamp page was not held as found.
+  paperUnlockedShare: 0.05,
   // Real media, GT-free: a real image that stopped being detected at all, the
   // quad moving more between consecutive frames of a clip, the replayed
   // overlay spending more of the clip off the page the detector sees.
@@ -97,6 +99,7 @@ const HEADLINES = {
     "pagelessCaptureRate",
     "falseLockExposure",
     "staleStuck",
+    "paperUnlockedShare",
   ],
   // Real media: the labelled verdicts where labels exist ("–" where not), then the GT-free ones.
   "real-stills": ["wrongRate", "missRate", "falsePositiveRate", "cornerErrorP50", "undetectedRate"],
