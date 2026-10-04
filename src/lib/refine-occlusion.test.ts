@@ -2,7 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { NormalizedQuad } from "./quad.ts";
-import { refineQuad, type CornerProvenance, type RefineImage, type RefineResult } from "./refine.ts";
+import {
+  refineQuad as refineAgainstTheClock,
+  type CornerProvenance,
+  type RefineImage,
+  type RefineOptions,
+  type RefineResult,
+} from "./refine.ts";
+
+/**
+ * {@link refineAgainstTheClock} without the wall clock: these tests judge
+ * geometry, not speed, and a 150 ms budget on a shared CI runner (or a busy
+ * laptop) runs out before the corners are assembled — every corner comes back
+ * unknown with reason `budget`, and the test fails for the runner's sake. A
+ * test that names its own `budgetMs` or `now` (the budget's own tests, on a
+ * clock they drive) keeps it.
+ */
+function refineQuad(image: RefineImage, quad: NormalizedQuad, options: RefineOptions = {}): RefineResult {
+  return refineAgainstTheClock(image, quad, { budgetMs: Number.POSITIVE_INFINITY, ...options });
+}
 
 /**
  * Covered corners (5d+ phase B): the edge refinement fits each side on the
