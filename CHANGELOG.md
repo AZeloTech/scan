@@ -7,6 +7,25 @@ freezes at 1.0.
 ## [Unreleased]
 
 ### Changed
+- **The capture's corner measurement retries on a slow phone, and the
+  confirm screen says when it could not measure.** A capture's corner
+  refinement that runs out of its 250 ms now yields and runs once more with
+  1000 ms (never more than two runs; the live loop's budget is unchanged, and
+  a live pass that runs out still holds auto-capture). If the corners are
+  still unmeasured, the confirm screen's pill reads "Confira os cantos — não
+  deu para medir" (en: "Check the corners — couldn't measure") and every
+  handle is drawn hollow and dashed with "confira" under it — not
+  "estimado": nothing was inferred. `onDiagnostics`: `capture` and `confirm`
+  carry `refine` (`measured`, `retried`, `ms`; new `ScanDiagnosticsRefine`
+  type), and `pass` samples `refineBudgetMisses` (live refinements out of
+  budget since the previous sample). Synthetic bench, the covered-corner
+  scene with the browser on two cores shared with six busy loops: before,
+  two of three confirm screens opened on unmeasured, unmarked corners (the
+  refinement out of time); now all three retried (the whole refinement
+  0.62–0.71 s), two came back measured with the covered corner marked
+  "estimado", one says "não deu para medir". Unconstrained (cpu 1) nothing
+  retries; under `--cpu 4` two of three do (0.52–0.55 s). Auto-capture
+  still never fires on that scene.
 - **"Mova o celular para cima" instead of "Centralize a folha".** A page at
   the edge of the view that would fit if re-aimed is told which way to move
   the phone — up, down, left or right (en: "Move the phone up"), one way at a

@@ -190,9 +190,10 @@ canonical pixels, bytes and JPEG quality, whether a browser canvas limit had
 to shrink it, whether the live stream was capped at the tap and — when a
 still failed on a capped stream — whether the native stream came back for
 the page, where the corners came from, the still's registration numbers
-and the photo check's flag), each confirm-corners answer (kept, moved — the
+and the photo check's flag, and what the corner measurement did — `refine`:
+measured or not, retried or not, ms), each confirm-corners answer (kept, moved — the
 largest corner move as a percentage of the photo's diagonal —, retake or
-whole photo, with the canonical's sizes), the live stream's cap on Android (`stream-cap`: applied or not, and why — `disabled` as shipped),
+whole photo, with the canonical's sizes and the seed's `refine`), the live stream's cap on Android (`stream-cap`: applied or not, and why — `disabled` as shipped),
 each page render (the page region's
 pixel size and the final JPEG's size, bytes and quality), each page of a
 finished PDF (the embedded image's pixels, bytes, ladder rung and quality,
@@ -397,7 +398,12 @@ whose corners no recent pass has measured; the shutter always works. When
 the edges are not seen far enough to place the corner, the viewfinder says
 "Canto coberto — afaste a folha de cima". A cover the edges do not show at
 all (a white sheet on a white desk) can still read as a seen corner, so the
-confirm screen after every capture remains the check.
+confirm screen after every capture remains the check. On a slow phone the
+capture's corner measurement gets a second, longer try (up to 1 s more,
+only when the first ran out of time); if the corners still could not be
+measured, the confirm screen says so — "Confira os cantos — não deu para
+medir", every handle marked "confira" — rather than presenting the
+detector's corners as checked.
 
 **React.** 18.3 or 19, StrictMode-safe.
 
