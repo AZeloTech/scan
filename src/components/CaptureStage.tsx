@@ -42,6 +42,7 @@ import { assessSource, type GateReading } from "@/lib/capture-gate";
 import { normalizedCoverage, type NormalizedQuad } from "@/lib/quad";
 import { refineOnCanvas } from "@/lib/refine";
 import { provenanceDiagnostic, type CornerCheck } from "@/lib/corner-check";
+import { refineDiagnostic, type RefineOutcome } from "@/lib/refine-retry";
 import { flash, shutterPulse } from "@/lib/motion";
 import { probe, probeSetting, probing, type CaptureProbe, type CornersFrom } from "@/lib/probe";
 import { useLiveDetect } from "@/hooks/useLiveDetect";
@@ -846,11 +847,15 @@ export function CaptureStage({
       // the photo's word — the full-resolution still is authoritative,
       // whatever the viewfinder said about the same page.
       let cornerCheck: CornerCheck | null = corners !== null && corners === detected ? (detection?.check ?? null) : null;
+      // What the refinement did (measured, retried for time): the confirm
+      // screen's "não deu para medir" and the diagnostics stream's.
+      let refineOutcome: RefineOutcome | null = corners !== null && corners === detected ? (detection?.refine ?? null) : null;
       // The detect refined its own answer; a carried quad is refined here.
       if (corners !== null && corners !== detected) {
-        const refined = refineCornersChecked(frame, corners, carriedSource, live !== null ? "live" : "fallback");
+        const refined = await refineCornersChecked(frame, corners, carriedSource, live !== null ? "live" : "fallback");
         corners = refined.quad;
         cornerCheck = refined.check;
+        refineOutcome = refined.refine;
       }
       // The photo is checked before it is offered (`lib/still-check.ts`): the
       // page the viewfinder vouched for, mapped onto this image, against the
@@ -1005,6 +1010,7 @@ export function CaptureStage({
         attention,
         ...(sizes === undefined ? {} : { sizes }),
         ...(corners === null || cornerCheck === null ? {} : { cornerCheck }),
+        ...(corners === null || refineOutcome === null ? {} : { refine: refineOutcome }),
       });
     },
     [diagnosticsSink, onCapture, pageNumber, path, urls],

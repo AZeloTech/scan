@@ -51,6 +51,7 @@ import { mlDetectorOptions, type AssetUrls } from "@/lib/runtime-config";
 import { denormalizeQuad, normalizeQuad, quadCoverage, type NormalizedQuad } from "@/lib/quad";
 import { probe, probing, type CaptureDetectProbe, type RefineProbe } from "@/lib/probe";
 import { refineOnCanvas } from "@/lib/refine";
+import { refineWithRetry, type RefineOutcome } from "@/lib/refine-retry";
 import { cornerCheckOf, type CornerCheck } from "@/lib/corner-check";
 import { demoteDetectLane, detectLane, detectLaneSettled, laneDetect } from "@/lib/detect-lane";
 import type { DetectPlan } from "@/lib/detect-protocol";
@@ -164,6 +165,11 @@ export interface QuadDetection {
    * all-seen.
    */
   check?: CornerCheck | null;
+  /**
+   * What the refinement did — measured or not, retried for time or not, how
+   * long (`lib/refine-retry.ts`). Absent when the answer was not refined.
+   */
+  refine?: RefineOutcome;
 }
 
 /**
@@ -451,15 +457,16 @@ export type RefineFrom = RefineProbe["from"];
  * from the classical detector (or of unknown origin) is only ever snapped
  * locally: its confident failure is the desk, and a wide search from there
  * would only make the desk look more like a page. Refinement that fails,
- * doubts or runs out of time answers the corners it was given.
+ * doubts or runs out of time answers the corners it was given — after one
+ * retry with a larger budget when it ran out of time (`lib/refine-retry.ts`).
  */
-export function refineCorners(
+export async function refineCorners(
   frame: HTMLCanvasElement,
   quad: NormalizedQuad,
   detector: DetectionSource | null,
   from: RefineFrom,
-): NormalizedQuad {
-  return refineCornersChecked(frame, quad, detector, from).quad;
+): Promise<NormalizedQuad> {
+  return (await refineCornersChecked(frame, quad, detector, from)).quad;
 }
 
 /**
@@ -467,15 +474,19 @@ export function refineCorners(
  * (`lib/corner-check.ts`): the capture's word on them, which the confirm
  * screen marks and the diagnostics carry. The full-resolution still is
  * authoritative — whatever the live loop said about the same corners.
+ *
+ * A run that gives up for time is retried once with a larger budget, after a
+ * yield ({@link refineWithRetry}); `refine` says what happened, for the
+ * confirm screen's "não deu para medir" and the diagnostics stream.
  */
-export function refineCornersChecked(
+export async function refineCornersChecked(
   frame: HTMLCanvasElement,
   quad: NormalizedQuad,
   detector: DetectionSource | null,
   from: RefineFrom,
-): { quad: NormalizedQuad; check: CornerCheck | null } {
+): Promise<{ quad: NormalizedQuad; check: CornerCheck | null; refine: RefineOutcome }> {
   const mode = detector === "ml" ? "full" : "local";
-  const result = refineOnCanvas(frame, quad, { mode });
+  const { result, outcome } = await refineWithRetry((budgetMs) => refineOnCanvas(frame, quad, { mode, budgetMs }));
   if (probing()) {
     probe({
       type: "refine",
@@ -491,11 +502,13 @@ export function refineCornersChecked(
       corners: result.corners,
       occlusion: result.occlusion,
       ms: result.ms,
+      retried: outcome.retried,
+      totalMs: outcome.ms,
       width: frame.width,
       height: frame.height,
     });
   }
-  return { quad: result.quad, check: cornerCheckOf(result) };
+  return { quad: result.quad, check: cornerCheckOf(result), refine: outcome };
 }
 
 /**
@@ -534,13 +547,13 @@ async function detectHeld(
   const quad = normalizeQuad(corners, source.width, source.height);
   reportCaptureDetect(on, source, started, detection, floor, quad !== null, held);
   if (quad === null) return null;
-  const refined = refine ? refineCornersChecked(source, quad, detection.source, on === "frame" ? "detected" : "canonical") : null;
+  const refined = refine ? await refineCornersChecked(source, quad, detection.source, on === "frame" ? "detected" : "canonical") : null;
   return {
     corners: refined?.quad ?? quad,
     confidence,
     source: detection.source,
     fellThrough: held.fellThrough,
-    ...(refined === null ? {} : { check: refined.check }),
+    ...(refined === null ? {} : { check: refined.check, refine: refined.refine }),
   };
 }
 
