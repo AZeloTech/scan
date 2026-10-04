@@ -70,6 +70,7 @@ const EVERY_PAYLOAD: ScanDiagnosticsPayload[] = [
     fill: 0.71,
     corners: { tl: "inferred", tr: "seen", br: "seen", bl: "seen" },
     separate: false,
+    refineBudgetMisses: 1,
   },
   { type: "visible", x: 0.2, y: 0, width: 0.6, height: 1, fit: "cover" },
   { type: "hint", id: "move-closer", shown: false, ms: 1200, fill: 0.712 },
@@ -102,6 +103,9 @@ const EVERY_PAYLOAD: ScanDiagnosticsPayload[] = [
     cornersFrom: "detected",
     registration: { fovScale: 1.02, shiftX: 0.01, shiftY: -0.02, score: 0.91, overlap: 0.97 },
     flag: null,
+    corners: null,
+    separate: null,
+    refine: { measured: false, retried: true, ms: 1187 },
   },
   {
     type: "confirm",
@@ -114,6 +118,8 @@ const EVERY_PAYLOAD: ScanDiagnosticsPayload[] = [
     source: "still",
     canonical: { width: 2250, height: 4000, bytes: 3768926, quality: 0.95 },
     capped: false,
+    corners: null,
+    refine: { measured: false, retried: true, ms: 1187 },
   },
   {
     type: "render",
@@ -180,8 +186,9 @@ test("no event carries image data: numbers, booleans, enums and plain objects on
       }
     });
     const json = JSON.stringify(event);
-    // A pass sample carries the paper evidence's numbers: the widest event, still well under a kilobyte.
-    assert.ok(json.length < (event.type === "pass" ? 1000 : 600), `${event.type} is ${json.length} bytes`);
+    // A pass sample carries the paper evidence's numbers: the widest event, still well under a kilobyte;
+    // a capture its sizes, corners and refinement outcome.
+    assert.ok(json.length < (event.type === "pass" ? 1000 : event.type === "capture" ? 800 : 600), `${event.type} is ${json.length} bytes`);
   }
 });
 
@@ -392,4 +399,22 @@ test("a corner edit is measured as the largest move over the photo's diagonal", 
   assert.equal(maxCornerMovePct(seed, seed, 3000, 4000), 0);
   const moved = { ...seed, bottomRight: { x: 0.9 + 150 / 3000, y: 0.9 } };
   assert.equal(Math.round(maxCornerMovePct(seed, moved, 3000, 4000) * 100) / 100, 3);
+});
+
+test("the corner refinement's outcome travels as three plain values, metadata only", async () => {
+  const { refineDiagnostic } = await import("./refine-retry.ts");
+  assert.equal(refineDiagnostic(null), null);
+  assert.equal(refineDiagnostic(undefined), null);
+  // Whole milliseconds; the reason string stays on the device.
+  assert.deepEqual(refineDiagnostic({ measured: true, retried: true, ms: 612.6, reason: "refined" }), { measured: true, retried: true, ms: 613 });
+  assert.deepEqual(refineDiagnostic({ measured: false, retried: false, ms: -0.2, reason: "no-paper" }), { measured: false, retried: false, ms: 0 });
+  const got: ScanDiagnosticsEvent[] = [];
+  const sink = createDiagnosticsSink((event) => got.push(event), () => 0);
+  for (const payload of EVERY_PAYLOAD) if (payload.type === "capture" || payload.type === "confirm" || payload.type === "pass") sink.emit(payload);
+  const capture = got.find((event) => event.type === "capture");
+  const confirm = got.find((event) => event.type === "confirm");
+  const pass = got.find((event) => event.type === "pass");
+  assert.deepEqual(capture?.type === "capture" ? capture.refine : undefined, { measured: false, retried: true, ms: 1187 });
+  assert.deepEqual(confirm?.type === "confirm" ? confirm.refine : undefined, { measured: false, retried: true, ms: 1187 });
+  assert.equal(pass?.type === "pass" ? pass.refineBudgetMisses : undefined, 1);
 });

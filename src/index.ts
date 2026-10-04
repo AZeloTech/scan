@@ -24,6 +24,7 @@ export type {
   ScanDiagnosticsEvent,
   ScanDiagnosticsPayload,
   ScanDiagnosticsEvidence,
+  ScanDiagnosticsRefine,
   ScanDiagnosticsSize,
   ScanDiagnosticsVersion,
 } from "./types";

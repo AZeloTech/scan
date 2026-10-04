@@ -195,6 +195,8 @@ export interface ResultReply {
   refined: CornerPoints | null;
   /** What the refinement cost, ms, `null` when it did not run. */
   refineMs: number | null;
+  /** The refinement ran out of its budget (its corners unmeasured); absent in older builds. */
+  refineBudgetMiss?: boolean;
   /**
    * What the refinement said about the quad's corners (`lib/corner-check.ts`):
    * seen / inferred / unknown each, and whether another sheet overlaps it.

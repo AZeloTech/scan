@@ -1061,6 +1061,8 @@ export interface LiveDiagnostics {
   blocked: string | null;
   /** Passes answered since this hook mounted (a stalled loop stops counting). */
   passes: number;
+  /** Passes since this hook mounted whose edge refinement ran out of its live budget. */
+  refineMisses?: number;
   /** How much of the visible region the page fills along its limiting axis (`fillShare`), or null with no page. */
   fill: number | null;
   /** The newest pass's answer ({@link PassAnswer}), or null before the first. */
@@ -1204,6 +1206,8 @@ interface PassOutcome {
   /** The detection refined onto the paper's edges (pixels), when that moved it. */
   refined: CornerPoints | null;
   refineMs: number | null;
+  /** The refinement ran out of its live budget: its corners unmeasured (counted for the diagnostics stream). */
+  refineBudgetMiss?: boolean;
   /** On a miss: the evidence for the quad the overlay was holding, on this frame (`null`: not read). */
   heldEvidence: PaperEvidence | null;
   /** The detection's covered corners, as its refinement measured them (null: not measured). */
@@ -1375,6 +1379,7 @@ export function useLiveDetect({
   /** The newest passes' detector times, for the HUD's median. */
   const passTimesRef = React.useRef<number[]>([]);
   const passCountRef = React.useRef(0);
+  const refineMissCountRef = React.useRef(0);
   const frameAgeRef = React.useRef<number | null>(null);
 
   const [available, setAvailable] = React.useState(true);
@@ -1855,6 +1860,7 @@ export function useLiveDetect({
       let evidence: EvidenceReading = null;
       let refined: CornerPoints | null = null;
       let refineMs: number | null = null;
+      let refineBudgetMiss = false;
       let check: CornerCheck | null = null;
       let measuredCovered: CoveredCorner[] | null = null;
       if (detection !== null) {
@@ -1870,6 +1876,7 @@ export function useLiveDetect({
         if (pixels !== null && quad !== null) {
           const result = refineQuad(pixels, quad, { mode: detection.source === "ml" ? "full" : "local", budgetMs: LIVE_REFINE_BUDGET_MS });
           refineMs = result.ms;
+          refineBudgetMiss = result.reason === "budget";
           // Only an answer that ran to its end says anything about the corners.
           check = cornerCheckOf(result);
           if (result.measured) {
@@ -1903,6 +1910,7 @@ export function useLiveDetect({
         detection,
         refined,
         refineMs,
+        refineBudgetMiss,
         check,
         heldEvidence,
         covered: measuredCovered,
@@ -2013,6 +2021,7 @@ export function useLiveDetect({
         refined: detection === null ? null : reply.refined,
         check: detection === null ? null : (reply.check ?? null),
         refineMs: reply.refineMs,
+        refineBudgetMiss: reply.refineBudgetMiss === true,
         heldEvidence: reply.heldEvidence,
         covered: detection === null ? null : (reply.covered ?? null),
         width,
@@ -2221,7 +2230,10 @@ export function useLiveDetect({
       times.push(outcome.detectMs);
       if (times.length > 31) times.shift();
       // Counted only for the diagnostics stream's sampler, which reads deltas.
-      if (diagRef.current !== null) passCountRef.current += 1;
+      if (diagRef.current !== null) {
+        passCountRef.current += 1;
+        if (outcome.refineBudgetMiss === true) refineMissCountRef.current += 1;
+      }
       frameAgeRef.current = performance.now() - outcome.frameAt;
       const keepGoing = adapt(outcome.costMs, outcome.detectMs, profile);
       reportPass(source, false, outcome.detection, outcome, elapsed, accepted, motionScore, false, holdBroken, rejected);
@@ -3443,6 +3455,7 @@ export function useLiveDetect({
       autoArmed: guidanceRef.current.auto.armed,
       blocked: runtime.blockWhy,
       passes: passCountRef.current,
+      refineMisses: refineMissCountRef.current,
       fill: runtime.fill,
       answer: runtime.answer,
       paperAgeMs: runtime.locked && runtime.paper.paperAt !== null ? Math.round(performance.now() - runtime.paper.paperAt) : null,

@@ -1000,6 +1000,7 @@ export function CaptureStage({
           flag: attention,
           corners: corners === null ? null : provenanceDiagnostic(cornerCheck),
           separate: corners === null || cornerCheck === null ? null : cornerCheck.separate,
+          refine: corners === null ? null : refineDiagnostic(refineOutcome),
         });
       }
       onCapture({
@@ -1385,6 +1386,7 @@ export function CaptureStage({
     let visibleKey = "";
     let seen = readDiagnostics().passes;
     let sampled = seen;
+    let sampledMisses = readDiagnostics().refineMisses ?? 0;
     let lastPassAt = performance.now();
     let stalledAt: number | null = null;
     let shownAt: number | null = null;
@@ -1429,6 +1431,9 @@ export function CaptureStage({
       const answered = d.passes - sampled;
       if (answered > 0 && diagnosticsSink.passDue()) {
         sampled = d.passes;
+        const misses = d.refineMisses ?? 0;
+        const refineBudgetMisses = Math.max(0, misses - sampledMisses);
+        sampledMisses = misses;
         diagnosticsSink.emit({
           type: "pass",
           detector: d.detector,
@@ -1450,6 +1455,7 @@ export function CaptureStage({
           fill: d.fill,
           corners: provenanceDiagnostic(d.check),
           separate: d.check?.separate ?? null,
+          refineBudgetMisses,
         });
       }
     };
