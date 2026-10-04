@@ -27,7 +27,11 @@ const result = await build({
   platform: "browser",
   target: ["es2022", "chrome91", "firefox90", "safari16"],
   jsx: "automatic",
-  sourcemap: true,
+  // Written next to the code for this repository's own debugging, but not
+  // linked from it and not published (`files` leaves `*.map` out): the code is
+  // unminified already, and the maps were more than half of the tarball. An
+  // unlinked map cannot send a host's dev server looking for a missing file.
+  sourcemap: "external",
   minify: false, // a library ships readable code; the host minifies
   legalComments: "linked",
   external: [

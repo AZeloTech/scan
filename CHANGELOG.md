@@ -6,6 +6,43 @@ freezes at 1.0.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-04
+
+### Added
+- **`initialImages`** (`readonly File[]`, read once on mount): photos the host
+  already holds become the document's first pages, through the same intake as
+  a file pick — quality gate, corner detection, `maxPages`, per-file refusals —
+  in the array's order. The phone surface opens on the review step with a
+  "Processando N fotos…" line and progress bar; the desktop surface fills step
+  1 and moves on to «Conferir» when every photo became a page (it stays on step
+  1 when one was refused or left out, so the reason stays on screen).
+- **`images_unreadable`** error code: none of the `initialImages` could be
+  opened. Recoverable on the phone (the review step offers the camera),
+  followed by `onCancel("error")` on the desktop.
+- **Multi-select on the phone.** "Já tenho a foto" and the permission screen's
+  gallery button accept several photos; two or more go straight to the review
+  step through the same intake (one still goes through confirm-corners).
+- **"Só as primeiras N entram"**: when photos outnumber the room left in the
+  document, the review step says so before they are read (en: "Only the first
+  N fit; the rest can go in a second document.").
+- **A HEIC the browser cannot decode is named as such**, per file, with the way
+  out ("tire a foto pela câmera"), on the phone and on the desktop list
+  (`PageErrorCode` gains `heic`).
+- **"Já tenho a foto" beside the camera fallback.** When the camera cannot be
+  opened here (in-app browser, insecure page, refused permission) the phone's
+  fallback surface opens the device's camera app, and the gallery pick now
+  stays available next to it.
+- **`preloadScanAssets({ assetBaseUrl })`**: warm the detection worker and the
+  corner model before the flow mounts; returns a release.
+- `capture` events (`source: "file"`) for every page read from a file.
+
+### Changed
+- The package no longer ships source maps (more than half of the tarball); the
+  build still writes them locally, unlinked. The release workflow refuses a
+  tarball that contains one.
+
+## [0.1.0] - never published (everything below ships in 0.2.0)
+
 ### Changed
 - **"Mova o celular para cima" instead of "Centralize a folha".** A page at
   the edge of the view that would fit if re-aimed is told which way to move

@@ -57,7 +57,7 @@ jobs:
           npm pack --json | node -e "
             const [meta] = JSON.parse(require('fs').readFileSync(0, 'utf8'));
             const forbidden = meta.files.filter((f) =>
-              /tesseract|traineddata|\.(png|jpe?g|heic|mp4|mov)$/i.test(f.path));
+              /tesseract|traineddata|\.(png|jpe?g|heic|mp4|mov|map)$/i.test(f.path));
             if (forbidden.length) {
               console.error('refusing to publish, tarball contains:', forbidden.map(f => f.path));
               process.exit(1);

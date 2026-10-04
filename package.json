@@ -1,6 +1,6 @@
 {
   "name": "@azelotech/scan",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Document scanner as a React component: camera capture, corner correction, curved-page dewarp and PDF assembly, entirely on the device.",
   "license": "Apache-2.0",
   "author": "AZelo",
@@ -48,6 +48,7 @@
   },
   "files": [
     "dist",
+    "!dist/**/*.map",
     "assets",
     "scripts/copy-assets.mjs",
     "THIRD_PARTY_NOTICES",
