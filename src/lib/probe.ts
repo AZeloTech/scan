@@ -379,6 +379,10 @@ export interface ConfirmOpenProbe {
   height: number;
   /** The flag the screen opened with (`Capture.attention`), or null. */
   attention?: "no-page" | "corner-outside" | "moved" | "unverified" | "low-resolution" | null;
+  /** How the handles were marked at open (`lib/confirm-seed.ts`). Absent in older builds. */
+  mark?: "clear" | "estimated" | "unmeasured";
+  /** What the seed's refinement did (`lib/refine-retry.ts`); null when it was not refined. Absent in older builds. */
+  refine?: { measured: boolean; retried: boolean; ms: number; reason: string } | null;
 }
 
 /** The user left the confirm screen with these corners. */

@@ -15,7 +15,9 @@ import {
 import type { Capture } from "@/lib/capture-intake";
 import { probe, probing, quadMoved } from "@/lib/probe";
 import { maxCornerMovePct } from "@/lib/diagnostics-events";
-import { isUncertain, provenanceByNearest, provenanceDiagnostic, type CornerCheck } from "@/lib/corner-check";
+import { provenanceByNearest, provenanceDiagnostic, type CornerCheck } from "@/lib/corner-check";
+import { confirmPill, seedMarkOf, type SeedMark } from "@/lib/confirm-seed";
+import { refineDiagnostic, type RefineOutcome } from "@/lib/refine-retry";
 import { deriveShellTheme, LOUPE_RING } from "@/lib/shell-theme";
 import { fillSlot, flyToSlot } from "@/lib/motion";
 import { useBlobUrl } from "@/hooks/useScanStore";
@@ -101,12 +103,16 @@ export function ConfirmCornersScreen({
   /** False once the editor opened with no page outline to seed it (its own inset quad). */
   const [found, setFound] = React.useState(true);
   /**
-   * The seed has a corner the capture could not see (`lib/corner-check.ts`),
-   * still where it was estimated: the pill says so until the person moves it.
+   * The seed has a corner the capture could not see (`estimated`,
+   * `lib/corner-check.ts`), or corners nothing measured (`unmeasured`,
+   * `lib/refine-retry.ts`), still where they were put: the pill says so
+   * until the person moves every marked handle (`lib/confirm-seed.ts`).
    */
-  const [estimated, setEstimated] = React.useState(false);
+  const [mark, setMark] = React.useState<SeedMark>("clear");
   /** What the seed's corners were, for the diagnostics stream. */
   const seedCheckRef = React.useRef<CornerCheck | null>(null);
+  /** What the seed's refinement did (measured, retried, ms), for the diagnostics stream. */
+  const seedRefineRef = React.useRef<RefineOutcome | null>(null);
 
   const copy = useCopy();
   const urls = useAssetUrls();
@@ -149,6 +155,7 @@ export function ConfirmCornersScreen({
               },
         capped: capture.sizes?.capped ?? null,
         corners: provenanceDiagnostic(seedCheckRef.current),
+        refine: refineDiagnostic(seedRefineRef.current),
       });
     },
     [capture.attention, capture.sizes, diagnosticsSink, pageNumber],
@@ -239,7 +246,7 @@ export function ConfirmCornersScreen({
 
   /** A stable per-language object (the dictionary is a module constant). */
   const handleLabels = copy.corners.handles;
-  const estimatedCopy = copy.confirm;
+  const markCopy = copy.confirm;
 
   React.useEffect(() => {
     let cancelled = false;
@@ -252,8 +259,10 @@ export function ConfirmCornersScreen({
           decodeCanonical(canonical),
           // The live quad if the viewfinder had one; a fresh detect otherwise.
           capture.corners !== null
-            ? Promise.resolve({ corners: capture.corners, check: capture.cornerCheck ?? null })
-            : detectInBlob(canonical, urls).then((d) => (d === null ? null : { corners: d.corners, check: d.check ?? null })),
+            ? Promise.resolve({ corners: capture.corners, check: capture.cornerCheck ?? null, refine: capture.refine ?? null })
+            : detectInBlob(canonical, urls).then((d) =>
+                d === null ? null : { corners: d.corners, check: d.check ?? null, refine: d.refine ?? null },
+              ),
           loadScanic(urls),
         ]);
         const detected = seed?.corners ?? null;
@@ -311,15 +320,20 @@ export function ConfirmCornersScreen({
         localizeCornerHandles(host, handleLabels);
         // A corner something lay over, placed where its edges meet: its
         // handle is marked "estimado" (hollow, dashed, a word under it) and
-        // named so, until the person moves it.
+        // named so, until the person moves it. Corners nothing measured
+        // (the refinement ran out of time even on its retry): every handle
+        // is marked the same way, "confira", and the pill says so.
         const check = detected === null ? null : (seed?.check ?? null);
         seedCheckRef.current = check;
-        if (check !== null && detected !== null && isUncertain(check)) {
+        seedRefineRef.current = detected === null ? null : (seed?.refine ?? null);
+        const seedMark = seedMarkOf(detected !== null, check, seed?.refine);
+        if (seedMark !== "clear" && detected !== null) {
           const live = editor;
-          markEstimatedHandles(host, check, detected, canvas.width, canvas.height, editor.getCorners(), () => live.getCorners(), handleLabels, estimatedCopy, () => {
-            if (!cancelled) setEstimated(false);
+          const marks = seedMark === "estimated" && check !== null ? check : null;
+          markReviewHandles(host, marks, detected, canvas.width, canvas.height, editor.getCorners(), () => live.getCorners(), handleLabels, markCopy, () => {
+            if (!cancelled) setMark("clear");
           });
-          setEstimated(host.querySelector("[data-scan-estimated]") !== null);
+          setMark(host.querySelector(MARKED) !== null ? seedMark : "clear");
         }
         if (probing() || diagnosticsSink !== null) {
           // What the user is looking at: the seed, or — with none — the
@@ -357,6 +371,8 @@ export function ConfirmCornersScreen({
             width: canvas.width,
             height: canvas.height,
             attention: capture.attention ?? null,
+            mark: seedMark,
+            refine: seedRefineRef.current,
           });
         }
         setPhase("ready");
@@ -376,7 +392,7 @@ export function ConfirmCornersScreen({
       editor?.destroy();
       editorRef.current = null;
     };
-  }, [canonical, capture.corners, capture.cornerCheck, diagnosticsSink, estimatedCopy, handleLabels, reportError, shell, urls]);
+  }, [canonical, capture.corners, capture.cornerCheck, capture.refine, diagnosticsSink, markCopy, handleLabels, reportError, shell, urls]);
 
   const busy = phase === "flying";
 
@@ -385,17 +401,7 @@ export function ConfirmCornersScreen({
    * seed the editor with — replaces the instruction rather than stacking under
    * it: one sentence over the photo, and it is the one that matters.
    */
-  const reason =
-    capture.attention != null
-      ? copy.confirm.attention[capture.attention]
-      : phase === "ready" && !found
-        ? copy.confirm.notFound
-        : phase === "ready" && estimated
-          ? copy.confirm.estimatedPill
-          : null;
-  // An estimated corner is said even under the photo's own reason: the two
-  // are different asks, and the estimate is the one about these handles.
-  const estimateAside = capture.attention != null && phase === "ready" && estimated ? copy.confirm.estimatedPill : null;
+  const pill = confirmPill(copy.confirm, { attention: capture.attention ?? null, ready: phase === "ready", found, mark });
 
   return (
     <div
@@ -437,19 +443,20 @@ export function ConfirmCornersScreen({
           <p
             // Announced only when it carries a reason: the plain instruction
             // is the live region's `announceReady` below, said once.
-            role={reason !== null ? "status" : undefined}
+            role={pill.reason ? "status" : undefined}
             data-scan-attention={capture.attention ?? undefined}
+            data-scan-mark={mark === "clear" ? undefined : mark}
             className="max-w-full rounded-full bg-night-deep/[0.72] px-4 py-[9px] text-center text-[15px] font-semibold leading-snug text-warm"
           >
-            {reason ?? copy.confirm.pill}
+            {pill.text}
           </p>
-          {estimateAside !== null && (
+          {pill.aside !== null && (
             <p
               role="status"
               data-scan-estimated-pill=""
               className="max-w-full rounded-full bg-night-deep/[0.72] px-4 py-[7px] text-center text-[14px] font-semibold leading-snug text-warm"
             >
-              {estimateAside}
+              {pill.aside}
             </p>
           )}
           <p className="text-[13px] font-semibold leading-none text-warm/[0.85] [text-shadow:0_1px_3px_rgba(0,0,0,0.6)]">
@@ -537,52 +544,64 @@ export function ConfirmCornersScreen({
   );
 }
 
+/** A handle still marked for review, either way. */
+const MARKED = "[data-scan-estimated], [data-scan-unmeasured]";
+
 /**
- * Mark the editor's handles whose corner the capture could not see
- * (inferred or unknown, `lib/corner-check.ts`): `data-scan-estimated` (the
- * stylesheet draws it hollow and dashed), a badge word under it, and an
- * accessible name that says so. The
- * editor may hand its handles back in another order than the quad it was
- * seeded with, so each handle takes the provenance of the seed corner nearest
- * it. Moving a handle (pointer or keys) takes its mark away — moving it,
- * not touching it: a press released where it started leaves the estimate
+ * Mark the editor's handles for review. With a `check`: the handles whose
+ * corner the capture could not see (inferred or unknown,
+ * `lib/corner-check.ts`) get `data-scan-estimated` and the word "estimado".
+ * With none (`null`: nothing measured the corners, `lib/refine-retry.ts`):
+ * every handle gets `data-scan-unmeasured` and the word "confira". The
+ * stylesheet draws both hollow and dashed; each gets an accessible name that
+ * says so. The editor may hand its handles back in another order than the
+ * quad it was seeded with, so each handle takes the provenance of the seed
+ * corner nearest it. Moving a handle (pointer or keys) takes its mark away —
+ * moving it, not touching it: a press released where it started leaves it
  * marked. `onCleared` runs once none is left.
  */
-/** An estimated handle counts as moved once it is this far (editor px) from where it was put. */
+/** A marked handle counts as moved once it is this far (editor px) from where it was put. */
 const ESTIMATE_MOVED_PX = 1;
 
-function markEstimatedHandles(
+function markReviewHandles(
   host: HTMLElement,
-  check: CornerCheck,
+  check: CornerCheck | null,
   seed: NormalizedQuad,
   width: number,
   height: number,
   shown: CornerPoints,
   current: () => CornerPoints,
   labels: Record<CornerHandleKey, string>,
-  words: { estimatedBadge: string; estimatedHandle: (corner: string) => string },
+  words: {
+    estimatedBadge: string;
+    estimatedHandle: (corner: string) => string;
+    unmeasuredBadge: string;
+    unmeasuredHandle: (corner: string) => string;
+  },
   onCleared: () => void,
 ): void {
   const normalized: Record<string, { x: number; y: number }> = {};
   for (const [key, point] of Object.entries(shown)) normalized[key] = { x: point.x / width, y: point.y / height };
-  const provenance = provenanceByNearest(check, seed, normalized);
+  const provenance = check === null ? null : provenanceByNearest(check, seed, normalized);
+  const attribute = check === null ? "data-scan-unmeasured" : "data-scan-estimated";
   for (const handle of host.querySelectorAll<HTMLElement>("[data-corner]")) {
     const key = handle.dataset.corner as CornerHandleKey | undefined;
-    if (key === undefined || !(key in labels) || provenance[key] === undefined || provenance[key] === "seen") continue;
-    handle.setAttribute("data-scan-estimated", provenance[key]);
-    handle.setAttribute("aria-label", words.estimatedHandle(labels[key]));
+    if (key === undefined || !(key in labels)) continue;
+    if (provenance !== null && (provenance[key] === undefined || provenance[key] === "seen")) continue;
+    handle.setAttribute(attribute, provenance === null ? "" : provenance[key]);
+    handle.setAttribute("aria-label", provenance === null ? words.unmeasuredHandle(labels[key]) : words.estimatedHandle(labels[key]));
     // The word under the puck (a child: the handle's ::after is scanic's hit area).
     const badge = document.createElement("span");
     badge.setAttribute("data-scan-estimated-badge", "");
     badge.setAttribute("aria-hidden", "true");
-    badge.textContent = words.estimatedBadge;
+    badge.textContent = provenance === null ? words.unmeasuredBadge : words.estimatedBadge;
     handle.appendChild(badge);
     const clear = () => {
-      if (!handle.hasAttribute("data-scan-estimated")) return;
-      handle.removeAttribute("data-scan-estimated");
+      if (!handle.hasAttribute(attribute)) return;
+      handle.removeAttribute(attribute);
       badge.remove();
       handle.setAttribute("aria-label", labels[key]);
-      if (host.querySelector("[data-scan-estimated]") === null) onCleared();
+      if (host.querySelector(MARKED) === null) onCleared();
     };
     // Cleared once the handle has actually moved off where it was put.
     const at = () => {

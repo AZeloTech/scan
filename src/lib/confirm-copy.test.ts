@@ -11,7 +11,7 @@ import { APP_COPY } from "./i18n.ts";
  */
 test("every sentence the confirm pill can carry is pill-sized, in both languages", () => {
   for (const [lang, copy] of Object.entries(APP_COPY)) {
-    const sentences = [copy.confirm.pill, copy.confirm.notFound, ...Object.values(copy.confirm.attention)];
+    const sentences = [copy.confirm.pill, copy.confirm.notFound, copy.confirm.estimatedPill, copy.confirm.unmeasuredPill, ...Object.values(copy.confirm.attention)];
     for (const sentence of sentences) {
       assert.ok(sentence.length <= 60, `${lang}: "${sentence}" is ${sentence.length} characters`);
     }
