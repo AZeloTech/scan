@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  paperClauses,
+  scorePaperLock,
+  scorePagelessLocks,
   frameOnScreen,
   hintSeries,
   hintWindow,
+  insideRegion,
   overlayAccuracy,
   overlaySeries,
   PAGELESS_CAPTURE,
@@ -15,6 +19,9 @@ import {
   scorePasses,
   scorePerf,
   scoreSession,
+  scoreVisibility,
+  shutterTruth,
+  SHUTTER_MOTION_MAX,
   toPoints,
   truthOnScreen,
   UNSCORED_CAPTURE,
@@ -576,6 +583,22 @@ test("guidance: the hint over time, one key at a time, legacy chips mapped", () 
   assert.equal(hintWindow(series, { from: 500, to: 900, expect: ["glare"], conditionFrom: 0 }).firstCorrectMs, null);
 });
 
+test("guidance: the occlusion hints are hints too — \"Canto coberto\" and \"Separe as folhas\" are scored, not dropped", () => {
+  const record = {
+    events: [
+      { type: "hint", t: 100, key: "corner-covered", shown: true },
+      { type: "hint", t: 900, key: "corner-covered", shown: false },
+      { type: "hint", t: 900, key: "separate-sheets", shown: true },
+      { type: "hint", t: 1500, key: "separate-sheets", shown: false },
+    ],
+  };
+  assert.deepEqual(hintSeries(record), [
+    { t: 100, key: "corner-covered" },
+    { t: 900, key: "separate-sheets" },
+    { t: 1500, key: null },
+  ]);
+});
+
 test("guidance: one hint replaced by another is one change, not two", () => {
   const record = {
     events: [
@@ -622,4 +645,255 @@ test("guidance: the ready cue's precision, auto-capture fires, latency, tremor a
   assert.equal(g.layout.shifts, 0);
   const pageless = scoreGuidance({ ...script, marks: { pageless: true } }, record, truthOnScreen(record), captures);
   assert.equal(pageless.auto.falseFires, 2);
+});
+
+test("guidance: a fire is judged at its shutter call — its own probe, unmeasured corners unverified, the scene's motion, every repeat", () => {
+  const t0 = 1000;
+  // The page held still to 2 s, then pulled off to the right over 200 ms (1.5 page widths).
+  const shift = (t) => (t <= 2000 ? 0 : t >= 2200 ? 0.9 : (0.9 * (t - 2000)) / 200);
+  const frames = Array.from({ length: 120 }, (_, k) => {
+    const t = (k * 1000) / 30;
+    const dx = shift(t);
+    return { t, quad: PAGE.map(([x, y]) => [x + dx, y]), whole: dx < 0.05 };
+  });
+  const corners = { topLeft: "seen", topRight: "seen", bottomRight: "seen", bottomLeft: "seen" };
+  const record = {
+    startedAt: t0,
+    frames,
+    presented: frames.map((_, k) => ({ k, at: t0 + (k * 1000) / 30 })),
+    actions: [{ what: "camera-live", at: t0 }, { what: "auto-on", at: t0 + 10 }],
+    boxes: [],
+    events: [
+      // Fire 1 (tap 1000) has its probe; fire 2 (tap 1900, the exposure running into the pull) has one with no
+      // corners; fire 3 (tap 3000) has none of its own — the old one at 1000 must not stand in for it.
+      { type: "auto-fire", t: t0 + 998, corners, separate: false },
+      { type: "auto-fire", t: t0 + 1895, corners: null, separate: null },
+    ],
+  };
+  const script = { frame: FRAME, duration: 4000, primary: [{ t: 0, page: 0 }], marks: { stable: [500] } };
+  const captures = [1000, 1900, 3000].map((tapAt) => ({ trigger: "auto", tapAt, verdict: "good", severe: false, pagelessCapture: false }));
+  const g = scoreGuidance(script, record, truthOnScreen(record), captures);
+  assert.deepEqual(g.auto.fires.map((f) => f.uncertain), [false, null, null]);
+  assert.equal(g.auto.firesUncertain, 0);
+  assert.equal(g.auto.firesUnverified, 2);
+  // The image verdicts are all "good" (the bench's preview fallback can do that); the shutter calls are not.
+  assert.deepEqual(g.auto.fires.map((f) => f.movingAtShutter), [false, true, false]);
+  assert.deepEqual(g.auto.fires.map((f) => f.cutAtShutter), [false, true, true]);
+  assert.equal(g.auto.firesMovingAtShutter, 1);
+  assert.equal(g.auto.firesCutAtShutter, 2);
+  assert.equal(g.auto.firesUnsafe, 2);
+  assert.equal(g.auto.falseFires, 0);
+  // Three shutter calls on one page: two repeats, whatever their images were judged.
+  assert.equal(g.auto.repeatFires, 2);
+  const still = shutterTruth(frames, 1000, FRAME);
+  assert.ok(still.whole && still.motion < SHUTTER_MOTION_MAX);
+  assert.equal(shutterTruth(frames, -50, FRAME), null);
+});
+
+test("visible region: holds, a false \"Afaste\", ready outside the region, auto corners outside", () => {
+  const t0 = 1000;
+  const frames = Array.from({ length: 400 }, () => ({ quad: PAGE }));
+  const overlay = (t, ready) => ({ type: "overlay", t: t0 + t, quad: null, opacity: 1, ready });
+  const hint = (t, key, shown) => ({ type: "hint", t: t0 + t, key, shown });
+  // The page spans 0.2–0.8; the region shows 0.1–0.9 until 2 s, then only 0.25–0.75 across.
+  const regions = [
+    { at: t0, x: 0.1, y: 0.1, width: 0.8, height: 0.8 },
+    { at: t0 + 2000, x: 0.25, y: 0.1, width: 0.5, height: 0.8 },
+  ];
+  const record = {
+    startedAt: t0,
+    frames,
+    presented: frames.map((_, k) => ({ k, at: t0 + (k * 1000) / 30 })),
+    actions: [{ what: "camera-live", at: t0 }],
+    regions,
+    // The overlay reports every 100 ms while the loop runs: the cue is on 1.5–3 s.
+    events: [
+      ...Array.from({ length: 40 }, (_, k) => overlay(k * 100, k * 100 >= 1500 && k * 100 < 3000)),
+      hint(500, "move-back", true),
+      hint(1000, "move-back", false),
+      hint(3000, "move-back", true),
+    ].sort((a, b) => a.t - b.t),
+  };
+  const script = { frame: FRAME, duration: 4000, marks: { holdFrom: 0, holdTo: 4000 } };
+  const captures = [
+    { trigger: "auto", cornerOutside: true, attention: "corner-outside" },
+    { trigger: "auto", cornerOutside: true, attention: null },
+    { trigger: "auto", cornerOutside: false, attention: null },
+    { trigger: "shutter", cornerOutside: true, attention: null },
+  ];
+  const v = scoreVisibility(script, record, truthOnScreen(record), captures);
+  assert.equal(v.holds.length, 1);
+  const h = v.holds[0];
+  assert.equal(h.reached, true);
+  assert.equal(h.visibleMs, 2000);
+  assert.equal(h.hiddenMs, 2000);
+  assert.equal(h.clearMs, 2000);
+  assert.equal(h.moveBackFalseMs, 500);
+  assert.equal(h.moveBackRightMs, 1000);
+  // The cue is on 1.5–3 s, judged every 50 ms: visible until 2 s, a corner hidden after — no onset violation.
+  assert.equal(v.ready.samples, 30);
+  assert.equal(v.ready.violations, 20);
+  assert.equal(v.ready.pageless, 0);
+  assert.equal(v.ready.onsets, 1);
+  assert.equal(v.ready.onsetViolations, 0);
+  assert.ok(Math.abs(v.ready.worstOutside - 0.05) < 1e-9);
+  assert.deepEqual(v.auto, { fires: 3, cornerOutside: 2, cornerOutsideFlagged: 1, flagged: 1 });
+  assert.equal(insideRegion(PAGE, { x: 0.2, y: 0.2, width: 0.6, height: 0.6 }), true);
+  assert.equal(insideRegion(PAGE, { x: 0.2, y: 0.2, width: 0.6, height: 0.6 }, 0.01), false);
+});
+
+test("visible region: a cue carried over from the sheet before is not the next hold's; page-less and covered cue time are violations", () => {
+  const t0 = 1000;
+  // Page A until 3 s, nothing 3–3.5 s, page B from 3.5 s.
+  const frames = Array.from({ length: 300 }, (_, k) => ({ quad: k < 90 ? PAGE : k < 105 ? null : PAGE }));
+  const overlay = (t, ready) => ({ type: "overlay", t: t0 + t, quad: null, opacity: 1, ready });
+  const record = {
+    startedAt: t0,
+    frames,
+    presented: frames.map((_, k) => ({ k, at: t0 + (k * 1000) / 30 })),
+    actions: [{ what: "camera-live", at: t0 }],
+    regions: [{ at: t0, x: 0, y: 0, width: 1, height: 1 }],
+    // On at 1 s for page A, and it lingers through the swap to 3.7 s (reports every 100 ms).
+    events: Array.from({ length: 61 }, (_, k) => overlay(k * 100, k * 100 >= 1000 && k * 100 < 3700)),
+  };
+  const script = { frame: FRAME, duration: 6000, marks: { holdFrom: 500, holdTo: 3000, lockFrom2: 3500, holdTo2: 6000 } };
+  const v = scoreVisibility(script, record, truthOnScreen(record), []);
+  assert.equal(v.holds[0].reached, true);
+  assert.equal(v.holds[1].reached, false, "the lingering cue is page A's");
+  assert.equal(v.holds[1].readyMs, 0);
+  // 3.0–3.5 s with the cue on and no page: 10 page-less samples.
+  assert.equal(v.ready.pageless, 10);
+  assert.equal(v.ready.violations, 10);
+  // A fresh onset for page B counts.
+  const fresh = { ...record, events: Array.from({ length: 61 }, (_, k) => overlay(k * 100, (k * 100 >= 1000 && k * 100 < 3700) || (k * 100 >= 4000 && k * 100 < 6000))) };
+  // Silence is no viewfinder: the same lingering cue whose reports stop at 3 s (a confirm screen over it) shows nothing after.
+  const silent = { ...record, events: record.events.filter((e) => e.t < t0 + 3000) };
+  assert.equal(scoreVisibility(script, silent, truthOnScreen(silent), []).ready.pageless, 0);
+  assert.equal(scoreVisibility(script, fresh, truthOnScreen(fresh), []).holds[1].reached, true);
+  // An opaque control over a corner (the page spans 0.2–0.8): the cue there is a violation, and an onset under it does not count.
+  const covered = { ...fresh, regions: [{ at: t0, x: 0, y: 0, width: 1, height: 1, blocks: [{ x: 0.15, y: 0.15, width: 0.1, height: 0.1 }] }] };
+  const c = scoreVisibility(script, covered, truthOnScreen(covered), []);
+  assert.equal(c.holds[0].reached, false);
+  assert.ok(c.ready.blocked > 0);
+  assert.equal(c.ready.onsetViolations, c.ready.onsets);
+});
+
+test("a still cut to the preview's field of view is scored in the crop's own frame", async () => {
+  const { cropStillTruth } = await import("./session-score.mjs");
+  // A 3000×4000 still, its centre 2250×4000 kept: a page spanning x 0.25–0.75
+  // of the still spans (750−375)/2250 … (2250−375)/2250 of the crop.
+  const still = {
+    width: 3000,
+    height: 4000,
+    quad: [[0.25, 0.1], [0.75, 0.1], [0.75, 0.9], [0.25, 0.9]],
+    corners: [[0.25, 0.1], [0.75, 0.1], [0.75, 0.9], [0.25, 0.9]],
+    whole: true,
+    content: [{ kind: "line", polygon: [[0.3, 0.2], [0.7, 0.2], [0.7, 0.25], [0.3, 0.25]] }],
+  };
+  const cropped = cropStillTruth(still, { x: 375, y: 0, width: 2250, height: 4000 });
+  const near = (a, b) => assert.ok(Math.abs(a - b) < 1e-9, `${a} vs ${b}`);
+  near(cropped.corners[0][0], (750 - 375) / 2250);
+  near(cropped.corners[1][0], (2250 - 375) / 2250);
+  near(cropped.corners[0][1], 0.1);
+  near(cropped.content[0].polygon[0][0], (900 - 375) / 2250);
+  assert.equal(cropped.whole, true);
+  assert.deepEqual([cropped.width, cropped.height], [2250, 4000]);
+  // A page reaching past the crop is no longer whole in it.
+  const wide = cropStillTruth({ ...still, corners: [[0.05, 0.1], [0.75, 0.1], [0.75, 0.9], [0.05, 0.9]] }, { x: 375, y: 0, width: 2250, height: 4000 });
+  assert.equal(wide.whole, false);
+});
+
+test("the paper lock: share locked, first lock, dropouts while steady, and the passes' clauses", () => {
+  const overlay = (t, locked) => ({ type: "overlay", t, locked, quad: null, opacity: 0 });
+  const events = [];
+  // Unlocked 1000–1500, locked 1500–2400, lost 2400–2600 (steady), locked again to 3000.
+  for (let t = 1000; t < 3000; t += 100) events.push(overlay(t, (t >= 1500 && t < 2400) || t >= 2600));
+  const why = (verdict, failPrint = null, failPanels = null, sideL = 0.9) => ({ verdict, failPrint, failPanels, sideT: 0.9, sideR: 0.9, sideB: 0.9, sideL });
+  events.push({ type: "detect", frameAt: 1100, locked: false, paperWhy: why("surface", "background", "margin-uniform") });
+  events.push({ type: "detect", frameAt: 1500, locked: true, paperWhy: why("ok") });
+  events.push({ type: "detect", frameAt: 2000, locked: true, paperWhy: why("surface", "background", "margin-relative") });
+  events.push({ type: "detect", frameAt: 2500, locked: false, paperWhy: why("sides", null, null, 0.2) });
+  events.push({ type: "detect", frameAt: 5000, locked: false, paperWhy: why("ok") });
+  const s = scorePaperLock({ events }, { from: 1000, to: 3000, steady: [{ from: 2000, to: 3000 }] });
+  assert.equal(Math.round(s.lockedShare * 100), 65);
+  assert.equal(s.firstLockMs, 500);
+  assert.equal(s.dropouts, 1);
+  assert.equal(s.steadyUnlockedMs, 200);
+  assert.equal(s.clauses.passes, 4);
+  assert.equal(s.clauses.paper, 1);
+  assert.equal(s.clauses.kept, 1);
+  assert.deepEqual(s.clauses.verdicts, { surface: 2, ok: 1, sides: 1 });
+  assert.deepEqual(s.clauses.print, { background: 2 });
+  assert.deepEqual(s.clauses.panels, { "margin-uniform": 1, "margin-relative": 1 });
+  assert.deepEqual(s.clauses.weakSides, { L: 1 });
+  // Never locked: no first lock, no dropouts.
+  const none = scorePaperLock({ events: events.map((e) => (e.type === "overlay" ? { ...e, locked: false } : e)) }, { from: 1000, to: 3000 });
+  assert.equal(none.firstLockMs, null);
+  assert.equal(none.lockedShare, 0);
+  assert.equal(none.dropouts, 0);
+  assert.equal(paperClauses({ events }, 4000, 6000).paper, 1);
+});
+
+test("a dim-lamp page held as found less than its floor fails the run, at cpu 1 and at cpu 4", () => {
+  const results = (share, { cpu = 1, runs = 8, firstLockP50 = 200, paperGate = false, sessions = ["dim-owner-bare"] } = {}) => ({
+    suite: "session",
+    config: { cpu, ...(paperGate ? { paperGate } : {}) },
+    summary: { ...Object.fromEntries(sessions.map((s) => [s, { all: { paperLock: { runs, lockedShare: share, firstLockP50 } } }])), "approach-hold": { all: {} } },
+  });
+  assert.deepEqual(absoluteViolations(results(0.71)), []);
+  const low = absoluteViolations(results(0.3));
+  assert.equal(low.length, 1);
+  assert.match(low[0], /dim-owner-bare\/all: paperLock.lockedShare 0.300 < floor/);
+  assert.equal(absoluteViolations(results(null)).length, 1);
+  // cpu 4 has floors of its own (adv-paper F9): no longer reported only.
+  assert.match(absoluteViolations(results(0.3, { cpu: 4 }))[0], /dim-owner-bare\/all: paperLock.lockedShare 0.300 < floor 0.45/);
+  // The first lock's median at cpu 1: the spec's 1.5 s.
+  assert.match(absoluteViolations(results(0.71, { firstLockP50: 2400 }))[0], /firstLockP50 2400 > 1500/);
+  assert.match(absoluteViolations(results(0.71, { firstLockP50: null }))[0], /firstLockP50 never/);
+  // Fewer seeds: ungated — unless --paper-gate asks for the gate, which also wants every session.
+  assert.deepEqual(absoluteViolations(results(0.3, { runs: 3 })), []);
+  const gated = absoluteViolations(results(0.71, { runs: 3, paperGate: true }));
+  assert.ok(gated.some((v) => /dim-owner-bare\/all: 3 runs < 8 required/.test(v)));
+  assert.ok(gated.some((v) => /dim-owner-case\/all: required by --paper-gate, not run/.test(v)));
+  assert.deepEqual(absoluteViolations(results(0.71, { paperGate: true, sessions: ["dim-owner-case", "dim-owner-bare", "dim-sheet-over", "dim-text-page"] })), []);
+  assert.match(absoluteViolations(results(0.71, { cpu: 6, paperGate: true }))[0], /no floors measured at --cpu 6/);
+});
+
+test("the paper lock counts only a lock drawn on the presented page, over the whole window (adv-paper F8)", () => {
+  const FRAME = { width: 720, height: 1280 };
+  const truthAt = () => PAGE;
+  const overlay = (t, locked, quad) => ({ type: "overlay", t, locked, quad: libraryQuad(quad), opacity: 1 });
+  const events = [];
+  // 1000–2000 locked on the page, 2000–3000 locked on something else (the leaflet), then no samples at all to 4000.
+  for (let t = 1000; t < 2000; t += 100) events.push(overlay(t, true, PAGE));
+  for (let t = 2000; t < 3000; t += 100) events.push(overlay(t, true, ELSEWHERE));
+  const s = scorePaperLock({ events }, { from: 1000, to: 4000 }, { truthAt, frame: FRAME });
+  assert.equal(s.windowMs, 3000);
+  assert.equal(s.lockedMs, 1000);
+  // The last sample holds until the gap limit, then the window is unobserved.
+  assert.ok(s.wrongLockMs >= 1000 && s.wrongLockMs < 1500, `wrong ${s.wrongLockMs}`);
+  assert.ok(s.unobservedMs > 500);
+  // A third of the window: the wrong lock is not the page's, and the unobserved stretch is not locked.
+  assert.equal(Math.round(s.lockedShare * 1000), 333);
+  // A lock that never was on the page has no first lock.
+  const wrongOnly = scorePaperLock({ events: events.filter((e) => e.t >= 2000) }, { from: 1000, to: 3000 }, { truthAt, frame: FRAME });
+  assert.equal(wrongOnly.firstLockMs, null);
+  assert.equal(wrongOnly.lockedShare, 0);
+  // The passes: every regular pass counts, with the ones never read named.
+  const detect = (frameAt, ok, accepted, paperWhy = null) => ({ type: "detect", frameAt, ok, accepted, paperWhy, locked: false });
+  const c = paperClauses(
+    { events: [detect(1100, false, false), detect(1200, true, false, { verdict: "ok" }), detect(1300, true, true, { verdict: "ok" }), detect(1400, true, true), { ...detect(1500, true, true), warmUp: true }] },
+    1000,
+    2000,
+  );
+  assert.deepEqual([c.detects, c.noQuad, c.rejected, c.unread, c.passes, c.readRejected, c.paper], [4, 1, 1, 1, 2, 1, 2]);
+});
+
+test("a page-less session's locks are counted, whether or not anything fired", () => {
+  const events = [];
+  for (let t = 0; t < 10000; t += 100) events.push({ type: "overlay", t, locked: (t >= 2000 && t < 3500) || (t >= 6000 && t < 6500), quad: null, opacity: 0 });
+  const q = scorePagelessLocks({ events }, 0, 10000);
+  assert.equal(q.locks, 2);
+  assert.equal(q.longestMs, 1500);
+  assert.equal(Math.round(q.lockedShare * 100), 20);
 });

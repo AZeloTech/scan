@@ -55,6 +55,21 @@ export interface PaperEvidence {
   /** How much the background itself varies from block to block (0–1 of the range). */
   backgroundSpread: number;
   /**
+   * The page's border band (just inside its sides, {@link MARGIN_INSETS}):
+   * the share of it within {@link MARGIN_BAND} of its own median luma, and
+   * that median over the interior's bright end (its 95th percentile). A white
+   * margin round printed images reads ~0.65–0.9 and ~1; null when not measured.
+   */
+  marginUniform?: number | null;
+  marginRelative?: number | null;
+  /**
+   * The paper's own level — the median of the interior's block medians
+   * (0–255 luma) — and the interior's bright end the margin was held
+   * against; for the diagnostics stream, not the verdict. Absent: not measured.
+   */
+  paperLuma?: number;
+  brightLuma?: number | null;
+  /**
    * Share of the interior clipped white ({@link GLARE_LUMA} and up) — a
    * lamp's reflection washing the print out. Not part of the verdict: it is
    * what the viewfinder's "reflection" hint reads (`lib/guidance.ts`).
@@ -122,6 +137,35 @@ export interface EvidenceRules {
    */
   textureInk: number;
   textureSpread: number;
+  /**
+   * A page of printed images — an imaging report's near-black panels, a
+   * sheet of photos — fails the text rules (its background share is low, its
+   * ink solid) but keeps a white margin round them: a border band at least
+   * `printMarginUniform` one even material, as bright as the brightest of
+   * the interior (`printMarginRelative` of its 95th percentile), with solid
+   * ink (`printSolidInk` and up) on a background share of `printBackground`
+   * and up. A laptop's lid, a notebook's cover, a keyboard have no such band.
+   */
+  printMarginUniform: number;
+  printMarginRelative: number;
+  printSolidInk: number;
+  printBackground: number;
+  /**
+   * …and a page of printed images has that much ink at least: a white box,
+   * a laptop or a mat with a logo or a few solid marks reads 0.02–0.08, a
+   * black keyboard whose deck reads as the margin 0.07–0.09, every imaging
+   * report on the bench 0.1 and up (5d-paper: with the margin judged
+   * locally, the band no longer turned those away on its own).
+   */
+  printMinInk: number;
+  /**
+   * The margin judged locally (5d-paper): its evenness against its own
+   * running level along each side, its brightness against the interior's
+   * bright end next to it — so a lamp to one side or a hand's shadow over
+   * the margin is not "uneven" or "darker than the page". False: against the
+   * band's single median and the whole interior's bright end, as before.
+   */
+  marginLocal: boolean;
 }
 
 /**
@@ -174,6 +218,12 @@ export const PAPER: EvidenceRules = {
   minInkOfRest: 0.22,
   textureInk: 0.04,
   textureSpread: 0.75,
+  printMarginUniform: 0.6,
+  printMarginRelative: 0.9,
+  printSolidInk: 0.2,
+  printBackground: 0.25,
+  printMinInk: 0.1,
+  marginLocal: true,
 };
 
 /** The step's boxes, and how far from the side it is looked for — shares of the frame's short side. */
@@ -208,6 +258,11 @@ export const GLARE_LUMA = 250;
 export const GLARE_BLOCK_LUMA = 252;
 export const GLARE_PAPER_MAX = 245;
 export const GLARE_LIT_SHARE = 0.3;
+
+/** The border band: these insets (shares of the quad), this many samples per side at each, and the luma band of "one material". */
+const MARGIN_INSETS = [0.02, 0.035, 0.05] as const;
+const MARGIN_SAMPLES = 40;
+const MARGIN_BAND = 18;
 
 /** The interior grid: about one sample per 3 px, within these bounds per axis. */
 const GRID_MIN = 20;
@@ -279,6 +334,16 @@ export interface EvidenceSamples {
   blockMedians: number[];
   /** Share of the in-frame interior samples at {@link GLARE_LUMA} or brighter (absent: not measured). */
   clipped?: number;
+  /** The interior's bright end (95th percentile luma), and the border band's median luma and evenness (absent: not measured). */
+  bright?: number;
+  /**
+   * The border band ({@link measureMargin}): its median luma; its evenness
+   * against that median (`flatUniform`) and against its own local level
+   * (`uniform`); that level over the interior's bright end next to it
+   * (`relative`). Older samples carry `luma` and `uniform` only, `uniform`
+   * then the flat one.
+   */
+  margin?: { luma: number; uniform: number; flatUniform?: number; relative?: number | null } | null;
 }
 
 /**
@@ -358,7 +423,7 @@ function measureSides(data: Uint8ClampedArray, width: number, height: number, c:
  * medians (so a lighting gradient or a shadow across the page is background,
  * not ink), and each sample's residual from it.
  */
-function measureInterior(data: Uint8ClampedArray, width: number, height: number, c: Point[]) {
+function measureInterior(data: Uint8ClampedArray, width: number, height: number, c: Point[], excluded: (u: number, v: number) => boolean) {
   const across = (Math.hypot(c[1].x - c[0].x, c[1].y - c[0].y) + Math.hypot(c[2].x - c[3].x, c[2].y - c[3].y)) / 2;
   const down = (Math.hypot(c[3].x - c[0].x, c[3].y - c[0].y) + Math.hypot(c[2].x - c[1].x, c[2].y - c[1].y)) / 2;
   const cols = Math.max(GRID_MIN, Math.min(GRID_MAX, Math.round(across / 3)));
@@ -416,7 +481,178 @@ function measureInterior(data: Uint8ClampedArray, width: number, height: number,
       blockOf[at] = Math.min(BLOCKS - 1, Math.floor((j * BLOCKS) / rows)) * BLOCKS + Math.min(BLOCKS - 1, Math.floor((i * BLOCKS) / cols));
     }
   }
-  return { residuals, cols, rows, inFrame, blockOf, blockMedians: known, clipped: inFrame > 0 ? clipped / inFrame : 0 };
+  // The bright end, overall and per block — leaving out the region near a
+  // covered corner (`excluded`): what lies over it is not the page.
+  const lit: number[] = [];
+  const perBlock: number[][] = Array.from({ length: BLOCKS * BLOCKS }, () => []);
+  for (let j = 0; j < rows; j += 1) {
+    const v = INSET + ((1 - 2 * INSET) * (j + 0.5)) / rows;
+    for (let i = 0; i < cols; i += 1) {
+      const u = INSET + ((1 - 2 * INSET) * (i + 0.5)) / cols;
+      const y = grid[j * cols + i];
+      if (Number.isNaN(y) || excluded(u, v)) continue;
+      lit.push(y);
+      perBlock[blockOf[j * cols + i]].push(y);
+    }
+  }
+  lit.sort((a, b) => a - b);
+  const bright = lit.length === 0 ? 0 : lit[Math.min(lit.length - 1, Math.floor(lit.length * 0.95))];
+  const blockBright = perBlock.map((values) => {
+    if (values.length < 4) return Number.NaN;
+    values.sort((a, b) => a - b);
+    return values[Math.min(values.length - 1, Math.floor(values.length * 0.95))];
+  });
+  return { residuals, cols, rows, inFrame, blockOf, blockMedians: known, clipped: inFrame > 0 ? clipped / inFrame : 0, bright, blockBright };
+}
+
+/**
+ * The bright end of the interior near (u, v) (quad shares): the block
+ * brights ({@link measureInterior}) interpolated at the nearest point of the
+ * sampled interior, blocks with nothing measured left out.
+ */
+export function brightNear(blockBright: number[], u: number, v: number): number | null {
+  const at = (x: number) => Math.max(0, Math.min(BLOCKS - 1, ((Math.max(INSET, Math.min(1 - INSET, x)) - INSET) / (1 - 2 * INSET)) * BLOCKS - 0.5));
+  const fx = at(u);
+  const fy = at(v);
+  const x0 = Math.floor(fx);
+  const y0 = Math.floor(fy);
+  let sum = 0;
+  let weight = 0;
+  for (const [bx, by, w] of [
+    [x0, y0, (1 - (fx - x0)) * (1 - (fy - y0))],
+    [Math.min(BLOCKS - 1, x0 + 1), y0, (fx - x0) * (1 - (fy - y0))],
+    [x0, Math.min(BLOCKS - 1, y0 + 1), (1 - (fx - x0)) * (fy - y0)],
+    [Math.min(BLOCKS - 1, x0 + 1), Math.min(BLOCKS - 1, y0 + 1), (fx - x0) * (fy - y0)],
+  ] as const) {
+    const b = blockBright[by * BLOCKS + bx];
+    if (!Number.isFinite(b) || w <= 0) continue;
+    sum += b * w;
+    weight += w;
+  }
+  return weight > 0 ? sum / weight : null;
+}
+
+/** Positions each side of the border band's local level is taken over, each way ({@link measureMargin}). */
+const MARGIN_LOCAL = 5;
+
+/**
+ * The border band just inside the quad's sides ({@link MARGIN_INSETS}, over
+ * the middle of each side), outside any region near a covered corner
+ * (`excluded`): its median luma and the share of it within
+ * {@link MARGIN_BAND} of that (`flatUniform`, `luma`: a page's white margin
+ * is one even material) — and the same judged locally, so a lamp's gradient
+ * or a hand's soft shadow across the margin is not unevenness: each sample
+ * against the median of its own side's samples within {@link MARGIN_LOCAL}
+ * positions (`uniform`), and that local level against the interior's bright
+ * end next to it (`relative`, the median over the band; null when no block
+ * near it was measured).
+ */
+function measureMargin(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  c: Point[],
+  excluded: (u: number, v: number) => boolean,
+  blockBright: number[],
+): { luma: number; flatUniform: number; uniform: number; relative: number | null } | null {
+  const values: number[] = [];
+  // Per side (top, bottom, left, right), per position along it: the samples at each inset and where they are.
+  const bySide: { u: number; v: number; ys: number[] }[][] = [[], [], [], []];
+  for (let i = 0; i < MARGIN_SAMPLES; i += 1) {
+    const t = 0.08 + (0.84 * (i + 0.5)) / MARGIN_SAMPLES;
+    const spots: [number, number][] = [[t, MARGIN_INSETS[1]], [t, 1 - MARGIN_INSETS[1]], [MARGIN_INSETS[1], t], [1 - MARGIN_INSETS[1], t]];
+    for (let side = 0; side < 4; side += 1) {
+      const ys: number[] = [];
+      for (const d of MARGIN_INSETS) {
+        const [u, v] = side === 0 ? [t, d] : side === 1 ? [t, 1 - d] : side === 2 ? [d, t] : [1 - d, t];
+        if (excluded(u, v)) continue;
+        const p = inside(c, u, v);
+        const y = luma(data, width, height, p.x, p.y);
+        if (y === null) continue;
+        values.push(y);
+        ys.push(y);
+      }
+      if (ys.length > 0) bySide[side].push({ u: spots[side][0], v: spots[side][1], ys });
+    }
+  }
+  if (values.length < MARGIN_SAMPLES) return null;
+  const middle = median(values);
+  let near = 0;
+  let judged = 0;
+  const ratios: number[] = [];
+  for (const run of bySide) {
+    for (let k = 0; k < run.length; k += 1) {
+      const local = median(run.slice(Math.max(0, k - MARGIN_LOCAL), k + MARGIN_LOCAL + 1).flatMap((spot) => spot.ys));
+      for (const y of run[k].ys) {
+        judged += 1;
+        if (Math.abs(y - local) <= MARGIN_BAND) near += 1;
+      }
+      const bright = brightNear(blockBright, run[k].u, run[k].v);
+      if (bright !== null && bright > 0) ratios.push(local / bright);
+    }
+  }
+  return {
+    luma: middle,
+    flatUniform: values.filter((y) => Math.abs(y - middle) <= MARGIN_BAND).length / values.length,
+    uniform: judged > 0 ? near / judged : 0,
+    relative: ratios.length > 0 ? median(ratios) : null,
+  };
+}
+
+/**
+ * A corner something lies over (`refine.ts`'s inferred or unknown corner),
+ * for {@link measureEvidence}: `corner` 0–3 (TL, TR, BR, BL) and `along`, the
+ * share of each of its two sides (the one before it, the one after it) not
+ * seen running up to it.
+ */
+export interface CoveredCorner {
+  corner: number;
+  along: [number, number];
+}
+
+/** Past the unseen run, this much more of a side (a share of it) is left out; and at most this much. */
+const COVER_PAD = 0.06;
+const COVER_MAX = 0.6;
+/** A covered corner with no run measured at all: this much of each side. */
+const COVER_DEFAULT = 0.35;
+
+/**
+ * The covered corners of a refinement's corner reports (`RefineResult.corners`,
+ * TL, TR, BR, BL), for {@link paperEvidence}: each corner not `seen`, with the
+ * unseen share of its two sides (`1 − runs`).
+ */
+export function coveredCorners(reports: readonly { provenance: string; runs: readonly [number, number] }[] | null | undefined): CoveredCorner[] {
+  if (!reports) return [];
+  const out: CoveredCorner[] = [];
+  reports.forEach((report, corner) => {
+    if (report === undefined || report.provenance === "seen") return;
+    const unseen = report.runs.map((r) => Math.max(0, Math.min(1, 1 - r)));
+    out.push({ corner, along: unseen[0] === 1 && unseen[1] === 1 ? [COVER_DEFAULT, COVER_DEFAULT] : [unseen[0], unseen[1]] });
+  });
+  return out;
+}
+
+/**
+ * Whether (u, v) (quad shares) lies near a covered corner: within the unseen
+ * run of both its sides, plus {@link COVER_PAD}.
+ */
+function coveredRegion(covered: readonly CoveredCorner[]): (u: number, v: number) => boolean {
+  if (covered.length === 0) return () => false;
+  const boxes = covered.map(({ corner, along }) => {
+    const [before, after] = along.map((a) => Math.min(COVER_MAX, a + COVER_PAD));
+    // The side before TL runs up the left edge (v), the one after it along the top (u); and round the quad.
+    switch (corner) {
+      case 0:
+        return (u: number, v: number) => u <= after && v <= before;
+      case 1:
+        return (u: number, v: number) => u >= 1 - before && v <= after;
+      case 2:
+        return (u: number, v: number) => v >= 1 - before && u >= 1 - after;
+      default:
+        return (u: number, v: number) => u <= before && v >= 1 - after;
+    }
+  });
+  return (u, v) => boxes.some((inBox) => inBox(u, v));
 }
 
 /**
@@ -429,14 +665,16 @@ export function measureEvidence(
   width: number,
   height: number,
   quad: CornerPoints,
+  covered: readonly CoveredCorner[] = [],
 ): EvidenceSamples | null {
   if (width <= 0 || height <= 0 || data.length < width * height * 4) return null;
   const c = corners(quad);
   if (c.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return null;
+  const excluded = coveredRegion(covered);
   const { sides, lengths } = measureSides(data, width, height, c);
-  const { inFrame, ...texture } = measureInterior(data, width, height, c);
+  const { inFrame, blockBright, ...texture } = measureInterior(data, width, height, c, excluded);
   if (inFrame === 0) return null;
-  return { sides, sideLengths: lengths, ...texture, blocks: BLOCKS * BLOCKS };
+  return { sides, sideLengths: lengths, ...texture, blocks: BLOCKS * BLOCKS, margin: measureMargin(data, width, height, c, excluded, blockBright) };
 }
 
 /**
@@ -529,6 +767,17 @@ export function judgeEvidence(samples: EvidenceSamples, rules: EvidenceRules = P
     inkSpread: spread,
     solidInk: inkSamples > 0 ? solid / inkSamples : 0,
     backgroundSpread: blockRange,
+    marginUniform: samples.margin == null ? null : rules.marginLocal ? samples.margin.uniform : (samples.margin.flatUniform ?? samples.margin.uniform),
+    marginRelative:
+      samples.margin == null
+        ? null
+        : rules.marginLocal && samples.margin.relative !== undefined
+          ? samples.margin.relative
+          : !(samples.bright! > 0)
+            ? null
+            : samples.margin.luma / samples.bright!,
+    paperLuma: median(samples.blockMedians),
+    brightLuma: samples.bright ?? null,
   };
   // A reflection is a hot spot: blocks of the interior washed white while a
   // good part of the page is not. A page exposed to the top of the range is
@@ -541,7 +790,7 @@ export function judgeEvidence(samples: EvidenceSamples, rules: EvidenceRules = P
 }
 
 /** The decision over the numbers (the glare share is not one of them). */
-export function paperLike(e: Omit<PaperEvidence, "ok" | "glare" | "open">, rules: EvidenceRules = PAPER): boolean {
+export function paperLike(e: EvidenceNumbers, rules: EvidenceRules = PAPER): boolean {
   const sidesNeeded = Math.min(rules.minSides, Math.max(2, e.sidesKnown - 1));
   return e.sidesKnown >= 2 && e.sidesSupported >= sidesNeeded && paperSurface(e, rules);
 }
@@ -551,18 +800,141 @@ export function paperLike(e: Omit<PaperEvidence, "ok" | "glare" | "open">, rules
  * the sides say — what a page the frame cuts off still shows (its cut sides
  * run along the frame's edge, where there is no step to find).
  */
-export function paperSurface(e: Omit<PaperEvidence, "ok" | "glare" | "open">, rules: EvidenceRules = PAPER): boolean {
-  return (
-    e.background >= rules.minBackground &&
-    e.ink >= (e.background >= rules.faintBackground ? rules.faintInk : rules.minInk) &&
-    e.ink <= rules.maxInk &&
-    e.inkSpread >= rules.minInkSpread &&
-    e.counterInk <= e.ink * rules.maxCounterRatio + rules.counterFloor &&
-    e.backgroundSpread <= rules.maxBackgroundSpread &&
-    e.solidInk <= rules.maxSolidInk &&
-    (e.background >= rules.marginalBackground || e.ink >= rules.minInkOfRest * (1 - e.background)) &&
-    !(e.ink < rules.textureInk && e.inkSpread > rules.textureSpread)
-  );
+export function paperSurface(e: EvidenceNumbers, rules: EvidenceRules = PAPER): boolean {
+  return printText(e, rules) || printedImages(e, rules);
+}
+
+/** The numbers a verdict is judged on. */
+type EvidenceNumbers = Omit<PaperEvidence, "ok" | "glare" | "open">;
+
+/**
+ * The first clause of the text rule ({@link printText}) a reading fails, or
+ * null when it passes — in the rule's own order, so a histogram of them says
+ * what keeps a page from reading as text on paper.
+ */
+export type TextClause =
+  | "background"
+  | "ink-low"
+  | "ink-high"
+  | "ink-spread"
+  | "counter-ink"
+  | "background-spread"
+  | "solid-ink"
+  | "ink-of-rest"
+  | "texture";
+
+/** The first clause of the printed-images rule ({@link printedImages}) a reading fails, or null when it passes. */
+export type ImagesClause =
+  | "no-margin"
+  | "margin-uniform"
+  | "margin-relative"
+  | "solid-ink"
+  | "background"
+  | "ink-low"
+  | "ink-high"
+  | "ink-spread";
+
+export function textFailure(e: EvidenceNumbers, rules: EvidenceRules = PAPER): TextClause | null {
+  if (!(e.background >= rules.minBackground)) return "background";
+  if (!(e.ink >= (e.background >= rules.faintBackground ? rules.faintInk : rules.minInk))) return "ink-low";
+  if (!(e.ink <= rules.maxInk)) return "ink-high";
+  if (!(e.inkSpread >= rules.minInkSpread)) return "ink-spread";
+  if (!(e.counterInk <= e.ink * rules.maxCounterRatio + rules.counterFloor)) return "counter-ink";
+  if (!(e.backgroundSpread <= rules.maxBackgroundSpread)) return "background-spread";
+  if (!(e.solidInk <= rules.maxSolidInk)) return "solid-ink";
+  if (!(e.background >= rules.marginalBackground || e.ink >= rules.minInkOfRest * (1 - e.background))) return "ink-of-rest";
+  if (e.ink < rules.textureInk && e.inkSpread > rules.textureSpread) return "texture";
+  return null;
+}
+
+export function imagesFailure(e: EvidenceNumbers, rules: EvidenceRules = PAPER): ImagesClause | null {
+  if (e.marginUniform == null || e.marginRelative == null) return "no-margin";
+  if (!(e.marginUniform >= rules.printMarginUniform)) return "margin-uniform";
+  if (!(e.marginRelative >= rules.printMarginRelative)) return "margin-relative";
+  if (!(e.solidInk >= rules.printSolidInk)) return "solid-ink";
+  if (!(e.background >= rules.printBackground)) return "background";
+  if (!(e.ink >= rules.printMinInk)) return "ink-low";
+  if (!(e.ink <= rules.maxInk)) return "ink-high";
+  if (!(e.inkSpread >= rules.minInkSpread)) return "ink-spread";
+  return null;
+}
+
+/**
+ * A page of printed images ({@link EvidenceRules.printMarginUniform}): solid
+ * print inside a white margin as bright as anything on the sheet.
+ */
+function printedImages(e: EvidenceNumbers, rules: EvidenceRules): boolean {
+  return imagesFailure(e, rules) === null;
+}
+
+/** Text and line print on the sheet's own background — the rules the evidence was set on. */
+function printText(e: EvidenceNumbers, rules: EvidenceRules): boolean {
+  return textFailure(e, rules) === null;
+}
+
+/**
+ * Why a reading is or is not paper, as one enum: `ok`, `sides` (too few
+ * sides on edges — whatever the surface says) or `surface` (the sides hold;
+ * neither print rule does).
+ */
+export type EvidenceVerdict = "ok" | "sides" | "surface";
+
+export function evidenceVerdict(e: EvidenceNumbers, rules: EvidenceRules = PAPER): EvidenceVerdict {
+  const sidesNeeded = Math.min(rules.minSides, Math.max(2, e.sidesKnown - 1));
+  if (!(e.sidesKnown >= 2 && e.sidesSupported >= sidesNeeded)) return "sides";
+  return paperSurface(e, rules) ? "ok" : "surface";
+}
+
+/**
+ * One reading's numbers for the diagnostics stream (`pass` events'
+ * `evidence`): rounded, metadata only — per-side support (null: the frame
+ * cut it off), the surface's shares, the margin's two numbers, the paper's
+ * level and the bright end, and which rule and clause failed.
+ */
+export interface EvidenceDiagnostic {
+  sideT: number | null;
+  sideR: number | null;
+  sideB: number | null;
+  sideL: number | null;
+  sidesKnown: number;
+  background: number;
+  ink: number;
+  counterInk: number;
+  inkSpread: number;
+  solidInk: number;
+  backgroundSpread: number;
+  marginUniform: number | null;
+  marginRelative: number | null;
+  paperLevel: number | null;
+  brightLevel: number | null;
+  verdict: EvidenceVerdict;
+  failPrint: TextClause | null;
+  failPanels: ImagesClause | null;
+}
+
+export function evidenceDiagnostic(e: PaperEvidence, rules: EvidenceRules = PAPER): EvidenceDiagnostic {
+  const r2 = (v: number | null | undefined): number | null => (v == null || !Number.isFinite(v) ? null : Math.round(v * 100) / 100);
+  const r0 = (v: number | null | undefined): number | null => (v == null || !Number.isFinite(v) ? null : Math.round(v));
+  return {
+    sideT: r2(e.sideSupport[0]),
+    sideR: r2(e.sideSupport[1]),
+    sideB: r2(e.sideSupport[2]),
+    sideL: r2(e.sideSupport[3]),
+    sidesKnown: e.sidesKnown,
+    background: r2(e.background) ?? 0,
+    ink: r2(e.ink) ?? 0,
+    counterInk: r2(e.counterInk) ?? 0,
+    inkSpread: r2(e.inkSpread) ?? 0,
+    solidInk: r2(e.solidInk) ?? 0,
+    backgroundSpread: r2(e.backgroundSpread) ?? 0,
+    marginUniform: r2(e.marginUniform),
+    marginRelative: r2(e.marginRelative),
+    paperLevel: r0(e.paperLuma),
+    brightLevel: r0(e.brightLuma),
+    verdict: evidenceVerdict(e, rules),
+    failPrint: textFailure(e, rules),
+    failPanels: imagesFailure(e, rules),
+  };
 }
 
 /**
@@ -575,8 +947,9 @@ export function paperEvidence(
   height: number,
   quad: CornerPoints,
   rules: EvidenceRules = PAPER,
+  covered: readonly CoveredCorner[] = [],
 ): PaperEvidence | null {
-  const samples = measureEvidence(data, width, height, quad);
+  const samples = measureEvidence(data, width, height, quad, covered);
   if (samples === null) return null;
   const evidence = judgeEvidence(samples, rules);
   return { ...evidence, open: openSides(data, width, height, quad, evidence.sideSupport, median(samples.blockMedians)) };

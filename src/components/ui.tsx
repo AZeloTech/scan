@@ -265,7 +265,7 @@ export type MetaTone =
    */
   | "deskFaint"
   /**
-   * Sage read on a **dark** ground (#8FAB9B), fixed rather than derived. The
+   * Sage read on a **dark** ground (#A2A5A8), fixed rather than derived. The
    * `mist` tone above is the themeable shell's accent variable, which the
    * desktop viewer has no colour to derive from — this is the literal value.
    */

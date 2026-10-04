@@ -105,6 +105,201 @@ test("occupancy sees a repeated edge strip and does not see one on a clean page"
   assert.ok(clean.inkFraction > 0.05 && clean.inkFraction < 0.3);
 });
 
+test("a few dark pixels on an edge are not a smeared strip", () => {
+  // What a slightly rotated page leaves at its edge: a sliver of background a
+  // few pixels long on the outermost row only, and a short run of glyph ink
+  // on the outermost column that the next columns do not share.
+  const page = textPage(0);
+  const paint = (x: number, y: number) => {
+    const offset = (y * page.width + x) * 4;
+    page.data[offset] = 60;
+    page.data[offset + 1] = 60;
+    page.data[offset + 2] = 60;
+  };
+  for (let x = 0; x < 3; x += 1) paint(x, page.height - 1);
+  for (let y = 100; y < 112; y += 1) paint(0, y);
+
+  assert.equal(occupancyStats(toGray(page)).borderRepeatScore, 0);
+});
+
+test("a shadow darkening towards an edge is not a smeared strip", () => {
+  // Every row of the shadow is off the paper and only a little darker than
+  // the one inside it — close pixel by pixel, but not a copy.
+  const page = textPage(0);
+  for (let step = 0; step < 6; step += 1) {
+    const row = page.height - 1 - step;
+    const level = 150 + step * 8;
+    for (let x = 0; x < page.width; x += 1) {
+      const offset = (row * page.width + x) * 4;
+      page.data[offset] = level;
+      page.data[offset + 1] = level;
+      page.data[offset + 2] = level;
+    }
+  }
+
+  assert.equal(occupancyStats(toGray(page)).borderRepeatScore, 0);
+});
+
+/** Paints `rows` full rows at the top edge of the page with one grey level. */
+function paintTopRows(page: RgbaImage, rows: number, level: number): void {
+  for (let row = 0; row < rows; row += 1) {
+    for (let x = 0; x < page.width; x += 1) {
+      const offset = (row * page.width + x) * 4;
+      page.data[offset] = level;
+      page.data[offset + 1] = level;
+      page.data[offset + 2] = level;
+    }
+  }
+}
+
+test("a band of background framed in along an edge is a repeated strip", () => {
+  // What a dewarp that pulls the table into the page leaves: every row of the
+  // band is the same dark background. There is no spread along the strip to
+  // see, but there is content on it, and it repeats inward.
+  const page = textPage(0);
+  paintTopRows(page, 8, 90);
+
+  assert.equal(occupancyStats(toGray(page)).borderRepeatScore, 1);
+});
+
+test("a faint grey mark crossing an edge is not content to smear", () => {
+  // A few percent of the top row a shade off the paper — the soft edge of a
+  // shadow or a pale rule running off the page. It is the same in every row,
+  // as anything crossing an edge is, but there is no print on it to lose.
+  const page = textPage(0);
+  for (let row = 0; row < 20; row += 1) {
+    for (let x = 200; x < 214; x += 1) {
+      const offset = (row * page.width + x) * 4;
+      page.data[offset] = 236;
+      page.data[offset + 1] = 236;
+      page.data[offset + 2] = 236;
+    }
+  }
+
+  assert.equal(occupancyStats(toGray(page)).borderRepeatScore, 0);
+});
+
+/** IJG's luminance quantisation table (JPEG Annex K), in natural order. */
+const JPEG_LUMINANCE = [
+  16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57,
+  69, 56, 14, 17, 22, 29, 51, 87, 80, 62, 18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64,
+  81, 104, 113, 92, 49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99,
+];
+
+/**
+ * The page through a greyscale JPEG round trip at `quality`: 8×8 DCT,
+ * quantised with the IJG table scaled the way libjpeg scales it, and back.
+ * Deterministic, and it rings at glyph edges the way a real encoder does —
+ * differently on every row of a block, so a smeared strip's copies are no
+ * longer equal pixel for pixel.
+ */
+function jpegRoundTrip(page: RgbaImage, quality: number): RgbaImage {
+  const scale = quality < 50 ? 5000 / quality : 200 - 2 * quality;
+  const table = JPEG_LUMINANCE.map((base) =>
+    Math.min(255, Math.max(1, Math.floor((base * scale + 50) / 100))),
+  );
+  const cosines: number[] = [];
+  for (let x = 0; x < 8; x += 1) {
+    for (let u = 0; u < 8; u += 1) {
+      cosines.push(Math.cos(((2 * x + 1) * u * Math.PI) / 16));
+    }
+  }
+  const weight = (u: number) => (u === 0 ? Math.SQRT1_2 : 1);
+  const data = new Uint8ClampedArray(page.data);
+  const block = new Float64Array(64);
+  const coefficients = new Float64Array(64);
+  for (let top = 0; top < page.height; top += 8) {
+    for (let left = 0; left < page.width; left += 8) {
+      // Edge blocks repeat their last row/column, as encoders pad them.
+      for (let y = 0; y < 8; y += 1) {
+        for (let x = 0; x < 8; x += 1) {
+          const py = Math.min(page.height - 1, top + y);
+          const px = Math.min(page.width - 1, left + x);
+          block[y * 8 + x] = page.data[(py * page.width + px) * 4] - 128;
+        }
+      }
+      for (let v = 0; v < 8; v += 1) {
+        for (let u = 0; u < 8; u += 1) {
+          let sum = 0;
+          for (let y = 0; y < 8; y += 1) {
+            for (let x = 0; x < 8; x += 1) {
+              sum += block[y * 8 + x] * cosines[x * 8 + u] * cosines[y * 8 + v];
+            }
+          }
+          const step = table[v * 8 + u];
+          coefficients[v * 8 + u] =
+            Math.round((0.25 * weight(u) * weight(v) * sum) / step) * step;
+        }
+      }
+      for (let y = 0; y < 8 && top + y < page.height; y += 1) {
+        for (let x = 0; x < 8 && left + x < page.width; x += 1) {
+          let sum = 0;
+          for (let v = 0; v < 8; v += 1) {
+            for (let u = 0; u < 8; u += 1) {
+              sum +=
+                weight(u) * weight(v) * coefficients[v * 8 + u] *
+                cosines[x * 8 + u] * cosines[y * 8 + v];
+            }
+          }
+          const offset = ((top + y) * page.width + left + x) * 4;
+          const value = 0.25 * sum + 128;
+          data[offset] = value;
+          data[offset + 1] = value;
+          data[offset + 2] = value;
+        }
+      }
+    }
+  }
+  return { width: page.width, height: page.height, data };
+}
+
+/** The same page printed fainter: paper and ink squeezed towards each other. */
+function faded(page: RgbaImage, paper: number, ink: number): RgbaImage {
+  const data = new Uint8ClampedArray(page.data);
+  for (let offset = 0; offset < data.length; offset += 4) {
+    const value = ink + ((data[offset] - 20) * (paper - ink)) / (255 - 20);
+    data[offset] = value;
+    data[offset + 1] = value;
+    data[offset + 2] = value;
+  }
+  return { width: page.width, height: page.height, data };
+}
+
+test("a smeared strip of text still reads as smeared after JPEG compression", () => {
+  // The evasion case for the changed-pixel condition: the clamped rows start
+  // out as exact copies, but JPEG rings around every glyph edge and rings
+  // differently on each row of an 8×8 block. Crisp print rings hardest. The
+  // copies are still copies — the ringing is small against the print's own
+  // contrast — so the smear must still be seen, and the same page without it
+  // must still read as clean.
+  const cases: Array<[string, (page: RgbaImage) => RgbaImage]> = [
+    ["crisp print", (page) => page],
+    ["grey print", (page) => faded(page, 235, 110)],
+    ["faded print", (page) => faded(page, 220, 150)],
+    ["faint print", (page) => faded(page, 210, 170)],
+  ];
+  for (const [label, tone] of cases) {
+    // Below 60 the strips drift apart on average too, and the mean
+    // condition gives up on them — with or without the changed-pixel one.
+    for (const quality of [95, 85, 75, 70, 60]) {
+      // Row 545 is inside the last line of text, as in the smear test above.
+      const smeared = jpegRoundTrip(tone(withEdgeSmear(textPage(0), 6, 545)), quality);
+      const clean = jpegRoundTrip(tone(textPage(0)), quality);
+
+      assert.equal(
+        occupancyStats(toGray(smeared)).borderRepeatScore,
+        1,
+        `${label} at quality ${quality}: smear not seen`,
+      );
+      assert.equal(
+        occupancyStats(toGray(clean)).borderRepeatScore,
+        0,
+        `${label} at quality ${quality}: clean page read as smeared`,
+      );
+    }
+  }
+});
+
 test("occupancy notices ink that has been pushed off the page", () => {
   const full = occupancyStats(toGray(textPage(0)));
   const blanked = textPage(0);

@@ -114,7 +114,7 @@ function render(results, labels) {
   out.push(REAL_BANNER);
   out.push("");
   out.push(...realHeader(results, labels));
-  out.push(`- decode: \`createImageBitmap(…, { imageOrientation: "from-image" })\` → \`bitmapToCanvas\` (the app's still path, 3000 px cap)`);
+  out.push(`- decode: \`createImageBitmap(…, { imageOrientation: "from-image" })\` → \`bitmapToCanvas\` (the app's still path, full resolution)`);
   out.push(
     `- ML vs classical **disagree** when a matched corner is > ${(DISAGREE_THRESHOLD * 100).toFixed(0)} % of the diagonal apart; ` +
       `**classical wider** = they disagree and classical's quad covers ≥ ${(WIDER_BY * 100).toFixed(0)} points more of the photo`,

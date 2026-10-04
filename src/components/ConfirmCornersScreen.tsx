@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import type { CornerEditor, CornerPoints } from "scanic";
+import type { CornerHandleKey } from "@/lib/flatten";
 import { detectInBlob, localizeCornerHandles } from "@/lib/flatten";
 import { loadScanic } from "@/lib/scanic-runtime";
 import { decodeCanonical, releaseCanvas } from "@/lib/image";
@@ -13,6 +14,8 @@ import {
 } from "@/lib/quad";
 import type { Capture } from "@/lib/capture-intake";
 import { probe, probing, quadMoved } from "@/lib/probe";
+import { maxCornerMovePct } from "@/lib/diagnostics-events";
+import { isUncertain, provenanceByNearest, provenanceDiagnostic, type CornerCheck } from "@/lib/corner-check";
 import { deriveShellTheme, LOUPE_RING } from "@/lib/shell-theme";
 import { fillSlot, flyToSlot } from "@/lib/motion";
 import { useBlobUrl } from "@/hooks/useScanStore";
@@ -20,8 +23,8 @@ import { useAssetUrls, useScanRuntime } from "@/hooks/useScanRuntime";
 import { useDialogChrome } from "@/hooks/useDialogChrome";
 import { useCopy } from "@/components/I18n";
 import { useShell } from "@/components/ShellTheme";
-import { CameraIcon, CheckIcon, SpinnerIcon } from "@/components/icons";
-import { Button, LiveRegion, Meta, Notice } from "@/components/ui";
+import { CameraIcon, CheckIcon, ExpandIcon, SpinnerIcon } from "@/components/icons";
+import { LiveRegion, Meta, Notice } from "@/components/ui";
 
 /**
  * Every capture stops here.
@@ -51,6 +54,21 @@ import { Button, LiveRegion, Meta, Notice } from "@/components/ui";
  *
  * It sits on the themeable shell like every other camera surface, so the
  * outline and the pucks stay legible from `carvão` through to `papel`.
+ *
+ * ## Layout: "C5 · Uma linha de ações" (owner-approved, 2026-09-29)
+ *
+ * The photo fills the screen edge to edge on the shell's deepest ground, and
+ * everything else floats over it: a pill at the top that says the one thing to
+ * do (or, when the photo's check or the detector has a reason, says that
+ * instead), a small "Página N · cantos" under it, and ONE bottom bar of three
+ * cells — Refazer, Confirmar (the filled primary), Foto inteira. The editor's
+ * own box stops short of the pill and the bar, so a handle can never sit under
+ * either of them; on a 3:4 photo that box is taller than the photo needs, and
+ * what shows around it is the same ground, so the page still reads full-bleed.
+ *
+ * The confirmed page flies into the Confirmar cell, which pulses as it lands:
+ * the screen has no gallery slot any more, and the cell the thumb just pressed
+ * is where the eye already is.
  */
 
 interface ConfirmCornersScreenProps {
@@ -74,18 +92,29 @@ export function ConfirmCornersScreen({
 }: ConfirmCornersScreenProps) {
   const hostRef = React.useRef<HTMLDivElement | null>(null);
   const stageRef = React.useRef<HTMLDivElement | null>(null);
-  const slotRef = React.useRef<HTMLDivElement | null>(null);
+  const slotRef = React.useRef<HTMLButtonElement | null>(null);
   const flyerRef = React.useRef<HTMLDivElement | null>(null);
   const editorRef = React.useRef<CornerEditor | null>(null);
 
   const [phase, setPhase] = React.useState<Phase>("loading");
   const [landed, setLanded] = React.useState(false);
+  /** False once the editor opened with no page outline to seed it (its own inset quad). */
+  const [found, setFound] = React.useState(true);
+  /**
+   * The seed has a corner the capture could not see (`lib/corner-check.ts`),
+   * still where it was estimated: the pill says so until the person moves it.
+   */
+  const [estimated, setEstimated] = React.useState(false);
+  /** What the seed's corners were, for the diagnostics stream. */
+  const seedCheckRef = React.useRef<CornerCheck | null>(null);
 
   const copy = useCopy();
   const urls = useAssetUrls();
-  const { reportError } = useScanRuntime();
+  const { reportError, diagnosticsSink } = useScanRuntime();
   const { shell } = useShell();
-  const containerRef = useDialogChrome<HTMLDivElement>(onRetake);
+  // (`retake` is declared below; the dialog's Escape goes through it too.)
+  const retakeRef = React.useRef<() => void>(onRetake);
+  const containerRef = useDialogChrome<HTMLDivElement>(React.useCallback(() => retakeRef.current(), []));
   const previewUrl = useBlobUrl(capture.canonical);
 
   const canonical = capture.canonical;
@@ -93,6 +122,52 @@ export function ConfirmCornersScreen({
   const frameRef = React.useRef<{ width: number; height: number } | null>(null);
   /** What the editor showed at open, so the probe can tell an edit from a nod. */
   const seededRef = React.useRef<NormalizedQuad | null>(null);
+  /** The diagnostics stream (`onDiagnostics`): when the screen opened and what seeded it. */
+  const openedRef = React.useRef<{ at: number; seededFrom: "capture" | "detected" | "editor-default" | null }>({
+    at: performance.now(),
+    seededFrom: null,
+  });
+  const reportAnswer = React.useCallback(
+    (result: "accepted" | "adjusted" | "retake" | "whole-photo", maxMovePct: number | null) => {
+      diagnosticsSink?.emit({
+        type: "confirm",
+        page: pageNumber,
+        result,
+        maxMovePct,
+        ms: performance.now() - openedRef.current.at,
+        seededFrom: openedRef.current.seededFrom,
+        flag: capture.attention ?? null,
+        source: capture.sizes?.source ?? null,
+        canonical:
+          capture.sizes === undefined
+            ? null
+            : {
+                width: capture.sizes.width,
+                height: capture.sizes.height,
+                bytes: capture.sizes.bytes,
+                quality: capture.sizes.quality,
+              },
+        capped: capture.sizes?.capped ?? null,
+        corners: provenanceDiagnostic(seedCheckRef.current),
+      });
+    },
+    [capture.attention, capture.sizes, diagnosticsSink, pageNumber],
+  );
+  /**
+   * Set synchronously by the first answer — Confirmar, Foto inteira, Refazer
+   * or Escape — so no second one can follow it. The buttons are disabled once
+   * the page is flying, but Escape is not a button: without this, Escape
+   * during the flight reported a retake and left the screen while the
+   * pending confirmation went on to save the page.
+   */
+  const answeredRef = React.useRef(false);
+  const retake = React.useCallback(() => {
+    if (answeredRef.current) return;
+    answeredRef.current = true;
+    reportAnswer("retake", null);
+    onRetake();
+  }, [onRetake, reportAnswer]);
+  retakeRef.current = retake;
 
   /**
    * Keep this quad and fly the page into the slot.
@@ -108,6 +183,8 @@ export function ConfirmCornersScreen({
    */
   const land = React.useCallback(
     async (corners: NormalizedQuad | null) => {
+      if (answeredRef.current) return;
+      answeredRef.current = true;
       if (probing()) {
         probe({
           type: "confirm-done",
@@ -119,6 +196,16 @@ export function ConfirmCornersScreen({
               : quadMoved(seededRef.current, corners),
           wholePhoto: corners === FULL_FRAME_QUAD,
         });
+      }
+      if (diagnosticsSink !== null) {
+        const seeded = seededRef.current;
+        const frame = frameRef.current;
+        if (corners === FULL_FRAME_QUAD) reportAnswer("whole-photo", null);
+        else if (seeded === null || corners === null || frame === null) reportAnswer("accepted", null);
+        else {
+          const moved = quadMoved(seeded, corners);
+          reportAnswer(moved ? "adjusted" : "accepted", maxCornerMovePct(seeded, corners, frame.width, frame.height));
+        }
       }
       setPhase("flying");
       await flyToSlot(flyerRef.current, stageRef.current, slotRef.current);
@@ -133,7 +220,7 @@ export function ConfirmCornersScreen({
         path: capture.path,
       });
     },
-    [canonical, capture.gate, capture.path, onConfirm],
+    [canonical, capture.gate, capture.path, diagnosticsSink, onConfirm, reportAnswer],
   );
 
   /** The editor's answer, in the pixel grid it was drawn on. */
@@ -152,6 +239,7 @@ export function ConfirmCornersScreen({
 
   /** A stable per-language object (the dictionary is a module constant). */
   const handleLabels = copy.corners.handles;
+  const estimatedCopy = copy.confirm;
 
   React.useEffect(() => {
     let cancelled = false;
@@ -160,14 +248,15 @@ export function ConfirmCornersScreen({
 
     async function boot(): Promise<void> {
       try {
-        const [canvas, detected, scanic] = await Promise.all([
+        const [canvas, seed, scanic] = await Promise.all([
           decodeCanonical(canonical),
           // The live quad if the viewfinder had one; a fresh detect otherwise.
           capture.corners !== null
-            ? Promise.resolve(capture.corners)
-            : detectInBlob(canonical, urls).then((d) => d?.corners ?? null),
+            ? Promise.resolve({ corners: capture.corners, check: capture.cornerCheck ?? null })
+            : detectInBlob(canonical, urls).then((d) => (d === null ? null : { corners: d.corners, check: d.check ?? null })),
           loadScanic(urls),
         ]);
+        const detected = seed?.corners ?? null;
         const host = hostRef.current;
         if (cancelled || host === null) {
           releaseCanvas(canvas);
@@ -196,11 +285,16 @@ export function ConfirmCornersScreen({
             borderColor: LOUPE_RING,
             crosshairColor: LOUPE_RING,
           },
+          // C5: a light outline and round light pucks over the photo — 28 px
+          // of visible disc, hit at 56 px (the 44 px floor, with room).
+          // No dimming outside the quad: the photo is the ground here, and a
+          // tint over the editor's box would draw that box on the screen.
           theme: {
             accent: theme.accent,
-            edgeColor: theme.accent,
-            edgeWidth: 1.5,
-            handleSize: 24,
+            mask: "rgba(0, 0, 0, 0)",
+            edgeColor: theme.handle,
+            edgeWidth: 2,
+            handleSize: 28,
             handleHit: 56,
             handleColor: theme.handle,
             handleRingColor: theme.accent,
@@ -212,9 +306,22 @@ export function ConfirmCornersScreen({
           },
         });
         editorRef.current = editor;
+        setFound(detected !== null);
         // scanic names its handles in English and offers no option for it.
         localizeCornerHandles(host, handleLabels);
-        if (probing()) {
+        // A corner something lay over, placed where its edges meet: its
+        // handle is marked "estimado" (hollow, dashed, a word under it) and
+        // named so, until the person moves it.
+        const check = detected === null ? null : (seed?.check ?? null);
+        seedCheckRef.current = check;
+        if (check !== null && detected !== null && isUncertain(check)) {
+          const live = editor;
+          markEstimatedHandles(host, check, detected, canvas.width, canvas.height, editor.getCorners(), () => live.getCorners(), handleLabels, estimatedCopy, () => {
+            if (!cancelled) setEstimated(false);
+          });
+          setEstimated(host.querySelector("[data-scan-estimated]") !== null);
+        }
+        if (probing() || diagnosticsSink !== null) {
           // What the user is looking at: the seed, or — with none — the
           // editor's own inset quad, which is what "confirm" would hand back.
           // Read defensively: the instrument must not be able to fail the boot.
@@ -229,6 +336,13 @@ export function ConfirmCornersScreen({
             shown = null;
           }
           seededRef.current = shown;
+          openedRef.current = {
+            at: performance.now(),
+            seededFrom: capture.corners !== null ? "capture" : detected !== null ? "detected" : "editor-default",
+          };
+        }
+        if (probing()) {
+          const shown = seededRef.current;
           probe({
             type: "confirm-open",
             t: performance.now(),
@@ -242,6 +356,7 @@ export function ConfirmCornersScreen({
                   : "editor-default",
             width: canvas.width,
             height: canvas.height,
+            attention: capture.attention ?? null,
           });
         }
         setPhase("ready");
@@ -261,9 +376,26 @@ export function ConfirmCornersScreen({
       editor?.destroy();
       editorRef.current = null;
     };
-  }, [canonical, capture.corners, handleLabels, reportError, shell, urls]);
+  }, [canonical, capture.corners, capture.cornerCheck, diagnosticsSink, estimatedCopy, handleLabels, reportError, shell, urls]);
 
   const busy = phase === "flying";
+
+  /**
+   * The pill's sentence. A reason — the photo's own check, or no outline to
+   * seed the editor with — replaces the instruction rather than stacking under
+   * it: one sentence over the photo, and it is the one that matters.
+   */
+  const reason =
+    capture.attention != null
+      ? copy.confirm.attention[capture.attention]
+      : phase === "ready" && !found
+        ? copy.confirm.notFound
+        : phase === "ready" && estimated
+          ? copy.confirm.estimatedPill
+          : null;
+  // An estimated corner is said even under the photo's own reason: the two
+  // are different asks, and the estimate is the one about these handles.
+  const estimateAside = capture.attention != null && phase === "ready" && estimated ? copy.confirm.estimatedPill : null;
 
   return (
     <div
@@ -271,76 +403,62 @@ export function ConfirmCornersScreen({
       role="dialog"
       aria-modal="true"
       aria-label={copy.confirm.dialogLabel(pageNumber)}
-      className="fixed inset-0 z-50 flex justify-center overscroll-contain bg-shell"
+      className="fixed inset-0 z-50 overflow-hidden overscroll-contain bg-shell-sunken"
     >
-      <div className="flex h-full w-full max-w-[30rem] flex-col overflow-hidden">
-        <header className="flex shrink-0 flex-col gap-1 px-4 pb-2 pt-[max(env(safe-area-inset-top),14px)]">
-          <Meta caps onNight>
-            {copy.common.stepOfThree(1)} · {copy.common.page(pageNumber)}
-          </Meta>
-          <h1 className="font-display text-xl font-semibold text-shell-ink">
-            {copy.confirm.title}
-          </h1>
-          <p className="text-base leading-snug text-shell-ink2">
-            {copy.confirm.help}
-          </p>
-        </header>
-
-        <div className="flex min-h-0 flex-1 flex-col gap-2 px-4 pb-2">
-          {phase === "unavailable" ? (
+      <div className="relative mx-auto h-full w-full max-w-[30rem]">
+        {/* ── the photo, under everything ───────────────────────────────
+            The box stops at the pill above and the bar below (see the
+            file's header): handles are never under a control. */}
+        {phase === "unavailable" ? (
+          <div className="absolute inset-x-4 top-1/2 -translate-y-1/2">
             <Notice tone="night" title={copy.confirm.unavailableTitle}>
               {copy.confirm.unavailableBody}
             </Notice>
-          ) : (
-            <div
-              ref={stageRef}
-              className="relative min-h-0 flex-1 overflow-hidden rounded-md bg-shell-sunken"
-            >
-              <div ref={hostRef} className="h-full w-full" />
-              {phase === "loading" && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-shell-sunken">
-                  <SpinnerIcon size={28} className="text-shell-accent" />
-                  <Meta onNight>{copy.common.openingPhoto}</Meta>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Where the page is going. Muted until it arrives, then sage.
-              The flying picture is the canonical rather than a warp of it: the
-              page is not rendered until it reaches the store, and encoding a
-              throwaway crop for a 42 px slot would be a lossy generation spent
-              on an animation. */}
-          <div className="flex shrink-0 items-center gap-3">
-            <div
-              ref={slotRef}
-              className={
-                "h-[54px] w-[42px] shrink-0 rounded-md border transition-colors duration-300 " +
-                (landed
-                  ? "border-shell-accent bg-shell-dim"
-                  : "border-shell-line bg-transparent")
-              }
-            >
-              {landed && previewUrl !== null && (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={previewUrl}
-                  alt=""
-                  className="h-full w-full rounded-md object-cover"
-                />
-              )}
-            </div>
-            {/* Two static lines: where the page is going, and the one thing
-                about this editor a user would otherwise never discover. Both
-                are always rendered, so nothing shifts when the page lands. */}
-            <div className="flex min-w-0 flex-col gap-0.5">
-              <Meta onNight>{copy.confirm.slotCaption}</Meta>
-              <Meta onNight>{copy.common.magnifyHint}</Meta>
-            </div>
           </div>
+        ) : (
+          <div
+            ref={stageRef}
+            className="absolute inset-x-0 bottom-[calc(max(env(safe-area-inset-bottom),12px)+100px)] top-[calc(max(env(safe-area-inset-top),12px)+80px)]"
+          >
+            <div ref={hostRef} data-scan-confirm-editor="" className="h-full w-full" />
+            {phase === "loading" && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
+                <SpinnerIcon size={28} className="text-shell-accent" />
+                <Meta onNight>{copy.common.openingPhoto}</Meta>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── the pill, and which page this is ──────────────────────────
+            Fixed colours rather than shell tokens: this floats over a
+            photograph, whatever shell the app wears. */}
+        <div className="pointer-events-none absolute inset-x-4 top-[calc(max(env(safe-area-inset-top),12px)+4px)] flex flex-col items-center gap-2">
+          <p
+            // Announced only when it carries a reason: the plain instruction
+            // is the live region's `announceReady` below, said once.
+            role={reason !== null ? "status" : undefined}
+            data-scan-attention={capture.attention ?? undefined}
+            className="max-w-full rounded-full bg-night-deep/[0.72] px-4 py-[9px] text-center text-[15px] font-semibold leading-snug text-warm"
+          >
+            {reason ?? copy.confirm.pill}
+          </p>
+          {estimateAside !== null && (
+            <p
+              role="status"
+              data-scan-estimated-pill=""
+              className="max-w-full rounded-full bg-night-deep/[0.72] px-4 py-[7px] text-center text-[14px] font-semibold leading-snug text-warm"
+            >
+              {estimateAside}
+            </p>
+          )}
+          <p className="text-[13px] font-semibold leading-none text-warm/[0.85] [text-shadow:0_1px_3px_rgba(0,0,0,0.6)]">
+            {copy.confirm.pageCorners(pageNumber)}
+          </p>
         </div>
 
-        <div className="safe-bottom shrink-0 px-4 pt-2">
+        {/* ── one floating bar, three cells ─────────────────────────────── */}
+        <div className="absolute inset-x-4 bottom-[calc(max(env(safe-area-inset-bottom),12px)+8px)]">
           <LiveRegion
             message={
               landed
@@ -350,53 +468,49 @@ export function ConfirmCornersScreen({
                   : ""
             }
           />
-          <div className="flex flex-col gap-2">
-            <Button
-              fullWidth
-              onNight
-              icon={<CheckIcon size={20} />}
+          <div className="grid h-[84px] grid-cols-3 items-center rounded-[24px] bg-night-deep/[0.82] text-warm">
+            <BarCell
+              label={copy.confirm.retakeLabel}
+              icon={<CameraIcon size={22} />}
+              disabled={busy}
+              onClick={retake}
+            >
+              {copy.confirm.retakeCta}
+            </BarCell>
+            {/* The primary, and the flight's landing place. */}
+            <button
+              ref={slotRef}
+              type="button"
+              aria-label={busy ? copy.confirm.savingCta : copy.confirm.confirmLabel}
               disabled={phase !== "ready"}
               onClick={() => {
                 editorRef.current?.confirm();
               }}
+              className={
+                "mx-1 flex h-16 flex-col items-center justify-center gap-1 rounded-[18px] " +
+                "bg-warm text-[15px] font-bold leading-none text-night-deep " +
+                "transition-opacity duration-200 disabled:cursor-not-allowed " +
+                (busy ? "" : "disabled:opacity-45")
+              }
             >
+              {busy ? <SpinnerIcon size={22} /> : <CheckIcon size={22} strokeWidth={2.6} />}
               {busy ? copy.confirm.savingCta : copy.confirm.confirmCta}
-            </Button>
-            <Button
-              variant="secondary"
-              onNight
-              fullWidth
-              icon={<CameraIcon size={20} />}
-              disabled={busy}
-              onClick={onRetake}
-            >
-              {copy.confirm.retakeCta}
-            </Button>
-            {/* The third answer, and deliberately the quietest one: a photo
-                that is already cropped has no corners to find, and dragging
-                four handles onto the picture's own edges is work for nothing.
-                It takes the same path as confirming — same quad shape, same
-                gate reading, same flight into the slot — with the quad the
-                whole frame. 38 px of visible control hit at 44 px through the
-                `::after` box, because this band sits under a `flex-1` photo and
-                every pixel it grows by is a pixel off the thing the user is
-                dragging handles on. */}
-            <button
-              type="button"
+            </button>
+            {/* The third answer: a photo that is already cropped has no
+                corners to find, and dragging four handles onto the picture's
+                own edges is work for nothing. It takes the same path as
+                confirming — same quad shape, same gate reading, same flight —
+                with the quad the whole frame. */}
+            <BarCell
+              label={copy.confirm.wholeLabel}
+              icon={<ExpandIcon size={22} />}
               disabled={phase !== "ready"}
               onClick={() => {
                 void land(FULL_FRAME_QUAD);
               }}
-              className={
-                "relative mx-auto inline-flex h-[38px] items-center justify-center px-3 " +
-                "text-sm leading-none text-shell-ink2 underline underline-offset-4 " +
-                "transition-colors duration-200 hover:text-shell-ink " +
-                "disabled:cursor-not-allowed disabled:no-underline disabled:opacity-40 " +
-                "after:absolute after:-inset-x-2 after:-inset-y-[3px] after:content-['']"
-              }
             >
               {copy.confirm.wholeCta}
-            </button>
+            </BarCell>
           </div>
         </div>
       </div>
@@ -412,10 +526,125 @@ export function ConfirmCornersScreen({
           <img
             src={previewUrl}
             alt=""
-            className="h-full w-full rounded-md object-cover shadow-2xl"
+            // `contain`: the flight starts from the editor's whole box, which
+            // is taller than a 3:4 photo — the picture must not be cropped
+            // to fill it on the way out.
+            className="h-full w-full object-contain"
           />
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Mark the editor's handles whose corner the capture could not see
+ * (inferred or unknown, `lib/corner-check.ts`): `data-scan-estimated` (the
+ * stylesheet draws it hollow and dashed), a badge word under it, and an
+ * accessible name that says so. The
+ * editor may hand its handles back in another order than the quad it was
+ * seeded with, so each handle takes the provenance of the seed corner nearest
+ * it. Moving a handle (pointer or keys) takes its mark away — moving it,
+ * not touching it: a press released where it started leaves the estimate
+ * marked. `onCleared` runs once none is left.
+ */
+/** An estimated handle counts as moved once it is this far (editor px) from where it was put. */
+const ESTIMATE_MOVED_PX = 1;
+
+function markEstimatedHandles(
+  host: HTMLElement,
+  check: CornerCheck,
+  seed: NormalizedQuad,
+  width: number,
+  height: number,
+  shown: CornerPoints,
+  current: () => CornerPoints,
+  labels: Record<CornerHandleKey, string>,
+  words: { estimatedBadge: string; estimatedHandle: (corner: string) => string },
+  onCleared: () => void,
+): void {
+  const normalized: Record<string, { x: number; y: number }> = {};
+  for (const [key, point] of Object.entries(shown)) normalized[key] = { x: point.x / width, y: point.y / height };
+  const provenance = provenanceByNearest(check, seed, normalized);
+  for (const handle of host.querySelectorAll<HTMLElement>("[data-corner]")) {
+    const key = handle.dataset.corner as CornerHandleKey | undefined;
+    if (key === undefined || !(key in labels) || provenance[key] === undefined || provenance[key] === "seen") continue;
+    handle.setAttribute("data-scan-estimated", provenance[key]);
+    handle.setAttribute("aria-label", words.estimatedHandle(labels[key]));
+    // The word under the puck (a child: the handle's ::after is scanic's hit area).
+    const badge = document.createElement("span");
+    badge.setAttribute("data-scan-estimated-badge", "");
+    badge.setAttribute("aria-hidden", "true");
+    badge.textContent = words.estimatedBadge;
+    handle.appendChild(badge);
+    const clear = () => {
+      if (!handle.hasAttribute("data-scan-estimated")) return;
+      handle.removeAttribute("data-scan-estimated");
+      badge.remove();
+      handle.setAttribute("aria-label", labels[key]);
+      if (host.querySelector("[data-scan-estimated]") === null) onCleared();
+    };
+    // Cleared once the handle has actually moved off where it was put.
+    const at = () => {
+      const point = current()[key];
+      return point === undefined ? null : { x: point.x, y: point.y };
+    };
+    let from: { x: number; y: number } | null = null;
+    const settle = () => {
+      const now = at();
+      if (from !== null && now !== null && Math.hypot(now.x - from.x, now.y - from.y) >= ESTIMATE_MOVED_PX) clear();
+      from = null;
+    };
+    handle.addEventListener("pointerdown", () => {
+      from = at();
+      const end = () => {
+        window.removeEventListener("pointerup", end, true);
+        window.removeEventListener("pointercancel", end, true);
+        settle();
+      };
+      window.addEventListener("pointerup", end, true);
+      window.addEventListener("pointercancel", end, true);
+    });
+    handle.addEventListener("keydown", (event) => {
+      if (event.key.startsWith("Arrow") && from === null) from = at();
+    });
+    handle.addEventListener("keyup", (event) => {
+      if (event.key.startsWith("Arrow")) settle();
+    });
+  }
+}
+
+/**
+ * A side cell of the bottom bar: icon over one word, the full cell height as
+ * its target. The accessible name is the full phrase, which contains the word.
+ */
+function BarCell({
+  label,
+  icon,
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  disabled: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      className={
+        "flex h-full min-w-0 flex-col items-center justify-center gap-1.5 rounded-[24px] px-1 " +
+        "text-[13px] font-semibold leading-none text-warm transition-opacity duration-200 " +
+        "disabled:cursor-not-allowed disabled:opacity-40"
+      }
+    >
+      {icon}
+      <span className="max-w-full truncate">{children}</span>
+    </button>
   );
 }

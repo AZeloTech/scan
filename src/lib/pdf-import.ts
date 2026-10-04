@@ -11,8 +11,8 @@
  *
  * What happens to such a file is deliberately unremarkable: **each PDF page is
  * rasterised into exactly the kind of image the rest of the app already
- * handles** — one JPEG, capped at the same 3000 px long edge every camera frame
- * is capped at, encoded once through `lib/encode.ts` — and from there it is a
+ * handles** — one JPEG, rasterized at a {@link PDF_RASTER_LONG_EDGE} px long
+ * edge, encoded once through `lib/encode.ts` — and from there it is a
  * page like any other. There is no second pipeline, no PDF-passthrough mode and
  * no vector path; a PDF that goes in comes out re-drawn, and the app's single
  * honest claim about fidelity ("one lossy generation from the canonical to the
@@ -39,7 +39,7 @@
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { assessBlob } from "@/lib/capture-gate";
 import type { Capture } from "@/lib/capture-intake";
-import { encodeCanvas, MAX_LONG_EDGE, releaseCanvas } from "@/lib/image";
+import { encodeCanvas, releaseCanvas } from "@/lib/image";
 import { ImagePrepError } from "@/lib/image-error";
 import { FULL_FRAME_QUAD } from "@/lib/quad";
 import { pdfjsOptions, type AssetUrls } from "@/lib/runtime-config";
@@ -103,14 +103,17 @@ export async function loadPdfjs(urls: AssetUrls): Promise<typeof import("pdfjs-d
  * pdf.js measures pages in PDF units at scale 1, which is 72 dpi: an A4 is
  * 595×842 pixels there, and a lab report drawn at that size is unreadable and
  * un-OCR-able. So the scale *reaches* for the cap rather than clamping to it —
- * the page is drawn at the largest size the rest of the app is willing to carry
- * (`MAX_LONG_EDGE`), which for a typical A4 works out around 250 dpi, and no
- * larger, because above that a cheap machine starts failing canvas allocations.
+ * the page is drawn at a {@link PDF_RASTER_LONG_EDGE} px long edge, which for
+ * a typical A4 works out around 250 dpi. This is a *rendering* resolution for
+ * a vector page, not a cap on a photo: a camera or picked image keeps every
+ * pixel it has (`lib/image.ts`).
  */
+export const PDF_RASTER_LONG_EDGE = 3000;
+
 export function rasterScale(width: number, height: number): number {
   const longEdge = Math.max(width, height);
   if (longEdge <= 0) return 1;
-  return MAX_LONG_EDGE / longEdge;
+  return PDF_RASTER_LONG_EDGE / longEdge;
 }
 
 /** What one PDF turned into, page by page, as the pages become available. */
@@ -213,7 +216,7 @@ async function rasterisePage(
       context.fillStyle = "#ffffff";
       context.fillRect(0, 0, canvas.width, canvas.height);
       await page.render({ canvas, canvasContext: context, viewport }).promise;
-      // The one encode this page ever gets — q92, the same canonical quality a
+      // The one encode this page ever gets — the same canonical quality a
       // camera frame is written at.
       const canonical = await encodeCanvas(canvas, "canonical");
       const gate = await assessBlob(canonical);

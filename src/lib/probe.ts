@@ -38,9 +38,10 @@
 
 import type { DetectionSource } from "@/lib/flatten";
 import type { NormalizedQuad } from "@/lib/quad";
-import type { SideReport } from "@/lib/refine";
+import type { CornerReport, OcclusionReport, SideReport } from "@/lib/refine";
+import type { ScanDiagnosticsCorners } from "@/types";
 import type { LaneReason } from "@/lib/detect-protocol";
-import type { PaperEvidence } from "@/lib/paper-evidence";
+import type { EvidenceDiagnostic, PaperEvidence } from "@/lib/paper-evidence";
 import type { FrameReading } from "@/lib/hints";
 import { probeListener, probeListenerSetting } from "@/lib/probe-hook";
 
@@ -107,8 +108,12 @@ export interface DetectProbe {
   refineMs?: number | null;
   /** The paper evidence for the drawn quad, when it was read. */
   evidence?: PaperEvidence | null;
+  /** The evidence's verdict and failing clauses, rounded as the diagnostics stream sends them (`evidenceDiagnostic`). */
+  paperWhy?: EvidenceDiagnostic | null;
   /** After this pass the tracked quad counts as a found sheet. */
   locked?: boolean;
+  /** Since the found sheet last read as paper (ms), when one is found. */
+  paperAgeMs?: number | null;
   /** Why an answer that cleared the floor was not taken (a classical quad that failed its sanity checks, say). */
   rejected?: string | null;
   /** The evidence read where the found sheet was held, when this pass looked there. */
@@ -134,6 +139,30 @@ export interface OverlayProbe {
   countdown?: number | null;
   /** The last watch of the camera while the cue was on: its motion score against the confirmed frame (`hooks/useLiveDetect.ts`). */
   watch?: number | null;
+  /** The first thing keeping the ready cue off or auto-capture from firing (the HUD's `why:`), or null. */
+  why?: string | null;
+  /** A photo is being taken: the overlay is frozen on the quad of the tap. */
+  capturing?: boolean;
+  /** The drawn page's corners as the newest measuring pass said (`lib/corner-check.ts`); null with no page or none measured. */
+  corners?: ScanDiagnosticsCorners | null;
+  /** Another sheet overlaps the drawn page. */
+  separate?: boolean | null;
+}
+
+/** Auto-capture fired: what the page's corners were said to be at that moment. */
+export interface AutoFireProbe {
+  type: "auto-fire";
+  t: number;
+  corners: ScanDiagnosticsCorners | null;
+  separate: boolean | null;
+  /**
+   * Where the fire's time went (`hooks/useLiveDetect.ts` `FireMarks`):
+   * absolute probe times of each ready condition's last onset, the cue, the
+   * countdown's start and end, and the final confirming frame.
+   */
+  timeline?: Record<string, number | null> | null;
+  /** The loop's interval at the fire. */
+  intervalMs?: number;
 }
 
 /** A chip or notice over the viewfinder appearing (`shown`) or going away. */
@@ -161,13 +190,30 @@ export interface CaptureProbe {
   /** The still that arrived, whether or not it was used. */
   stillW: number | null;
   stillH: number | null;
+  /**
+   * The part of the still that became the page, in the still's own upright
+   * pixels (`lib/still-capture.ts` `stillCropFor`) — the preview's field of
+   * view cut out of a sensor-native photo. `null` when the still was not used.
+   */
+  stillCrop?: { x: number; y: number; width: number; height: number } | null;
+  /** Why the still did not become the page (`StillFallbackReason`), or null. */
+  stillReason?: string | null;
   previewW: number;
   previewH: number;
   /**
-   * The part of the preview the user could see, after object-cover — as
-   * fractions of the preview frame. `null` when it could not be measured.
+   * The part of the preview the user could see (`lib/visible-region.ts`: the
+   * fit, the viewport and the layout's opaque bands) — as fractions of the
+   * preview frame. `null` when it could not be measured.
    */
   visible: { x: number; y: number; width: number; height: number } | null;
+  /** The photo's check before the confirm screen (`lib/still-check.ts`): why it is flagged, or null. */
+  attention?: "no-page" | "corner-outside" | "moved" | "unverified" | "low-resolution" | null;
+  /**
+   * The photo registered against the viewfinder's picture at the tap
+   * (`lib/still-register.ts`) — only when the still pipeline's photo became
+   * the page and both pictures had structure to register.
+   */
+  register?: { fovScale: number; shiftX: number; shiftY: number; score: number; overlap: number; ms: number } | null;
   /** The canvas that became the page. */
   frameW: number;
   frameH: number;
@@ -291,6 +337,9 @@ export interface RefineProbe {
   reason: string;
   /** TL→TR, TR→BR, BR→BL, BL→TL. */
   sides: SideReport[];
+  /** Each corner's provenance, TL, TR, BR, BL (`lib/refine.ts`). */
+  corners: CornerReport[];
+  occlusion: OcclusionReport;
   ms: number;
   /** The image the corners are fractions of. */
   width: number;
@@ -323,6 +372,8 @@ export interface ConfirmOpenProbe {
   seededFrom: "capture" | "detected" | "editor-default";
   width: number;
   height: number;
+  /** The flag the screen opened with (`Capture.attention`), or null. */
+  attention?: "no-page" | "corner-outside" | "moved" | "unverified" | "low-resolution" | null;
 }
 
 /** The user left the confirm screen with these corners. */
@@ -348,6 +399,7 @@ export type ProbeEvent =
   | GrabProbe
   | CaptureDetectProbe
   | RefineProbe
+  | AutoFireProbe
   | StillProbe
   | ConfirmOpenProbe
   | ConfirmDoneProbe

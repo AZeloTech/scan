@@ -11,6 +11,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { scoreDetection } from "../metrics.mjs";
 import { renderDetectorReport, summarizeDetector } from "../report.mjs";
+import { renderOcclusionSection, scoreOcclusion, scoreProvenance } from "./detector-occlusion.mjs";
 
 /** Tiles per contact sheet. */
 const SHEET_TILES = 30;
@@ -90,7 +91,20 @@ export async function runDetectorSuite({ page, throttle, options, outDir, log, e
           environment.mlLatchedOff = true;
         }
         const verdictQuad = det.accepted ? det.quad : null;
+        // The live loop's paper evidence on the live variant's own quad (what
+        // "sheet found" would say about it): kept per row, summarised by the
+        // report's paper line — the families a change to the rules must not
+        // lose. An accepted quad only (one the loop would track); a single
+        // still, with no covered-corner input and no lock: what the lock does
+        // with these readings is the session suite's (`paperLock`).
+        let paper;
+        if (variant === "ml+live" && det.quad && det.accepted) {
+          const [read] = await page.evaluate(([id, q]) => window.__bench.evidence(id, [q]), [scene.id, det.quad]);
+          const e = read?.evidence ?? null;
+          paper = e === null ? null : { ok: e.ok, sidesSupported: e.sidesSupported, sidesKnown: e.sidesKnown };
+        }
         rows.push({
+          ...(paper === undefined ? {} : { paper }),
           family,
           seed,
           sceneId: scene.id,
@@ -100,6 +114,17 @@ export async function runDetectorSuite({ page, throttle, options, outDir, log, e
           det,
           score: scoreDetection(verdictQuad, gt.quad, gt.frame, { content: gt.content ?? null }),
           rawScore: det.quad === null ? null : scoreDetection(det.quad, gt.quad, gt.frame, { content: gt.content ?? null }),
+          // Only where something lies over the page (F8): the covered corner, the occluder.
+          ...(() => {
+            const occlusion = scoreOcclusion(verdictQuad, gt);
+            return occlusion === null ? {} : { occlusion };
+          })(),
+          // Corner provenance (5d+ phase B), wherever the variant refined its answer.
+          ...(() => {
+            const refined = det.refine ?? det.liveRefine ?? null;
+            const provenance = scoreProvenance(verdictQuad, gt, refined?.corners ?? null, refined?.separate ?? false, refined?.basis ?? null);
+            return provenance === null ? {} : { provenance };
+          })(),
         });
       }
       await page.evaluate((id) => window.__bench.release(id), scene.id);
@@ -146,12 +171,41 @@ export async function runDetectorSuite({ page, throttle, options, outDir, log, e
   await page.evaluate(() => window.__bench.reset());
 
   const summary = summarizeDetector(rows);
+  const paper = paperLine(rows);
+  if (paper !== null) log(`detector: ${paper}`);
   return {
     synthetic: true,
     rows,
     scenes,
     sheets,
     summary,
-    render: renderDetectorReport,
+    render: (results) => {
+      const line = paperLine(results.rows);
+      return renderDetectorReport(results) + renderOcclusionSection(results.rows) + (line === null ? "" : `\n## Paper evidence\n\n${line}\n`);
+    },
   };
+}
+
+/**
+ * The paper evidence on the `ml+live` variant's quads, per family: of the
+ * scenes with a page where that quad is right (not a wrong crop), how many
+ * read as paper; of the scenes without one, how many the evidence passed.
+ */
+export function paperLine(rows) {
+  const live = rows.filter((r) => r.variant === "ml+live" && r.paper);
+  if (live.length === 0) return null;
+  const by = {};
+  for (const r of live) {
+    const o = (by[r.family] ??= { pages: 0, paper: 0, none: 0, passed: 0 });
+    if (r.score.hasTruth) {
+      if (r.rawScore === null || r.rawScore.wrongCrop) continue;
+      o.pages += 1;
+      if (r.paper.ok) o.paper += 1;
+    } else {
+      o.none += 1;
+      if (r.paper.ok) o.passed += 1;
+    }
+  }
+  const parts = Object.entries(by).map(([f, o]) => `${f} ${o.pages > 0 ? `${o.paper}/${o.pages} pages paper` : ""}${o.none > 0 ? `${o.pages > 0 ? ", " : ""}${o.passed}/${o.none} page-less passed` : ""}`);
+  return `paper evidence on the live quads (ml+live, accepted, right crops; one still each, no lock): ${parts.join(" · ")}`;
 }

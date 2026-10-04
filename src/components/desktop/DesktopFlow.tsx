@@ -16,6 +16,7 @@ import type { AssetUrls } from "@/lib/runtime-config";
 import type { ScanStore } from "@/lib/scan-store";
 import { useScanStore, useStore } from "@/hooks/useScanStore";
 import { useScanRuntime } from "@/hooks/useScanRuntime";
+import { useGeneratePdf } from "@/hooks/useGeneratePdf";
 import { useCancelOnEscape } from "@/components/ui";
 import type { PageTile } from "@/lib/page-tiles";
 import { useCopy } from "@/components/I18n";
@@ -56,6 +57,7 @@ export function DesktopFlow() {
   const { session, tiles, build } = useScanStore();
   const [step, setStep] = React.useState<Step>("escolher");
   const pickerRef = React.useRef<DesktopPickerHandle>(null);
+  const generatePdf = useGeneratePdf();
 
   // Escape asks the host to close. Sheets inside the steps take it first.
   useCancelOnEscape();
@@ -176,7 +178,12 @@ export function DesktopFlow() {
           onAdjusted={noteAdjusted}
           onSelect={setCursor}
           onAddFiles={() => pickerRef.current?.pickFiles()}
-          onContinue={() => goto("gerar")}
+          // "Gerar PDF" starts the file with step 3's defaults and moves to
+          // step 3, which shows it being made — and the form, if it fails.
+          onGenerate={() => {
+            generatePdf();
+            goto("gerar");
+          }}
         />
       )}
 

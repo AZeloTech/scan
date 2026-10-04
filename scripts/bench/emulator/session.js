@@ -24,8 +24,9 @@
 
 import { rngFor } from "./prng.js";
 import { buildScene, groundTruth } from "./scene.js";
-import { cameraFromPose, inFrame, project, projectRect } from "./camera.js";
-import { darkGranite, fabric, framingCamera, lightWood, page, paleTable, partialCamera } from "./kit.js";
+import { aimAt, cameraFromPose, inFrame, project, projectRect } from "./camera.js";
+import { darkGranite, fabric, framingCamera, lightWood, page, paleTable, partialCamera, rectCentre } from "./kit.js";
+import { frameSize } from "./scene.js";
 import { SKIN_TONES } from "./effects.js";
 import { clipPolygon, polygonArea } from "../metrics.mjs";
 
@@ -231,10 +232,9 @@ function amplitudeAt(keys, t) {
   return lerp(a.amplitude, b.amplitude, f);
 }
 
-/** The camera pose at `t`: keyframes, then the hand's tremor on top. */
+/** The camera pose at `t`: keyframes, the scripted user following "Aproxime" ({@link followHint}), then the hand's tremor on top. */
 export function poseAt(script, t) {
-  const [a, b, f] = bracket(script.camera, t);
-  const pose = lerpPose(a.pose, b.pose, f);
+  const pose = followedPose(script, t, keyedPose(script, t));
   const amplitude = amplitudeAt(script.tremor.keys, t);
   if (amplitude <= 0) return pose;
   const [nx, ny, nr] = tremorAt(script.tremor.model, t);
@@ -246,6 +246,338 @@ export function poseAt(script, t) {
     target: [pose.target[0] + nx * mm, pose.target[1] + ny * mm],
     roll: pose.roll + nr * amplitude * 40,
   };
+}
+
+/** The keyframed pose at `t`, before the user's own corrections and the tremor. */
+function keyedPose(script, t) {
+  const [a, b, f] = bracket(script.camera, t);
+  return lerpPose(a.pose, b.pose, f);
+}
+
+/* ── the scripted user frames the page, and follows "Aproxime" ──────────── */
+
+/**
+ * The app's "too far" line, which the scripted user follows (`--follow`):
+ * `fill` is the app's rule now (`FILL_ENTER` / `FILL_EXIT`, `src/lib/guidance.ts`
+ * — the page's reach along the view's limiting axis); `area` the rule before
+ * it (`AREA_ENTER` / `AREA_EXIT`: its share of the view's area). Mirrored
+ * here because the emulator is plain JS; `session.test.mjs` holds the `fill`
+ * numbers to the source.
+ */
+export const FOLLOW_RULES = {
+  fill: { kind: "fill", enter: 0.7, exit: 0.75 },
+  area: { kind: "area", enter: 0.14, exit: 0.17 },
+};
+
+/** The rule a run follows unless `--follow` says otherwise: the app's own. */
+export const DEFAULT_FOLLOW = FOLLOW_RULES.fill;
+
+/**
+ * How much of the view a person fills with the page when nothing asks for
+ * more (`fill`): the owner's field run on a Galaxy S25 Ultra under the old
+ * area rule put two pages across 54 % and 45 % of the still's 9:16 crop —
+ * 66 % and 55 % of the narrower visible region.
+ */
+export const NATURAL_FILL = [0.55, 0.72];
+
+/**
+ * `--follow fill|area|off|fill:ENTER:EXIT|area:ENTER:EXIT` as a rule, or null
+ * (`off`: the scripted user holds where the script says, whatever the hint).
+ */
+export function parseFollow(text) {
+  if (text === undefined || text === null || text === "") return DEFAULT_FOLLOW;
+  if (text === "off") return null;
+  // `…@E`: an imperfect person, who aims the page off the middle by up to E of the view (each axis).
+  const [ruleText, aimText] = text.split("@");
+  const aimError = aimText === undefined ? 0 : Number(aimText);
+  if (!(aimError >= 0 && aimError < 0.3)) throw new Error(`--follow ${text}: expected an aim error 0 ≤ E < 0.3 after @`);
+  const withAim = (rule) => (aimError > 0 ? { ...rule, aimError } : rule);
+  const [kind, enter, exit] = ruleText.split(":");
+  const base = FOLLOW_RULES[kind];
+  if (base === undefined) throw new Error(`--follow ${text}: expected fill, area or off (optionally kind:enter:exit, and @aim-error)`);
+  if (enter === undefined) return withAim(base);
+  const rule = { kind, enter: Number(enter), exit: Number(exit ?? enter) };
+  if (!(rule.enter > 0 && rule.exit >= rule.enter && rule.exit < 1)) throw new Error(`--follow ${text}: expected 0 < enter <= exit < 1`);
+  return withAim(rule);
+}
+
+/** A rule's measure of a page (`points`: its corners in fractions of the visible region): its fill (bounding box, clipped) or its clipped area. */
+export function framingMeasure(kind, points) {
+  if (kind === "area") {
+    const inside = clipPolygon(points, [
+      [0, 0],
+      [1, 0],
+      [1, 1],
+      [0, 1],
+    ]);
+    return inside.length >= 3 ? polygonArea(inside) : 0;
+  }
+  const clip = (v) => Math.min(1, Math.max(0, v));
+  const xs = points.map(([x]) => clip(x));
+  const ys = points.map(([, y]) => clip(y));
+  return Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+}
+
+/** Where a layer's corners fall from `pose`, in fractions of `region` (frame fractions). */
+function inRegion(pose, frame, layer, region) {
+  const camera = cameraFromPose(pose, frame);
+  return projectRect(camera, layer).map((p) => [(p.u / frame.width - region.x) / region.width, (p.v / frame.height - region.y) / region.height]);
+}
+
+/** "Until the end" in a follow segment, as plain JSON (Infinity is not). */
+const FOREVER = 1e9;
+
+/** The natural framing settles over this long before a hold starts (the camera is still arriving). */
+const NATURAL_RAMP_MS = 600;
+
+/**
+ * The scripted user keeps the page's corners at least this far (share of the
+ * view) from its edge, over and above the tremor's swings: between
+ * "Afaste um pouco"'s enter and exit lines (`BORDER_ENTER` / `BORDER_EXIT`).
+ */
+const FOLLOW_EDGE = 0.02;
+
+/** How far into an approach the user is at `t`: 0 before it, 1 while there, eased in between. */
+function followProgress(segment, t) {
+  if (t <= segment.reactAt || t >= segment.releaseTo) return 0;
+  if (t < segment.arriveAt) return smootherstep((t - segment.reactAt) / (segment.arriveAt - segment.reactAt));
+  if (t <= segment.releaseFrom) return 1;
+  return 1 - smootherstep((t - segment.releaseFrom) / (segment.releaseTo - segment.releaseFrom));
+}
+
+/** The natural framing's distance scale at `t` (log-interpolated between its keys; 1 before the first). */
+function naturalScaleAt(keys, t) {
+  if (keys.length === 0 || t <= keys[0].t) return 1;
+  const [a, b, f] = bracket(keys, t);
+  return Math.exp(lerp(Math.log(a.scale), Math.log(b.scale), f));
+}
+
+/** The middle of a layer's outline from `pose`, in pixels (what a person centres on screen). */
+function outlineMiddle(pose, frame, layer) {
+  const pts = projectRect(cameraFromPose(pose, frame), layer);
+  const us = pts.map((p) => p.u);
+  const vs = pts.map((p) => p.v);
+  return [(Math.min(...us) + Math.max(...us)) / 2, (Math.min(...vs) + Math.max(...vs)) / 2];
+}
+
+/**
+ * A pose `progress` of the way to the user's corrected one: `scale`^progress
+ * the distance, and the page's outline moved that far towards the middle of
+ * `region` — what the person frames in (people centre what they see, not the
+ * page's own middle).
+ */
+function correctedPose(pose, frame, layer, region, scale, progress) {
+  if (progress <= 0) return pose;
+  const centre = rectCentre(layer);
+  const start = outlineMiddle(pose, frame, layer);
+  const goal = [(region.x + region.width / 2) * frame.width, (region.y + region.height / 2) * frame.height];
+  const want = [lerp(start[0], goal[0], progress), lerp(start[1], goal[1], progress)];
+  const scaled = { ...pose, distance: pose.distance * scale ** progress };
+  const at = project(cameraFromPose(pose, frame), centre);
+  let pixel = [at.u + want[0] - start[0], at.v + want[1] - start[1]];
+  let out = aimAt(scaled, frame, centre, pixel);
+  for (let i = 0; i < 3; i += 1) {
+    const middle = outlineMiddle(out, frame, layer);
+    if (Math.hypot(want[0] - middle[0], want[1] - middle[1]) < 0.5) break;
+    pixel = [pixel[0] + want[0] - middle[0], pixel[1] + want[1] - middle[1]];
+    out = aimAt(scaled, frame, centre, pixel);
+  }
+  return out;
+}
+
+/** The keyed pose at `t` at the user's own framing (`script.follow.natural`). */
+function naturalPose(script, t, pose) {
+  const keys = script.follow?.natural ?? [];
+  const scale = naturalScaleAt(keys, t);
+  return scale === 1 ? pose : { ...pose, distance: pose.distance * scale };
+}
+
+/** The keyed pose with the user's framing and corrections at `t` applied (`script.follow`). */
+function followedPose(script, t, keyed) {
+  const follow = script.follow;
+  if (follow === undefined || follow === null) return keyed;
+  const pose = naturalPose(script, t, keyed);
+  for (const segment of follow.segments) {
+    const progress = followProgress(segment, t);
+    if (progress <= 0) continue;
+    const layer = layerAt(script.scene.layers[segment.layer], segment.layer, script, t);
+    return correctedPose(pose, script.frame, layer, segment.aim ?? follow.aim ?? follow.region, segment.scale, progress);
+  }
+  return pose;
+}
+
+/**
+ * The scripted user frames a page as people do, and follows the app's
+ * "Aproxime" as people do.
+ *
+ * **Their own framing.** In every framed hold (`marks.ready` windows, else
+ * `holdFrom…holdTo` and `lockFrom2…holdTo2`; a session with neither but
+ * `marks.stable` — a page returned to again and again, `whip-off-auto` —
+ * holds from each of those) the page is held at the size people hold it
+ * at when nothing asks for more ({@link NATURAL_FILL}, seeded per hold —
+ * the script's own distance scaled to it, settling over the
+ * {@link NATURAL_RAMP_MS} before the hold, easing between holds, kept after
+ * the last; never so close that a corner crowds the edge).
+ *
+ * **Following the hint.** A hold whose page the app would call too far
+ * (`rule`, measured in the app's visible `region` at the hold's start —
+ * under its exit line: a page that came in from afar arrives with the hint
+ * already up, and it stays up until the exit line) gets an approach: the hint comes up (the lock, then its 300 ms), the person
+ * reacts (0.7–1.2 s after the hold starts, all told) and comes in over
+ * 0.7–1.2 s, re-centring the page, until it is a little past the line the
+ * hint clears at (exit × 1.02–1.08: the hint lags the move, so people
+ * overshoot) — or, with a shaking hand, as close as its swings leave the
+ * corners clear of the edge — and holds there; between two holds they ease
+ * back (the next page is elsewhere). A practised user (the `stable` holds)
+ * is there from the moment the page arrives.
+ *
+ * The marks move with the user: a ready window and a `stable` moment inside
+ * an approach start where it ends; `marks.follow` records each approach for
+ * the scorer. Under a rule no natural framing breaks (`area`, before) there
+ * is no approach — the hint never asks.
+ */
+export function followHint(script, rule, region) {
+  if (rule === null || rule === undefined) return script;
+  const marks = script.marks ?? {};
+  const view = region ?? script.frame.view ?? { x: 0, y: 0, width: 1, height: 1 };
+  // Where the person centres the page: the part of the screen they frame in
+  // (below the hint, above the controls), else the app's region.
+  const aim = script.frame.view ?? view;
+  const frame = script.frame;
+  const windows =
+    (marks.ready ?? []).length > 0
+      ? marks.ready.map((w) => ({ from: w.from, to: w.to }))
+      : [
+          ...(marks.holdFrom !== undefined && marks.holdTo !== undefined ? [{ from: marks.holdFrom, to: marks.holdTo }] : []),
+          ...(marks.lockFrom2 !== undefined && marks.holdTo2 !== undefined ? [{ from: marks.lockFrom2, to: marks.holdTo2 }] : []),
+        ];
+  const practised = windows.length === 0 && (marks.stable ?? []).length > 0 && marks.pageless !== true;
+  const spans = practised ? practisedSpans(script, marks.stable) : windows.sort((a, b) => a.from - b.from);
+  if (spans.length === 0) return script;
+  const roomAt = (t) => {
+    // A shaking hand keeps its distance: the corners stay clear of the
+    // cut-off line by the tremor's swings (2 × its RMS) on each axis.
+    const peak = 2 * amplitudeAt(script.tremor.keys, t);
+    return [FOLLOW_EDGE + (peak * frame.height) / (view.width * frame.width), FOLLOW_EDGE + peak / view.height];
+  };
+  const roomy = (points, room) => points.every(([x, y]) => x >= room[0] && x <= 1 - room[0] && y >= room[1] && y <= 1 - room[1]);
+  // Bisect a distance scale on [0.25, 4] for the boundary of `closerOk`
+  // (true for every scale at or above the answer).
+  const boundary = (closerOk) => {
+    let lo = Math.log(0.25);
+    let hi = Math.log(4);
+    if (closerOk(Math.exp(lo))) return Math.exp(lo);
+    if (!closerOk(Math.exp(hi))) return Math.exp(hi);
+    for (let i = 0; i < 40; i += 1) {
+      const mid = (lo + hi) / 2;
+      if (closerOk(Math.exp(mid))) hi = mid;
+      else lo = mid;
+    }
+    return Math.exp(hi);
+  };
+  // 1. The user's own framing of each hold.
+  const natural = [];
+  const pages = spans.map((span, index) => {
+    const pageIndex = pageLayerIndex(script, primaryAt(script, span.from));
+    if (pageIndex === null) return null;
+    const layer = layerAt(script.scene.layers[pageIndex], pageIndex, script, span.from);
+    const keyed = keyedPose(script, span.from);
+    const scripted = framingMeasure("fill", inRegion(keyed, frame, layer, view));
+    const rng = rngFor("frame", script.id, script.seed, index);
+    const want = rng.range(NATURAL_FILL[0], NATURAL_FILL[1]);
+    const room = roomAt(span.from);
+    const fillAt = (scale) => framingMeasure("fill", inRegion({ ...keyed, distance: keyed.distance * scale }, frame, layer, view));
+    // The farthest scale that still fills `want`, kept back to where the corners have room.
+    const toWant = boundary((scale) => fillAt(scale) <= want);
+    const toRoom = boundary((scale) => roomy(inRegion({ ...keyed, distance: keyed.distance * scale }, frame, layer, view), room));
+    const scale = Math.max(toWant, toRoom);
+    natural.push({ t: Math.max(0, span.from - NATURAL_RAMP_MS), scale }, { t: span.to, scale });
+    return { pageIndex, layer, scripted, want, scale };
+  });
+  natural.sort((a, b) => a.t - b.t);
+  const withNatural = { ...script, follow: { rule, region: view, aim, natural, segments: [] } };
+  // 2. Following the hint, from that framing.
+  const segments = [];
+  const record = [];
+  spans.forEach((span, index) => {
+    const page = pages[index];
+    if (page === null) return;
+    const { pageIndex, layer } = page;
+    const pose = naturalPose(withNatural, span.from, keyedPose(script, span.from));
+    const before = framingMeasure(rule.kind, inRegion(pose, frame, layer, view));
+    const rng = rngFor("follow", script.id, script.seed, index);
+    const overshoot = rule.kind === "fill" ? rng.range(1.02, 1.08) : rng.range(1.1, 1.3);
+    const reactAt = practised ? span.from - 250 : span.from + rng.range(700, 1200);
+    const arriveAt = practised ? span.from : reactAt + rng.range(700, 1200);
+    const base = { from: span.from, to: span.to, page: pageIndex, scripted: page.scripted, natural: framingMeasure("fill", inRegion(pose, frame, layer, view)), before };
+    if (before >= rule.exit || (!practised && arriveAt >= span.to)) {
+      record.push({ ...base, approached: false });
+      return;
+    }
+    const target = rule.kind === "fill" ? Math.min(0.92, rule.exit * overshoot) : rule.exit * overshoot;
+    // An imperfect person (`rule.aimError`) re-centres on a point off the middle, per hold.
+    const err = rule.aimError ?? 0;
+    const holdAim =
+      err > 0
+        ? { ...aim, x: aim.x + rng.range(-err, err) * aim.width, y: aim.y + rng.range(-err, err) * aim.height }
+        : aim;
+    const pointsAt = (scale) => inRegion(correctedPose(pose, frame, layer, holdAim, scale, 1), frame, layer, view);
+    const measureAt = (scale) => framingMeasure(rule.kind, pointsAt(scale));
+    const room = roomAt(arriveAt);
+    const scale = Math.min(1, Math.max(boundary((k) => measureAt(k) <= target), boundary((k) => roomy(pointsAt(k), room))));
+    if (measureAt(scale) <= before + 0.01) {
+      record.push({ ...base, approached: false });
+      return;
+    }
+    const next = spans[index + 1];
+    const releaseFrom = practised ? span.leaveAt : next === undefined ? FOREVER : span.to;
+    const releaseTo = practised ? span.leaveAt + 200 : next === undefined ? FOREVER : Math.max(span.to + 1, next.from - 1);
+    segments.push({ layer: pageIndex, reactAt, arriveAt, releaseFrom, releaseTo, scale, ...(holdAim === aim ? {} : { aim: holdAim }) });
+    record.push({ ...base, approached: true, reactAt, arriveAt, target, after: measureAt(scale), practised });
+  });
+  const moved = (t) => {
+    const r = record.find((f) => f.approached && !f.practised && t >= f.from && t < f.arriveAt);
+    return r === undefined ? t : r.arriveAt;
+  };
+  return {
+    ...script,
+    follow: { rule, region: view, aim, natural, segments },
+    marks: {
+      ...marks,
+      follow: record,
+      ...(marks.ready === undefined ? {} : { ready: marks.ready.map((w) => ({ ...w, from: moved(w.from) })) }),
+      ...(marks.stable === undefined ? {} : { stable: marks.stable.map(moved) }),
+    },
+  };
+}
+
+/** The layer index of the scene's `page`-th page (its document layers in order), or null. */
+function pageLayerIndex(script, page) {
+  let seen = -1;
+  for (let i = 0; i < script.scene.layers.length; i += 1) {
+    if (script.scene.layers[i].document === undefined) continue;
+    seen += 1;
+    if (seen === page) return i;
+  }
+  return null;
+}
+
+/** A practised user's spans: from each `stable` moment to when the camera next leaves that pose. */
+function practisedSpans(script, stable) {
+  return stable.map((from) => {
+    const keys = script.camera;
+    const at = keys.findIndex((k) => k.t >= from);
+    let leaveAt = keys[keys.length - 1].t;
+    if (at >= 0) {
+      for (let i = at; i < keys.length - 1; i += 1) {
+        if (keys[i + 1].pose !== keys[at].pose) {
+          leaveAt = keys[i].t;
+          break;
+        }
+      }
+    }
+    return { from, to: leaveAt, leaveAt };
+  });
 }
 
 /** A layer's centre and rotation at `t`, when the script moves it. */
@@ -395,8 +727,20 @@ export function buildSession(id, seed, options = {}) {
     throw new Error(`unknown session "${id}" (known: ${sessionIds().join(", ")})`);
   }
   const rng = rngFor("session", id, seed);
+  // `view`: the part of the frame the layout under test shows (frame
+  // fractions) — the scripted user frames the page in it, as a person aims
+  // by the screen (`--frame-by screen`). Without it, the whole frame.
+  // A measured view carries the app's whole visible region alongside
+  // (`region`, untrimmed): what the app judges "Aproxime" in.
+  const { region: viewRegion = null, ...viewRect } = options.view ?? {};
+  const size = options.view ? { ...frameSize(options.size ?? "portrait"), view: viewRect } : (options.size ?? "portrait");
   // `family` overrides the scene family a session would pick (the playground's choice).
-  const built = session.build(rng, { seed, size: options.size ?? "portrait", family: options.family ?? null });
+  // `follow` / `region`: the rule the user answers to and where the app
+  // judges it — a session built around the "too far" line (`hover-far`)
+  // swings across the line under test.
+  const follow = options.follow === undefined ? DEFAULT_FOLLOW : options.follow;
+  const region = options.region ?? viewRegion;
+  const built = session.build(rng, { seed, size, family: options.family ?? null, follow, region });
   const script = {
     id,
     seed,
@@ -412,7 +756,10 @@ export function buildSession(id, seed, options = {}) {
   script.frame = script.scene.frame;
   script.tremor = { model: tremorModel(rng.fork("tremor").seed32()), keys: built.tremor };
   script.still = { ...DEFAULT_STILL, ...(built.still ?? {}) };
-  return script;
+  // The user follows "Aproxime" (`options.follow`: a rule, null to hold where
+  // the script says; absent, the app's own), judged in the app's visible
+  // region (`options.region`; absent, the part of the frame the user frames in).
+  return followHint(script, follow, region);
 }
 
 /** A pose the user starts from: farther, leaning more, aimed off to one side. */
@@ -435,11 +782,16 @@ function farPose(rng, rest, { distance = [1.7, 2.3], lean = [8, 18], off = [60, 
  */
 function withMargin(pose, frame, layer, margin) {
   const px = margin * Math.min(frame.width, frame.height);
+  // Framed by the screen, backing off keeps the page where the person had it
+  // on screen (backing off along the axis would slide it to the frame's centre).
+  const centre = frame.view ? rectCentre(layer) : null;
+  const at = centre === null ? null : project(cameraFromPose(pose, frame), centre);
   let out = pose;
   for (let step = 0; step < 80; step += 1) {
     const camera = cameraFromPose(out, frame);
     if (projectRect(camera, layer).every((p) => inFrame(camera, p, px))) return out;
     out = { ...out, distance: out.distance * 1.02 };
+    if (at !== null) out = aimAt(out, frame, centre, [at.u, at.v]);
   }
   return out;
 }
@@ -769,6 +1121,30 @@ registerSession({
       ],
       marks: { lockFrom: 0, holdFrom: 1000, holdTo: 19950, tapAt: 20000, sustainedFrom: 0, sustainedTo: 75000 },
       remounts: 3,
+    };
+  },
+});
+
+/**
+ * Not a scan: a still, page-less desk the bench opens the flow on to measure
+ * what the layout under test shows of the frame (`--frame-by screen`) before
+ * it builds the sessions that frame a page in it.
+ */
+registerSession({
+  id: "view-probe",
+  title: "measure the visible region",
+  inDefault: false,
+  describe: "an empty desk, held still for a moment: the runner reads the layout's visible region and the controls over it",
+  build(rng, { seed, size }) {
+    const scene = buildScene("F6", seed, { size });
+    return {
+      scene,
+      duration: 6000,
+      loop: { frames: 2 },
+      camera: [{ t: 0, pose: scene.camera }],
+      tremor: [{ t: 0, amplitude: 0 }],
+      actions: [],
+      marks: {},
     };
   },
 });
@@ -1603,6 +1979,43 @@ registerSession({
   },
 });
 
+registerSession({
+  id: "present-auto",
+  title: "a page brought into view and held, auto-capture on",
+  inDefault: false,
+  group: "guidance",
+  describe:
+    "the camera starts over the desk beside the page; at 1.5 s it swings onto the page in 0.6 s and the person holds it — framing it as people do and following the hints — for 10.4 s; auto-capture on, no shutter: when it fires and where the time went (5b)",
+  build(rng, { seed, size, family }) {
+    const { scene, found } = roomyScene(seed, size, family, 0.06);
+    const rest = scene.camera;
+    const pan = rng.fork("pan");
+    const bearing = pan.range(0, Math.PI * 2);
+    const away = Math.max(...found.layer.size) * pan.range(1.8, 2.3);
+    const off = { ...rest, target: [rest.target[0] + Math.cos(bearing) * away, rest.target[1] + Math.sin(bearing) * away] };
+    const presentAt = 2100;
+    return {
+      scene,
+      duration: 12600,
+      autoCapture: true,
+      camera: [
+        { t: 0, pose: off },
+        { t: 1500, pose: off },
+        { t: presentAt, pose: rest },
+      ],
+      tremor: [{ t: 0, amplitude: 0.004 }],
+      actions: [],
+      marks: {
+        hints: [],
+        ready: [{ from: presentAt, to: 12500 }],
+        stable: [presentAt],
+        tremor: [],
+        pages: 1,
+      },
+    };
+  },
+});
+
 /** A page-less session with auto-capture on: the hint owed is "searching", and every automatic capture is a false fire. */
 function pagelessAuto(id, base, title, describe) {
   registerSession({
@@ -1678,12 +2091,12 @@ export function cameraAt(script, t, frame = script.frame, focalPixels) {
  */
 const VIEW_CROP = { x: 0, y: 0.075, width: 1, height: 0.85 };
 
-/** A layer as the viewfinder shows it from `pose`: its nearest corner's margin and its share of the view. */
-function inView(pose, frame, layer) {
+/** A layer as the viewfinder shows it from `pose` (in `crop`, frame fractions): its nearest corner's margin, its share of the view, and its fill. */
+function inView(pose, frame, layer, crop = frame.view ?? VIEW_CROP) {
   const camera = cameraFromPose(pose, frame);
   const pts = projectRect(camera, layer).map((p) => [
-    (p.u / frame.width - VIEW_CROP.x) / VIEW_CROP.width,
-    (p.v / frame.height - VIEW_CROP.y) / VIEW_CROP.height,
+    (p.u / frame.width - crop.x) / crop.width,
+    (p.v / frame.height - crop.y) / crop.height,
   ]);
   const margin = Math.min(...pts.map(([x, y]) => Math.min(x, 1 - x, y, 1 - y)));
   const inside = clipPolygon(pts, [
@@ -1694,7 +2107,13 @@ function inView(pose, frame, layer) {
   ]);
   const area = inside.length >= 3 ? polygonArea(inside) : 0;
   const whole = polygonArea(pts);
-  return { margin, area, inShare: whole > 0 ? area / whole : 0, center: pts.reduce((s, [x, y]) => [s[0] + x / 4, s[1] + y / 4], [0, 0]) };
+  return {
+    margin,
+    area,
+    fill: framingMeasure("fill", pts),
+    inShare: whole > 0 ? area / whole : 0,
+    center: pts.reduce((s, [x, y]) => [s[0] + x / 4, s[1] + y / 4], [0, 0]),
+  };
 }
 
 /** Bisect `f` in [0, 1] so that `measure(f)` (monotonic) meets `target`. */
@@ -2164,18 +2583,20 @@ registerSession({
   inDefault: false,
   group: "breaker",
   describe:
-    "held 4 s with the page at 15.5 % of the view (inside the too-far hint's hysteresis band), then the distance swings between 11.5 % and 19.5 % every second until 12 s; the hint may be \"Aproxime\" or none, and should change seldom; auto-capture on",
-  build(rng, { seed, size, family }) {
+    "held 4 s with the page inside the too-far hint's hysteresis band (its fill — or, under the old rule, its area — halfway between the enter and exit lines), then the distance swings to 2.5 points past either line every second until 12 s; the hint may be \"Aproxime\" or none, and should change seldom; auto-capture on",
+  build(rng, { seed, size, family, follow, region }) {
     const { scene, found } = framedScene(seed, size, family, 0.06);
+    const rule = follow ?? DEFAULT_FOLLOW;
     const base = framingCamera(rng.fork("aim"), scene.frame, found.layer, { coverage: 0.14, tilt: [0, 10], aimSpread: 5, marginFraction: 0.1 });
-    const at = (f) => ({ ...base, distance: base.distance * Math.exp(lerp(Math.log(0.6), Math.log(2.2), f)) });
-    const pose = (share) => at(solveFor((f) => inView(at(f), scene.frame, found.layer).area, share, false));
-    const mid = pose(0.155);
+    const at = (f) => ({ ...base, distance: base.distance * Math.exp(lerp(Math.log(0.4), Math.log(2.2), f)) });
+    const crop = region ?? scene.frame.view ?? VIEW_CROP;
+    const pose = (share) => at(solveFor((f) => inView(at(f), scene.frame, found.layer, crop)[rule.kind], share, false));
+    const mid = pose((rule.enter + rule.exit) / 2);
     return {
       scene,
       duration: 13000,
       autoCapture: true,
-      camera: swing(mid, pose(0.115), pose(0.195), 4000, 12000, 1000),
+      camera: swing(mid, pose(rule.enter - 0.025), pose(rule.exit + 0.025), 4000, 12000, 1000),
       tremor: [{ t: 0, amplitude: 0.004 }],
       actions: [],
       marks: { ...NO_GUIDANCE, hints: [{ name: "hover far", from: 900, to: 12000, expect: ["move-closer", null], conditionFrom: 0 }] },
@@ -2282,6 +2703,256 @@ registerSession({
       tremor: [{ t: 0, amplitude: 0.003 }],
       actions: [{ at: tapAt, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
       marks: { ...NO_GUIDANCE, tapAt, stable: keys.filter((k, i) => i > 0 && k.pose === rest && keys[i - 1].pose !== rest).map((k) => k.t), tremor: noFire.map(({ from, to }) => ({ from, to })), noFire },
+    };
+  },
+});
+
+/* ── 5d+ phase B: a covered corner, the phone moving ─────────────────────── */
+
+/**
+ * The first F8 seed at or after `from` that samples `setting` (F8 cycles its
+ * settings by seed).
+ */
+function f8Seed(setting, from) {
+  for (let s = Math.max(1, from); s < from + 600; s += 1) if (buildScene("F8", s).setting === setting) return s;
+  throw new Error(`no F8 seed samples ${setting}`);
+}
+
+registerSession({
+  id: "covered-corner-auto",
+  title: "a leaflet over the page's corner, the phone moving",
+  inDefault: false,
+  group: "breaker",
+  describe:
+    "the owner's field case (F8 owner-case: a white leaflet over the top-left corner of a stacked imaging report on a leather mat, phone tilted 30–45°): the camera comes in from further off over 1.5 s, holds with a hand's tremor, drifts 4 % aside and back at 4.5 s; auto-capture on — the covered corner can only be estimated, so no automatic capture is owed at all and none may fire; the shutter at 8 s still works (confirm screen marks the corner)",
+  build(rng, { seed, size }) {
+    const scene = buildScene("F8", f8Seed("owner-case", 1 + 6 * (seed - 1)), { size });
+    const found = pageOf(scene);
+    const rest = withMargin(scene.camera, scene.frame, found.layer, 0.05);
+    scene.camera = rest;
+    const far = farPose(rng.fork("far"), rest, { distance: [1.25, 1.45], off: [20, 50] });
+    const drift = rng.fork("drift");
+    const bearing = drift.range(0, Math.PI * 2);
+    const by = 0.04 * Math.max(...found.layer.size);
+    const aside = { ...rest, target: [rest.target[0] + Math.cos(bearing) * by, rest.target[1] + Math.sin(bearing) * by] };
+    return {
+      scene,
+      duration: 9600,
+      autoCapture: true,
+      camera: [
+        { t: 0, pose: far },
+        { t: 300, pose: far },
+        { t: 1800, pose: rest },
+        { t: 4500, pose: rest },
+        { t: 5200, pose: aside },
+        { t: 5900, pose: rest },
+      ],
+      tremor: [
+        { t: 0, amplitude: 0.008 },
+        { t: 1800, amplitude: 0.004 },
+      ],
+      actions: [{ at: 8000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        ...NO_GUIDANCE,
+        tapAt: 8000,
+        stable: [1800, 5900],
+        // Covered the whole time: an automatic capture anywhere is one the owner's rule forbids.
+        noFire: [{ name: "covered corner", from: 0, to: 9600 }],
+        covered: true,
+      },
+    };
+  },
+});
+
+/* ── 5d-paper: the paper gate in dim, uneven light ──────────────────────── */
+
+/**
+ * A warm, dim, one-lamp room (the field case of 2026-10-02 evening, from its
+ * description): exposure ×0.15–0.4 (the session's `light`), the sensor's gain
+ * 2–5 (its noise with it), 2700–3200 K with a good part of the cast left by
+ * the white balance, the lamp to one side (a strong gradient across the
+ * page), and — two seeds in three — the shadow of the hand or the phone over
+ * one side's margin. Mutates `scene`; returns the exposure.
+ */
+function dimLamp(rng, scene, layer, pose) {
+  const dim = rng.range(0.15, 0.4);
+  const gain = rng.range(2, 5);
+  scene.lighting = {
+    ...scene.lighting,
+    temperature: rng.range(2700, 3200),
+    whiteBalanceResidual: rng.range(0.3, 0.55),
+    gradient: { angle: rng.range(0, 360), amount: rng.range(0.5, 0.9), scale: 400, at: layer === null ? [...pose.target] : [...layer.center] },
+  };
+  scene.post = { ...scene.post, noise: { ...scene.post.noise, shot: scene.post.noise.shot * Math.sqrt(gain), read: scene.post.noise.read * gain } };
+  if (layer !== null && rng.chance(0.67)) {
+    const camera = cameraFromPose(pose, scene.frame);
+    const px = projectRect(camera, layer);
+    const k = rng.int(0, 3);
+    const a = px[k];
+    const b = px[(k + 1) % 4];
+    const cx = px.reduce((s, p) => s + p.u, 0) / 4;
+    const cy = px.reduce((s, p) => s + p.v, 0) / 4;
+    const mid = [(a.u + b.u) / 2, (a.v + b.v) / 2];
+    const length = Math.hypot(b.u - a.u, b.v - a.v);
+    let n = [-(b.v - a.v) / length, (b.u - a.u) / length];
+    if ((mid[0] - cx) * n[0] + (mid[1] - cy) * n[1] < 0) n = [-n[0], -n[1]];
+    const reach = Math.min(scene.frame.width, scene.frame.height);
+    const across = reach * rng.range(0.1, 0.18);
+    const along = rng.range(-0.25, 0.25) * length;
+    const dir = [(b.u - a.u) / length, (b.v - a.v) / length];
+    scene.blobs = [
+      ...(scene.blobs ?? []),
+      {
+        kind: "shadow",
+        center: [mid[0] + dir[0] * along + n[0] * across * 0.5, mid[1] + dir[1] * along + n[1] * across * 0.5],
+        radius: [length * rng.range(0.25, 0.45), across],
+        angle: (Math.atan2(dir[1], dir[0]) * 180) / Math.PI,
+        strength: rng.range(0.3, 0.55),
+        softness: rng.range(0.6, 0.9),
+      },
+    ];
+  }
+  return dim;
+}
+
+/**
+ * A page presented in the dim lamp light and held: the camera comes in over
+ * 1.5 s, holds with a hand's tremor, drifts 4 % aside at 4.5 s and back by
+ * 5.9 s, holds; the shutter at 9 s. Auto-capture stays off: the measure is
+ * the found-sheet lock itself (`marks.paperLock`, scored by
+ * `scorePaperLock`), and a fire would end the presentation.
+ */
+function dimPresentation(rng, scene, layer, dim) {
+  const rest = scene.camera;
+  const far = farPose(rng.fork("far"), rest, { distance: [1.25, 1.45], off: [20, 50] });
+  const drift = rng.fork("drift");
+  const bearing = drift.range(0, Math.PI * 2);
+  const by = 0.04 * Math.max(...layer.size);
+  const aside = { ...rest, target: [rest.target[0] + Math.cos(bearing) * by, rest.target[1] + Math.sin(bearing) * by] };
+  return {
+    scene,
+    duration: 10000,
+    camera: [
+      { t: 0, pose: far },
+      { t: 300, pose: far },
+      { t: 1800, pose: rest },
+      { t: 4500, pose: rest },
+      { t: 5200, pose: aside },
+      { t: 5900, pose: rest },
+    ],
+    tremor: [
+      { t: 0, amplitude: 0.008 },
+      { t: 1800, amplitude: 0.004 },
+    ],
+    light: [{ t: 0, exposure: dim, gradient: 0 }],
+    actions: [{ at: 9000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+    marks: {
+      ...NO_GUIDANCE,
+      tapAt: 9000,
+      exposure: dim,
+      stable: [1800, 5900],
+      // Presented from the end of the approach to the tap; steady (dropouts
+      // count here) outside the drift.
+      paperLock: { from: 1800, to: 8950, steady: [{ from: 1800, to: 4500 }, { from: 5900, to: 8950 }] },
+    },
+  };
+}
+
+/** The first F8 `sheet-over` seed at or after `from` whose page is an imaging report. */
+function f8ReportSeed(from) {
+  for (let s = Math.max(1, from); s < from + 600; s += 1) {
+    const scene = buildScene("F8", s);
+    if (scene.setting === "sheet-over" && pageOf(scene).layer.document?.type === "imaging-report") return s;
+  }
+  throw new Error("no F8 sheet-over imaging report");
+}
+
+/** An F8 scene for a dim session: its page framed with room for the drift, the occluder kept or taken away. */
+function dimF8(seed, size, { setting, occluder }) {
+  const scene = buildScene("F8", setting === "owner-case" ? f8Seed("owner-case", 1 + 6 * (seed - 1)) : f8ReportSeed(1 + 6 * (seed - 1)), { size });
+  if (!occluder) scene.layers = scene.layers.filter((layer) => layer.occluder === undefined);
+  const found = pageOf(scene);
+  scene.camera = withMargin(scene.camera, scene.frame, found.layer, 0.05);
+  return { scene, found };
+}
+
+for (const [id, title, describe, make] of [
+  [
+    "dim-owner-case",
+    "the field case in a dim warm room",
+    "F8 owner-case (a stacked imaging report on a leather mat, a white leaflet over its top-left corner, tilted 30–45°) under one warm lamp: exposure ×0.15–0.4, sensor gain 2–5, 2700–3200 K, the lamp to one side, a hand's shadow over one margin on two seeds in three; comes in, holds, drifts 4 % and back; auto off; shutter at 9 s",
+    (seed, size) => dimF8(seed, size, { setting: "owner-case", occluder: true }),
+  ],
+  [
+    "dim-owner-bare",
+    "the field case's report, no leaflet, in a dim warm room",
+    "dim-owner-case with the leaflet taken away: the same imaging report, mat, tilt and lamp, every corner in view",
+    (seed, size) => dimF8(seed, size, { setting: "owner-case", occluder: false }),
+  ],
+  [
+    "dim-sheet-over",
+    "a sheet over an imaging report's corner in a dim warm room",
+    "F8 sheet-over seeds whose page is an imaging report (any corner covered 5–35 %, any desk, tilt 0–45°) under the dim warm lamp; comes in, holds, drifts and back; auto off; shutter at 9 s",
+    (seed, size) => dimF8(seed, size, { setting: "sheet-over", occluder: true }),
+  ],
+  [
+    "dim-text-page",
+    "a plain text page in a dim warm room",
+    "an F1/F2 text page under the dim warm lamp; comes in, holds, drifts and back; auto off; shutter at 9 s",
+    (seed, size, family) => framedScene(seed, size, family, 0.06),
+  ],
+]) {
+  registerSession({
+    id,
+    title,
+    inDefault: false,
+    group: "paper",
+    describe,
+    build(rng, { seed, size, family }) {
+      const { scene, found } = make(seed, size, family);
+      // The lamp by seed alone: dim-owner-case and dim-owner-bare light the same report alike.
+      const dim = dimLamp(rngFor("dim-lamp", seed), scene, found.layer, scene.camera);
+      return dimPresentation(rng, scene, found.layer, dim);
+    },
+  });
+}
+
+registerSession({
+  id: "dim-lamp-desk-auto",
+  title: "a desk with no page under the dim warm lamp",
+  inDefault: false,
+  group: "paper",
+  describe:
+    "an F6 desk (a laptop lid, a keyboard, a place mat, a notebook or clutter; no document) under the dim warm lamp of the dim-* sessions, held 4 s, drifted and held again; auto-capture on: every automatic capture is a false fire, every lock a false lock",
+  build(rng, { seed, size }) {
+    const scene = buildScene("F6", seed + 200, { size });
+    const dim = dimLamp(rng.fork("lamp"), scene, null, scene.camera);
+    const rest = scene.camera;
+    const drift = rng.fork("drift");
+    const bearing = drift.range(0, Math.PI * 2);
+    const aside = { ...rest, target: [rest.target[0] + Math.cos(bearing) * 20, rest.target[1] + Math.sin(bearing) * 20] };
+    return {
+      scene,
+      duration: 10000,
+      autoCapture: true,
+      camera: [
+        { t: 0, pose: rest },
+        { t: 4500, pose: rest },
+        { t: 5200, pose: aside },
+      ],
+      tremor: [{ t: 0, amplitude: 0.004 }],
+      light: [{ t: 0, exposure: dim, gradient: 0 }],
+      primary: [{ t: 0, page: 0 }],
+      actions: [{ at: 9000, tap: "shutter" }, { confirmAfterMs: CONFIRM_AFTER_MS }],
+      marks: {
+        ...NO_GUIDANCE,
+        negativeFrom: 0,
+        negativeTo: 8950,
+        tapAt: 9000,
+        exposure: dim,
+        hints: [{ name: "no page (dim lamp)", from: 600, to: 8950, expect: [...SEARCHING, "low-light"], conditionFrom: 0 }],
+        pageless: true,
+      },
     };
   },
 });

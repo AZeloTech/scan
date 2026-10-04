@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { MAX_LONG_EDGE } from "./image.ts";
-import { isPdfFile, PDFJS_VERSION, rasterScale } from "./pdf-import.ts";
+import { isPdfFile, PDF_RASTER_LONG_EDGE, PDFJS_VERSION, rasterScale } from "./pdf-import.ts";
 import { assetUrls } from "./runtime-config.ts";
 
 /**
@@ -34,7 +33,7 @@ test("a page is drawn up to the same cap every camera frame is capped at", () =>
   // the cap, which is roughly 250 dpi and is the whole point: anything less is
   // an unreadable scan of a readable document.
   const scale = rasterScale(595, 842);
-  assert.ok(Math.abs(842 * scale - MAX_LONG_EDGE) < 0.5);
+  assert.ok(Math.abs(842 * scale - PDF_RASTER_LONG_EDGE) < 0.5);
   // Landscape is the same rule read off the other axis.
   assert.equal(rasterScale(842, 595), rasterScale(595, 842));
 });

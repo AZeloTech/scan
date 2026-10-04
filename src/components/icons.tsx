@@ -114,6 +114,16 @@ export function ArrowLeftIcon(props: IconProps) {
   );
 }
 
+/** Onward — the experimental capture layouts' round "next" button. */
+export function ArrowRightIcon(props: IconProps) {
+  return (
+    <Glyph {...props}>
+      <path d="M4.5 12h15" />
+      <path d="M13 5.5 19.5 12 13 18.5" />
+    </Glyph>
+  );
+}
+
 /**
  * The page editor's overflow menu — three dots, and the only icon in the set
  * drawn as filled discs rather than as strokes: a 1.75 px ring at r=1.2 closes
@@ -424,6 +434,17 @@ export function HelpIcon(props: IconProps) {
       <circle cx="12" cy="12" r="8.5" />
       <path d="M9.6 9.4a2.5 2.5 0 0 1 4.9.6c0 1.7-2.4 1.9-2.4 3.6" />
       <path d="M12 17.1h.01" />
+    </Glyph>
+  );
+}
+
+/** "Sobre as melhorias" — the small (i) beside the page editor's position line. */
+export function InfoIcon(props: IconProps) {
+  return (
+    <Glyph {...props}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 11v5.5" />
+      <path d="M12 7.6h.01" />
     </Glyph>
   );
 }

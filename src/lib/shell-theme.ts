@@ -15,17 +15,17 @@
  * a table of alpha values. That is what was specified, and it does not work:
  *
  *  * A fixed cut (`luminance > 0.55`) misclassifies the middle of the ramp.
- *    `#8FAB9B` has luminance 0.373 — nominally "dark" — but warm text on it is
+ *    `#A2A5A8` has luminance 0.373 — nominally "dark" — but warm text on it is
  *    2.4:1. Polarity is therefore chosen by **whichever ink actually contrasts
  *    more**, which is the question the cut was a proxy for.
  *  * Fixed alphas fail wherever the shell is mid-tone: body copy at 72% over
- *    `#8FAB9B` lands at 1.9:1. The designed alphas are kept as **starting
+ *    `#A2A5A8` lands at 1.9:1. The designed alphas are kept as **starting
  *    points** and opacity rises only as far as the contrast floor requires, so
  *    a shell with room to spare looks exactly as drawn and a difficult one
  *    stays readable.
- *  * One shell is impossible at any alpha: at `#5C7F6B` the two brand inks
+ *  * One shell is impossible at any alpha: at `#74777C` the two brand inks
  *    reach 4.27:1 and 3.75:1, so neither can carry text. It sits exactly on the
- *    crossover, and it is replaced in the ramp by `#587A66`.
+ *    crossover, and it is replaced in the ramp by `#707377`.
  *
  * The floors, and what they protect. Note that text is checked against **two**
  * backgrounds: the shell itself, and `sunken`, which every panel and chip sits
@@ -57,29 +57,29 @@ export interface ShellStep {
  * what makes changing the one shipped colour a one-line edit rather than a
  * contrast audit.
  *
- * Index 6 is `#587A66` rather than the sage `#5C7F6B` it interpolates to: that
+ * Index 6 is `#707377` rather than the `#74777C` it interpolates to: that
  * exact value is the crossover where neither brand ink clears 4.5:1, so the
  * ramp steps around it. The difference is invisible; the failure was not.
  */
 export const SHELL_RAMP: readonly ShellStep[] = [
   { hex: "#12160F", name: "carvão" },
-  { hex: "#1F271F", name: "breu" },
-  { hex: "#2D392E", name: "mata" },
-  { hex: "#3A4A3E", name: "musgo" },
-  { hex: "#455C4D", name: "pinheiro" },
-  { hex: "#516D5C", name: "louro" },
-  { hex: "#587A66", name: "erva" },
-  { hex: "#6D8E7B", name: "salva" },
-  { hex: "#7E9C8B", name: "eucalipto" },
-  { hex: "#8FAB9B", name: "névoa" },
-  { hex: "#ACC2B4", name: "orvalho" },
-  { hex: "#C9D8CE", name: "sereno" },
-  { hex: "#DEE4DB", name: "linho" },
+  { hex: "#242526", name: "breu" },
+  { hex: "#353638", name: "ônix" },
+  { hex: "#454649", name: "grafite" },
+  { hex: "#54575A", name: "chumbo" },
+  { hex: "#64676B", name: "ardósia" },
+  { hex: "#707377", name: "aço" },
+  { hex: "#84878B", name: "ferro" },
+  { hex: "#939599", name: "estanho" },
+  { hex: "#A2A5A8", name: "névoa" },
+  { hex: "#BBBDBF", name: "prata" },
+  { hex: "#D3D4D6", name: "gelo" },
+  { hex: "#E2E2E3", name: "linho" },
   { hex: "#F4F1E8", name: "papel" },
 ];
 
 /** The shell the app opens with. */
-export const DEFAULT_SHELL = "#3A4A3E";
+export const DEFAULT_SHELL = "#454649";
 
 /**
  * The corner editor's magnifier ring and crosshair.
@@ -90,7 +90,7 @@ export const DEFAULT_SHELL = "#3A4A3E";
  * 4.8:1 against black, so it is legible at both ends where scanic's default
  * white ring disappears into the page it is magnifying.
  */
-export const LOUPE_RING = "#5C7F6B";
+export const LOUPE_RING = "#74777C";
 
 const INK_DARK = "#1B1F18";
 const INK_LIGHT = "#FAFAF7";
@@ -199,7 +199,7 @@ export function deriveShellTheme(shell: string): ShellTheme {
   // Polarity is "which ink can actually be read here", not a luminance cut.
   const light = contrast(INK_DARK, shell) >= contrast(INK_LIGHT, shell);
   const ink = light ? INK_DARK : INK_LIGHT;
-  const onInk = light ? "#F4F1E8" : "#1F3128";
+  const onInk = light ? "#F4F1E8" : "#2C2D2F";
 
   const ink2 = blend(ink, resolveAlpha(ink, shell, 4.5, light ? 0.68 : 0.72), shell);
   const inkLine = blend(ink, resolveAlpha(ink, shell, 1.6, light ? 0.26 : 0.3), shell);
@@ -208,10 +208,10 @@ export function deriveShellTheme(shell: string): ShellTheme {
 
   // Sage is the house accent, but it cannot carry text on a sage-ish shell —
   // there it steps aside for the body ink rather than becoming decorative.
-  const sage = light ? "#3E6250" : "#8FAB9B";
+  const sage = light ? "#585B5E" : "#A2A5A8";
   const accent = contrast(sage, shell) >= 4.5 ? sage : ink2;
 
-  const handleBase = light ? "#1F3128" : INK_LIGHT;
+  const handleBase = light ? "#2C2D2F" : INK_LIGHT;
   const handle =
     contrast(handleBase, shell) >= 3
       ? handleBase
@@ -267,3 +267,18 @@ export function shellCssVars(theme: ShellTheme): Record<string, string> {
     "--shell-warnline": theme.warnLine,
   };
 }
+
+/**
+ * The shipped shell's variables, as the inline style of the `.scan-root`
+ * element. Custom properties inherit through the DOM, not through layout, so
+ * every camera screen — the `position: fixed` confirm-corners screen and the
+ * sheets included — resolves `bg-shell`, `text-shell-ink`, … from here without
+ * the library writing to the host's `<html>`.
+ *
+ * Without it every `shell-*` colour is `var(--shell…)` of nothing: the
+ * confirm-corners screen paints no background and lies transparently over the
+ * live capture screen.
+ */
+export const SHELL_ROOT_STYLE: Readonly<Record<string, string>> = Object.freeze(
+  shellCssVars(deriveShellTheme(DEFAULT_SHELL))
+);

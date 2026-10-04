@@ -18,6 +18,7 @@ import {
   WRONG_CROP_MAX_CORNER_ERROR,
   WRONG_CROP_MIN_IOU,
 } from "./metrics.mjs";
+import { sceneRegressionLines } from "./straighten/score.mjs";
 
 /**
  * The shape of `results.json`. Bumped whenever a number's meaning or a
@@ -62,12 +63,32 @@ export const REGRESSION_TOLERANCE = {
   pagelessCaptureRate: 0,
   falseLockExposure: 0.05,
   staleStuck: 0,
+  // 5d-paper: the presented time a dim-lamp page was not held as found.
+  paperUnlockedShare: 0.05,
+  // A session page-less as a whole (a document on a screen): the share of it held as a found sheet.
+  pagelessLockedShare: 0.05,
   // Real media, GT-free: a real image that stopped being detected at all, the
   // quad moving more between consecutive frames of a clip, the replayed
   // overlay spending more of the clip off the page the detector sees.
   undetectedRate: 0.02,
   jitterP50: 0.002,
   offShare: 0.05,
+  // Endireitar (straighten): the page the user sees. Rates are over the
+  // should-act pages; harms, unverified pages and seams are absolute counts
+  // and may not grow at all (the per-scene gate also names each new harm and
+  // each lost fix); the residual tilt is in degrees. Timeouts and pages over
+  // the device budget depend on the machine's load, so they only compare at
+  // the same --jobs and get a little slack.
+  unfixedRate: 0.02,
+  noopRate: 0.02,
+  curlUnfixedRate: 0.03,
+  harmCount: 0,
+  flatHarms: 0,
+  unverifiedCount: 0,
+  residTiltP90: 0.1,
+  seamCount: 0,
+  timeouts: 1,
+  overBudget: 5,
 };
 
 /**
@@ -83,7 +104,51 @@ export const ABSOLUTE_LIMITS = {
   session: { missingCaptures: 0, confirmNeverOpened: 0, confirmOffImage: 0, unscoredCaptures: 0, contentUnknownCaptures: 0, missingData: 0 },
   "real-stills": {},
   "real-video": { unidentifiedCaptures: 0 },
+  // A scene the engine or the scorer crashed on is never within limits.
+  straighten: { errors: 0 },
+  "straighten-real": { errors: 0 },
 };
+
+/**
+ * 5d-paper: the dim-lamp paper lock, gated per CPU rate on runs of
+ * {@link PAPER_LOCK_MIN_RUNS} seeds or more (`paperLock`, pooled over runs;
+ * scored on the presented page only, over the whole presented window:
+ * `session-score.mjs` `scorePaperLock`).
+ *
+ * - `floors`: the least share of the window locked on the page — under the
+ *   measured level by the run-to-run spread, so the margin rule, the
+ *   held-sheet exclusion or the memory going back fails the run.
+ * - `firstLockP50Ms`: the most the median first lock may take (cpu 1 only;
+ *   the spec's 1.5 s).
+ *
+ * The spec's target, 80 % of the presented time locked
+ * ({@link PAPER_LOCK_TARGET}), is reported against every run, not gated:
+ * the dim scenes' detector (no quad on a third of the passes, quads that
+ * jump) holds every page under it, and a gate that always fails gates
+ * nothing — it is the named follow-up (5d-detector), not a floor.
+ *
+ * With `--paper-gate` (npm run bench:paper) the four sessions are
+ * required: one absent, or run on fewer seeds, fails the run instead of
+ * passing silently ungated.
+ */
+export const PAPER_LOCK_MIN_RUNS = 8;
+export const PAPER_LOCK_TARGET = 0.8;
+export const PAPER_LOCK_SESSIONS = ["dim-owner-case", "dim-owner-bare", "dim-sheet-over", "dim-text-page"];
+export const PAPER_LOCK_GATES = {
+  1: {
+    // Measured (on the page, whole window, 8 seeds): 17 / 66 / 21 / 67 %; before 5d-paper 4 / 28 / 14 / 63 %.
+    floors: { "dim-owner-case": 0.12, "dim-owner-bare": 0.58, "dim-sheet-over": 0.15, "dim-text-page": 0.6 },
+    firstLockP50Ms: 1500,
+  },
+  4: {
+    // Measured (8 seeds; owner and sheet-over two runs): 9–10 / 55 / 12–15 / 54 %; the code before the
+    // adv-paper fixes, run twice: 7–17 / 56 / 10–15 / 50 %; before 5d-paper 1 / 25 / 8 / 52 %.
+    floors: { "dim-owner-case": 0.05, "dim-owner-bare": 0.45, "dim-sheet-over": 0.08, "dim-text-page": 0.4 },
+    firstLockP50Ms: null,
+  },
+};
+/** @deprecated the cpu-1 floors; {@link PAPER_LOCK_GATES} holds every rate's. */
+export const PAPER_LOCK_FLOORS = PAPER_LOCK_GATES[1].floors;
 
 /** Headline numbers where a larger value is worse, in report order: the detector's, then a session's. */
 const HEADLINES = {
@@ -97,10 +162,25 @@ const HEADLINES = {
     "pagelessCaptureRate",
     "falseLockExposure",
     "staleStuck",
+    "paperUnlockedShare",
+    "pagelessLockedShare",
   ],
   // Real media: the labelled verdicts where labels exist ("–" where not), then the GT-free ones.
   "real-stills": ["wrongRate", "missRate", "falsePositiveRate", "cornerErrorP50", "undetectedRate"],
   "real-video": ["wrongRate", "missRate", "cornerErrorP50", "undetectedRate", "jitterP50", "offShare"],
+  // Endireitar: larger is worse throughout (`unfixedRate` = 1 − complete fixes).
+  straighten: ["unfixedRate", "noopRate", "harmCount", "flatHarms", "unverifiedCount", "curlUnfixedRate", "residTiltP90", "seamCount", "timeouts", "overBudget"],
+  "straighten-real": ["unfixedRate", "noopRate", "harmCount", "flatHarms", "unverifiedCount", "residTiltP90", "seamCount", "timeouts", "overBudget"],
+};
+
+/**
+ * Suites gated scene by scene as well: `(previous, current) → regression
+ * lines`. For Endireitar, every scene that was a complete fix and no longer
+ * is, and every scene harmed now that was not, whatever the totals say.
+ */
+const SCENE_GATES = {
+  straighten: sceneRegressionLines,
+  "straighten-real": sceneRegressionLines,
 };
 
 /** One variant over a group of scored rows (`{ det, score }`): the detector table's numbers. */
@@ -387,9 +467,13 @@ export function renderDetectorReport(results) {
  */
 const MUST_MATCH = {
   detector: ["seeds", "settings", "frame", "cpu"],
-  session: ["seeds", "stream", "cpu"],
+  session: ["seeds", "stream", "cpu", "viewport"],
   "real-stills": ["media", "cpu"],
   "real-video": ["media", "cpu", "skipReplay"],
+  // The engine root and its deskew step are what a straighten comparison is
+  // about; the scenes, their rendering, the job count and the timeout are not.
+  straighten: ["profile", "only", "sceneHash", "scene", "jobs", "timeoutCapMs"],
+  "straighten-real": ["profile", "only", "sceneHash", "media", "jobs", "timeoutCapMs"],
 };
 
 /**
@@ -402,6 +486,8 @@ const MAY_NARROW = {
   session: ["sessions", "variants"],
   "real-stills": ["variants"],
   "real-video": ["variants"],
+  straighten: [],
+  "straighten-real": [],
 };
 
 const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
@@ -490,6 +576,7 @@ export function compareSummaries(previous, current, tolerance = REGRESSION_TOLER
     }
   }
   regressions.push(...absoluteViolations(current));
+  regressions.push(...(SCENE_GATES[current.suite]?.(previous, current) ?? []));
   return { table: [...notes, ...(notes.length > 0 ? [""] : []), ...lines].join("\n"), regressions, notes };
 }
 
@@ -499,9 +586,51 @@ export function compareSummaries(previous, current, tolerance = REGRESSION_TOLER
  * the key. A key it carries with no number is a breach too: unmeasured is
  * not within limits.
  */
+/** The dim-lamp sessions against {@link PAPER_LOCK_GATES} at the run's CPU rate — a run that has them fails, compared or not. */
+export function paperLockViolations(results) {
+  const out = [];
+  if (results.suite !== "session") return out;
+  const cpu = results.config?.cpu ?? 1;
+  const required = results.config?.paperGate === true;
+  const gate = PAPER_LOCK_GATES[cpu];
+  if (gate === undefined) {
+    if (required) out.push(`paper gate: no floors measured at --cpu ${cpu} (only ${Object.keys(PAPER_LOCK_GATES).join(", ")})`);
+    return out;
+  }
+  for (const session of PAPER_LOCK_SESSIONS) {
+    const floor = gate.floors[session];
+    const lock = results.summary?.[session]?.all?.paperLock;
+    if (lock === undefined) {
+      if (required) out.push(`${session}/all: required by --paper-gate, not run`);
+      continue;
+    }
+    if (lock.runs < PAPER_LOCK_MIN_RUNS) {
+      if (required) out.push(`${session}/all: ${lock.runs} runs < ${PAPER_LOCK_MIN_RUNS} required by --paper-gate`);
+      continue;
+    }
+    if (lock.lockedShare === null || !Number.isFinite(lock.lockedShare)) out.push(`${session}/all: paperLock.lockedShare has no value (floor ${floor})`);
+    else if (lock.lockedShare < floor) out.push(`${session}/all: paperLock.lockedShare ${lock.lockedShare.toFixed(3)} < floor ${floor}`);
+    if (gate.firstLockP50Ms !== null && !(lock.firstLockP50 !== null && lock.firstLockP50 <= gate.firstLockP50Ms)) {
+      out.push(`${session}/all: paperLock.firstLockP50 ${lock.firstLockP50 === null ? "never" : Math.round(lock.firstLockP50)} > ${gate.firstLockP50Ms} ms`);
+    }
+  }
+  return out;
+}
+
+/** The spec's 80 % target against each dim-lamp session in the run — reported, not gated ({@link PAPER_LOCK_TARGET}). */
+export function paperTargetLines(results) {
+  if (results.suite !== "session") return [];
+  return PAPER_LOCK_SESSIONS.flatMap((session) => {
+    const lock = results.summary?.[session]?.all?.paperLock;
+    if (lock === undefined || lock.lockedShare === null) return [];
+    const met = lock.lockedShare >= PAPER_LOCK_TARGET;
+    return [`${session}: locked ${(lock.lockedShare * 100).toFixed(0)} % of the presented time — target ${PAPER_LOCK_TARGET * 100} %: ${met ? "met" : "NOT met (reported, not gated: 5d-detector)"}`];
+  });
+}
+
 export function absoluteViolations(results) {
   const limits = ABSOLUTE_LIMITS[results.suite] ?? {};
-  const out = [];
+  const out = paperLockViolations(results);
   for (const [family, byVariant] of Object.entries(results.summary ?? {})) {
     for (const [variant, summary] of Object.entries(byVariant)) {
       for (const [key, limit] of Object.entries(limits)) {

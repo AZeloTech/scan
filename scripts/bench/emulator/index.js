@@ -16,6 +16,7 @@ import "./family-f4.js";
 import "./family-f5.js";
 import "./family-f6.js";
 import "./family-f7.js";
+import "./family-f8.js";
 import "./session.js";
 
 export {

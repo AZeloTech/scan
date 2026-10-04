@@ -2,8 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  brightNear,
   classicalQuadSane,
+  coveredCorners,
+  evidenceDiagnostic,
+  evidenceVerdict,
   GLARE_LUMA,
+  imagesFailure,
+  textFailure,
   minInteriorAngle,
   PAPER,
   paperEvidence,
@@ -13,6 +19,7 @@ import {
   sidesOnFrameBorder,
 } from "./paper-evidence.ts";
 import type { CornerPoints } from "scanic";
+import { cornerCheckOf, isUncertain } from "./corner-check.ts";
 
 const W = 360;
 const H = 640;
@@ -252,4 +259,169 @@ test("the classical detector's usual failures are not shown", () => {
   assert.ok(minInteriorAngle(skewed) < 35);
   assert.equal(classicalQuadSane(skewed, W, H, null), false);
   assert.equal(classicalQuadSane(quad, W, H, null), true);
+});
+
+test("the diagnostics name the rule and the clause a reading fails, and agree with the verdict", () => {
+  const noise = rng(1);
+  const ok = paperEvidence(image((x, y) => (inPage(x, y) ? (printed(x, y) ? 60 : 225) + noise() * 6 : 55 + noise() * 20)), W, H, quad);
+  assert.ok(ok !== null && ok.ok);
+  const d = evidenceDiagnostic(ok);
+  assert.equal(d.verdict, "ok");
+  assert.equal(d.failPrint, null);
+  assert.equal(d.sidesKnown, 4);
+  assert.ok(d.sideT !== null && d.sideT >= 0.55);
+  assert.ok(d.paperLevel !== null && Math.abs(d.paperLevel - 228) <= 4, `paper level ${d.paperLevel}`);
+  // Rounded: two decimals for shares, whole levels.
+  for (const value of [d.background, d.ink, d.inkSpread, d.marginUniform ?? 0]) assert.equal(Math.round(value * 100) / 100, value);
+  // A blank lid: four edges, no print — the surface fails, on ink.
+  const lid = paperEvidence(image((x, y) => (inPage(x, y) ? 170 + noise() * 6 : 55 + noise() * 20)), W, H, quad);
+  assert.ok(lid !== null && !lid.ok);
+  assert.equal(evidenceVerdict(lid), "surface");
+  assert.equal(textFailure(lid), "ink-low");
+  assert.notEqual(imagesFailure(lid), null);
+  // A quad across a textured desk: no edges, whatever the surface.
+  const desk = paperEvidence(image(() => 120 + noise() * 60), W, H, quad);
+  assert.ok(desk !== null && !desk.ok);
+  assert.equal(evidenceVerdict(desk), "sides");
+  // The clause functions are the verdict: paper exactly when the sides hold and one rule passes.
+  for (const e of [ok, lid, desk]) {
+    assert.equal(e.ok, evidenceVerdict(e) === "ok");
+    if (evidenceVerdict(e) !== "sides") assert.equal(e.ok, textFailure(e) === null || imagesFailure(e) === null);
+  }
+});
+
+/** An imaging report: a header line, then 3 × 5 near-black panels inside a white margin. */
+function report(x: number, y: number, noise: () => number): number {
+  const lx = x - page.x0;
+  const ly = y - page.y0;
+  const inPanel = lx >= 14 && lx < 186 && ly >= 34 && ly < 244 && (lx - 14) % 58 < 54 && (ly - 34) % 42 < 38;
+  if (inPanel) return 18 + noise() * 8;
+  if (ly < 24 && ly > 8 && lx > 14 && lx < 150 && (lx >> 2) % 3 !== 0) return 50;
+  return 225 + noise() * 6;
+}
+
+/** One warm lamp off to the left: the light falls from ~1 to ~0.4 across the frame. */
+const lamp = (x: number, y: number): number => 0.35 + 0.63 * ((x - 40) / 280) + 0.3 * (y / H);
+
+test("printed images under one lamp: the margin is judged against its own local level, not the band's median", () => {
+  const noise = rng(5);
+  const flat = { ...PAPER, marginLocal: false };
+  const even = image((x, y) => (inPage(x, y) ? report(x, y, noise) : 55 + noise() * 20));
+  assert.ok(paperEvidence(even, W, H, quad)!.ok);
+  assert.ok(paperEvidence(even, W, H, quad, flat)!.ok);
+  // The lamp: the old reading of the margin called it uneven (one median, an 18-level band); the local one does not.
+  const lit = image((x, y) => (inPage(x, y) ? report(x, y, noise) : 55 + noise() * 20) * lamp(x, y));
+  const old = paperEvidence(lit, W, H, quad, flat)!;
+  assert.ok(!old.ok && imagesFailure(old, flat) === "margin-uniform", JSON.stringify(evidenceDiagnostic(old, flat)));
+  const now = paperEvidence(lit, W, H, quad)!;
+  assert.ok(now.ok, JSON.stringify(evidenceDiagnostic(now)));
+  assert.ok(now.marginUniform! >= 0.8 && now.marginRelative! >= 0.9);
+  // A hand's soft shadow over one margin on top of it.
+  const shadow = (x: number, y: number): number => 1 - 0.5 * Math.exp(-((x - 90) ** 2 + (y - 300) ** 2) / (2 * 40 ** 2));
+  const shaded = image((x, y) => (inPage(x, y) ? report(x, y, noise) : 55 + noise() * 20) * lamp(x, y) * shadow(x, y));
+  assert.ok(paperEvidence(shaded, W, H, quad)!.ok);
+});
+
+test("under the same lamp a lid and a keyboard are still not printed images", () => {
+  const noise = rng(6);
+  const lid = image((x, y) => (inPage(x, y) ? 170 + noise() * 6 : 55 + noise() * 20) * lamp(x, y));
+  const blackLid = image((x, y) => (inPage(x, y) ? 40 + noise() * 6 : 150 + noise() * 20) * lamp(x, y));
+  const keys = (x: number, y: number): number => ((x - page.x0) % 18 < 15 && (y - page.y0) % 18 < 15 ? 30 + noise() * 8 : 70 + noise() * 8);
+  const keyboard = image((x, y) => (inPage(x, y) ? keys(x, y) : 150 + noise() * 20) * lamp(x, y));
+  for (const [name, data] of [["lid", lid], ["black lid", blackLid], ["keyboard", keyboard]] as const) {
+    const e = paperEvidence(data, W, H, quad)!;
+    assert.ok(!e.ok, `${name}: ${JSON.stringify(evidenceDiagnostic(e))}`);
+    assert.notEqual(imagesFailure(e), null, name);
+  }
+  // The keyboard's border band (its deck between the keys) is still darker than the keys next to it.
+  assert.equal(imagesFailure(paperEvidence(keyboard, W, H, quad)!), "margin-relative");
+});
+
+test("a covered corner's region is left out of the margin and the bright end", () => {
+  // The refinement's reports: TL inferred with 25 % of its left side and 40 % of its top unseen; the rest seen.
+  const covered = coveredCorners([
+    { provenance: "inferred", runs: [0.75, 0.6] },
+    { provenance: "seen", runs: [1, 1] },
+    { provenance: "seen", runs: [1, 1] },
+    { provenance: "unknown", runs: [0, 0] },
+  ]);
+  assert.deepEqual(covered, [
+    { corner: 0, along: [0.25, 0.4] },
+    { corner: 3, along: [0.35, 0.35] },
+  ]);
+  // A sheet over the corner, darker than the margin (its own shadow side): the band reads it as uneven…
+  const noise = rng(7);
+  const sheet = (x: number, y: number): boolean => x - page.x0 < 80 - (y - page.y0) * 0.3 && y - page.y0 < 70 && x >= page.x0 - 30 && y >= page.y0 - 30;
+  const data = image((x, y) => (sheet(x, y) ? 120 + noise() * 6 : inPage(x, y) ? report(x, y, noise) : 55 + noise() * 20));
+  const open = paperEvidence(data, W, H, quad)!;
+  // …and with the corner left out, the margin is the page's own again.
+  const out = paperEvidence(data, W, H, quad, PAPER, [{ corner: 0, along: [0.25, 0.4] }])!;
+  assert.ok(out.marginUniform! > open.marginUniform!, `${open.marginUniform} → ${out.marginUniform}`);
+  assert.ok(out.ok, JSON.stringify(evidenceDiagnostic(out)));
+});
+
+test("a white lid with a few solid marks is not a page of printed images: too little ink", () => {
+  const noise = rng(9);
+  // A white box or a laptop lid: even, bright, three solid dark marks (a logo, a label).
+  const mark = (x: number, y: number): boolean =>
+    [[120, 200], [210, 300], [150, 360]].some(([mx, my]) => Math.abs(x - mx) < 9 && Math.abs(y - my) < 9);
+  const data = image((x, y) => (inPage(x, y) ? (mark(x, y) ? 40 : 222) + noise() * 6 : 90 + noise() * 20));
+  const e = paperEvidence(data, W, H, quad)!;
+  assert.ok(!e.ok, JSON.stringify(evidenceDiagnostic(e)));
+  assert.ok(e.ink < PAPER.printMinInk, `ink ${e.ink}`);
+  assert.equal(imagesFailure(e), "ink-low");
+  // The same marks on a page of panels is ink enough.
+  assert.equal(imagesFailure(e, { ...PAPER, printMinInk: 0 }), null);
+});
+
+test("a margin sample is held against the bright end on its own side of the page, never the row before's far end", () => {
+  // Left column of blocks dim (120), every other block bright (220): the left
+  // margin's insets (0.02–0.05) lie before the sampled interior (0.07), and
+  // must read the left column, on every row — not the previous row's
+  // rightmost block (adv-paper F6).
+  const leftDim = Array.from({ length: 36 }, (_, b) => (b % 6 === 0 ? 120 : 220));
+  for (const v of [0.1, 0.3, 0.5, 0.7, 0.9]) {
+    for (const u of [0.02, 0.035, 0.05]) assert.equal(brightNear(leftDim, u, v), 120, `u ${u} v ${v}`);
+    for (const u of [0.95, 0.965, 0.98]) assert.equal(brightNear(leftDim, u, v), 220, `u ${u} v ${v}`);
+  }
+  // The mirror: right column dim.
+  const rightDim = Array.from({ length: 36 }, (_, b) => (b % 6 === 5 ? 120 : 220));
+  for (const v of [0.1, 0.5, 0.9]) {
+    assert.equal(brightNear(rightDim, 0.02, v), 220);
+    assert.equal(brightNear(rightDim, 0.98, v), 120);
+  }
+  // A block with nothing measured is left out, the weights renormalised.
+  const holes = Array.from({ length: 36 }, (_, b) => (b === 7 ? Number.NaN : 200));
+  assert.equal(brightNear(holes, 0.3, 0.3), 200);
+});
+
+test("printed images under a lamp from either side: the margin's ratio holds both ways", () => {
+  const noise = rng(11);
+  const fromLeft = (x: number, y: number): number => 0.3 + 0.7 * ((x - 40) / 280);
+  const fromRight = (x: number, y: number): number => 0.3 + 0.7 * ((320 - x) / 280);
+  for (const [name, light] of [["left", fromLeft], ["right", fromRight]] as const) {
+    const data = image((x, y) => (inPage(x, y) ? report(x, y, noise) : 55 + noise() * 20) * light(x, y));
+    const e = paperEvidence(data, W, H, quad)!;
+    assert.ok(e.marginRelative! >= PAPER.printMarginRelative, `${name}: ${JSON.stringify(evidenceDiagnostic(e))}`);
+    assert.ok(e.ok, `${name}: ${JSON.stringify(evidenceDiagnostic(e))}`);
+  }
+});
+
+test("a region is left out only where the same refinement calls a corner covered — the page auto-capture will not take", () => {
+  // adv-paper F4: the exclusion and the owner rule's "uncertain" come from one
+  // refinement result. Any corner not seen leaves a region out *and* makes
+  // the check uncertain (auto never fires); every corner seen leaves nothing out.
+  const seen = { provenance: "seen", runs: [1, 1] as [number, number] };
+  for (const provenance of ["inferred", "unknown"] as const) {
+    for (let corner = 0; corner < 4; corner += 1) {
+      const reports = [seen, seen, seen, seen].map((r, i) => (i === corner ? { provenance, runs: [0.7, 0.5] as [number, number] } : r));
+      assert.equal(coveredCorners(reports).length, 1);
+      const check = cornerCheckOf({ corners: reports, occlusion: { separate: false }, measured: true } as never);
+      assert.equal(isUncertain(check), true);
+    }
+  }
+  assert.deepEqual(coveredCorners([seen, seen, seen, seen]), []);
+  assert.equal(isUncertain(cornerCheckOf({ corners: [seen, seen, seen, seen], occlusion: { separate: false }, measured: true } as never)), false);
+  // Unmeasured: nothing left out, and uncertain all the same (fails closed).
+  assert.equal(isUncertain(cornerCheckOf({ corners: [], occlusion: { separate: false }, measured: false } as never)), true);
 });

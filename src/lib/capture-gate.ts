@@ -42,7 +42,6 @@
  * number and nothing else.
  */
 
-import { decodeToCanvas } from "@/lib/image";
 
 /** Long edge the measurement runs at. Big enough to resolve text lines, small
  *  enough to stay ~10 ms; every constant below is calibrated at this size. */
@@ -319,10 +318,30 @@ export function assessFrame(image: ImageData, nativeLongEdge: number): GateReadi
  * Never throws — a decode failure is `null`, i.e. "not measured".
  */
 export async function assessBlob(blob: Blob): Promise<GateReading | null> {
+  // Measured straight off the decoded image at its native size — the text
+  // height floor is in native pixels — and drawn once, into the 1000 px
+  // sample. No full-size canvas is made just to be downsampled.
   try {
-    const canvas = await decodeToCanvas(blob);
-    const scratch = document.createElement("canvas");
-    return assessSource(canvas, canvas.width, canvas.height, scratch);
+    if (typeof createImageBitmap === "function") {
+      const bitmap = await createImageBitmap(blob);
+      try {
+        return assessSource(bitmap, bitmap.width, bitmap.height, document.createElement("canvas"));
+      } finally {
+        bitmap.close();
+      }
+    }
+    const url = URL.createObjectURL(blob);
+    try {
+      const image = new Image();
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error("decode"));
+        image.src = url;
+      });
+      return assessSource(image, image.naturalWidth, image.naturalHeight, document.createElement("canvas"));
+    } finally {
+      URL.revokeObjectURL(url);
+    }
   } catch {
     return null;
   }

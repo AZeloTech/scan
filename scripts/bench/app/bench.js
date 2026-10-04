@@ -225,8 +225,9 @@ async function detectScene(variant, id) {
  * A real image, decoded **the way the app decodes a photo**: the bytes as
  * served, `createImageBitmap(…, { imageOrientation: "from-image" })` (EXIF
  * applied once), then `bitmapToCanvas` from `src/lib/image.ts` — the still
- * path's own 3000 px cap. Extracted video frames carry no EXIF and are under
- * the cap, so the same call leaves them as they are. Kept by id like a scene;
+ * path's own draw, at the image's full resolution (only a browser canvas
+ * limit could shrink it). Extracted video frames carry no EXIF, so the same
+ * call leaves them as they are. Kept by id like a scene;
  * `thumbLongEdge: 0` keeps no thumbnail (a clip's hundreds of frames).
  */
 async function load(id, url, { thumbLongEdge = 480 } = {}) {
@@ -237,7 +238,7 @@ async function load(id, url, { thumbLongEdge = 480 } = {}) {
   const bitmap = await createImageBitmap(blob, { imageOrientation: "from-image" });
   let canvas;
   try {
-    canvas = bitmapToCanvas(bitmap);
+    canvas = bitmapToCanvas(bitmap).canvas;
   } finally {
     bitmap.close();
   }

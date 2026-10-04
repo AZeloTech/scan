@@ -146,6 +146,25 @@ export async function buildBenchAssets({ outdir = APP_ASSETS_DIR } = {}) {
     define: PROBE_ON.define,
     logLevel: "warning",
   });
+  // The render worker (the page tail: finish, turn, encode) — so a render the
+  // bench asks for runs the working tree's tail in the lane the app uses,
+  // rather than whatever `assets/` was last built from, or no worker at all.
+  const render = join(ROOT, "src/lib/render.worker.ts");
+  if (existsSync(render)) {
+    await build({
+      entryPoints: [render],
+      outfile: join(outdir, "workers", "render.worker.js"),
+      bundle: true,
+      splitting: false,
+      format: "esm",
+      platform: "browser",
+      target: ["es2022", "chrome110"],
+      sourcemap: "inline",
+      minify: false,
+      define: PROBE_ON.define,
+      logLevel: "warning",
+    });
+  }
   return { outdir };
 }
 

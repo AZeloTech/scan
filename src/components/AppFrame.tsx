@@ -100,7 +100,7 @@ export function AppFrame({
       <div
         className={clsx(
           "flex min-h-0 w-full max-w-[30rem] flex-col overflow-hidden",
-          night ? "bg-shell" : "bg-warm shadow-[0_0_60px_rgba(31,49,40,0.08)]",
+          night ? "bg-shell" : "bg-warm shadow-[0_0_60px_rgba(44,45,47,0.08)]",
         )}
       >
         <header

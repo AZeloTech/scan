@@ -165,7 +165,22 @@ export interface AppCopy {
       /** After a few seconds with no page: the photo can still be taken. */
       notFound: string;
       moveBack: string;
+      /**
+       * The page at the edge of the view though it would fit: re-aim, not
+       * back off — which way to move the phone (`moveDirection`,
+       * `lib/guidance.ts`), relative to the phone as the screen shows it.
+       */
+      movePhone: { up: string; down: string; left: string; right: string };
       moveCloser: string;
+      /** "Move closer" for a page that already nearly fills the view (`FILL_NEAR`, `lib/guidance.ts`): a small move, not a big one. */
+      moveCloserNear: string;
+      /**
+       * A corner something lies over (a sheet, a clip) that its edges do not
+       * let the app place (`lib/corner-check.ts`): move what is on top.
+       */
+      cornerCovered: string;
+      /** Another sheet overlaps the page: separate them. */
+      separateSheets: string;
       lowLight: string;
       glare: string;
       holdStill: string;
@@ -212,10 +227,56 @@ export interface AppCopy {
     preparingCamera: string;
   };
 
+  /**
+   * The capture screen's full-bleed layouts (`captureLayout`: `rail`, the
+   * default, and the experimental ones).
+   * Their hints, ready words, torch and auto-capture names are `capture`'s;
+   * this is only what their chrome adds.
+   */
+  captureLayout: {
+    /** The centre pill: "Passo 1 de 3 · Capturar". */
+    stepPill: string;
+    /** The short form where the pill shares a row with more controls: "1/3 · Capturar". */
+    stepShort: string;
+    /** The step pill's accessible name, where the visible form is dots or a fraction. */
+    stepAria: string;
+    /** The bare verb, beside the step dots. */
+    captureWord: string;
+    /** The close control: back to the pages when there are some, out of the flow when not. */
+    closeAria: (pages: number) => string;
+    /** The pages button: its accessible name, with how many there are. */
+    pagesAria: (pages: number) => string;
+    /** The onward control's word and its full name. */
+    review: string;
+    reviewAria: (pages: number) => string;
+    /** Filmstrip: the title over the camera, the strip's name, a tile, the next slot and the count. */
+    filmstripTitle: (next: number) => string;
+    filmstripLabel: string;
+    filmstripTile: (n: number, verdict: string) => string;
+    filmstripNext: (n: number) => string;
+    filmstripCount: (n: number, max: number) => string;
+    /** The mode rail: its group name, the two modes, and the tag on the second. */
+    modeLabel: string;
+    modeManual: string;
+    modeAuto: string;
+    beta: string;
+    /** The one-hand column's auto toggle: its glyph (a letter) and the collapse layout's switch word. */
+    autoLetter: string;
+    autoSwitch: string;
+  };
+
   confirm: {
-    title: string;
-    help: string;
-    slotCaption: string;
+    /**
+     * The pill over the photo — the screen's one instruction. A reason from
+     * {@link AppCopy.confirm.attention} or {@link AppCopy.confirm.notFound}
+     * takes its place when there is one.
+     */
+    pill: string;
+    /** The small line under the pill: "Página 2 · cantos". */
+    pageCorners: (n: number) => string;
+    /** The pill when no page outline was found and the editor opened on its own inset quad. */
+    notFound: string;
+    /** The bottom bar's three cells: one short visible word each… */
     confirmCta: string;
     savingCta: string;
     retakeCta: string;
@@ -223,15 +284,37 @@ export interface AppCopy {
      * "Use the whole photo": the escape hatch for a picture that is already
      * cropped — a gallery pick of a scan someone else made, usually — where
      * there are no corners to find because the photo's own corners are the
-     * page's. Deliberately the quietest control on the screen: it is right
-     * sometimes, and confirming the corners is right the rest of the time.
+     * page's. The bar's third cell, beside the primary rather than above it:
+     * it is right sometimes, and confirming the corners is right the rest of
+     * the time.
      */
     wholeCta: string;
+    /** …and the full phrase each one is announced as (it contains the word). */
+    confirmLabel: string;
+    retakeLabel: string;
+    wholeLabel: string;
     dialogLabel: (n: number) => string;
     unavailableTitle: string;
     unavailableBody: string;
     announceReady: string;
     announceDone: (n: number) => string;
+    /**
+     * The photo's own check (`lib/still-check.ts`), in the pill over the
+     * editor when it asks for a closer look — short, it replaces the pill: a corner on the photo's edge, the
+     * page not where the viewfinder had it, no page found in the photo, an
+     * automatic photo that could not be checked against the viewfinder.
+     * Advisory: the screen and every control work the same either way.
+     */
+    attention: Record<"no-page" | "corner-outside" | "moved" | "unverified" | "low-resolution", string>;
+    /**
+     * A corner the capture could not see — something lay over it — placed
+     * where its two edges meet (`lib/corner-check.ts`): the pill's sentence
+     * when no other reason takes it, the short badge on that handle, and the
+     * handle's accessible name (the corner's own name before it).
+     */
+    estimatedPill: string;
+    estimatedBadge: string;
+    estimatedHandle: (corner: string) => string;
   };
 
   review: {
@@ -264,7 +347,6 @@ export interface AppCopy {
       preview: readonly [string, string];
       add: readonly [string, string];
     };
-    next: string;
     preparing: string;
     emptyTitle: string;
     emptyBody: string;
@@ -341,34 +423,51 @@ export interface AppCopy {
   preview: {
     dialogLabel: (n: number) => string;
     close: string;
-    /** The header's mono second line: "de 5 · exame". */
-    ofTotal: (total: number, document: string) => string;
-    /** What an unnamed document is called there — the name lands on step 3. */
-    documentWord: string;
-    /** The ⋯ button's accessible name. */
-    menu: string;
-    failedLine: string;
-    /** The full phrase behind the `cantos` tile's one lowercase word. */
-    adjustCorners: string;
+    /** The top-right bin's accessible name; it opens the delete confirmation. */
+    deletePage: string;
+    /** Under the page: "Página 2 de 3" — also the pager's live announcement. */
+    position: (n: number, total: number) => string;
+    /** The quiet line under the position, only when there is more than one page. */
+    swipeHint: string;
     /**
-     * The mono band label over the four tiles — the line where the page stops
-     * being looked at and starts being changed. Written lowercase and
-     * uppercased by `Meta caps`, like every other section marker.
+     * The picture's accessible name: what a tap (Enter) and a hold (Space) on
+     * it do. `full` — the page can be opened whole; `compare` — there is an
+     * un-improved version to hold for.
      */
-    correctLabel: string;
-    /** The four tiles' visible words. One lowercase word each, by contract:
-     *  four equal columns at 375 px leave ~68 px of mono text. */
+    surfaceLabel: (n: number, full: boolean, compare: boolean) => string;
+    failedLine: string;
+    /** The full phrase behind the `Cantos` tool's one word. */
+    adjustCorners: string;
+    /** The four tools' visible words. One word each, by contract: four equal
+     *  columns at 320 px leave ~70 px of 12 px text. */
     tiles: {
       rotate: string;
       corners: string;
       straighten: string;
-      /** The switch's word once the page is actually wearing the correction. */
-      straightenApplied: string;
       finish: string;
     };
     /**
-     * The 38 px status line — the ONE place on this screen that talks about
-     * state. Every sentence is composed at render from `rendered.*` and
+     * What a tool's corner dot, or its dimmed state, means — the tool's
+     * accessible description (the dot itself is decoration). A dimmed tool
+     * always says why it cannot be used.
+     */
+    toolNotes: {
+      /** The page is wearing this correction (the small dot on the icon). */
+      applied: string;
+      /** The way out of what the status line reports (Cantos, on a page that went in flat). */
+      suggested: string;
+      /** The page could not be prepared at all. */
+      failed: string;
+      /** A render is running; the tool comes back when it lands. */
+      busy: string;
+      /** Endireitar needs the sheet's corners to know what to straighten. */
+      noCorners: string;
+    };
+    /** The small (i) beside "Página N de M": opens {@link about}, on any page. */
+    aboutButton: string;
+    /**
+     * The short line under the page — the ONE place on this screen that talks
+     * about state, and silent on a page that is fine. Every sentence is composed at render from `rendered.*` and
      * {@link effectiveFinish}; none of them is ever stored.
      */
     status: {
@@ -396,24 +495,19 @@ export interface AppCopy {
       turning: (direction: string, degrees: number) => string;
     };
     /**
-     * The card between the sheet and the tiles — the band that is allowed to
-     * appear and disappear, because it only exists when one line is not enough.
+     * The pager's buttons, on a document of more than one page. Swiping is the
+     * gesture; these are its keyboard and screen-reader equivalents, shown
+     * when focused.
      */
-    cards: {
-      noCorners: string;
-      failed: string;
-    };
-    /** The pager, on a document of more than one page. */
     pager: {
       previous: string;
       next: string;
-      /** "3 / 5" */
-      count: (n: number, total: number) => string;
-      thumb: (n: number) => string;
     };
     /** Press-and-hold: the same page with the improvements left out. */
     compare: string;
     compareHint: string;
+    /** The compare hold as a toggle, for a screen reader (whose activation is a click, never a hold). */
+    compareToggle: (showingOriginal: boolean) => string;
     /**
      * The one-time hint under the compare chip, shown the first time a page has
      * something to compare against and never again (`lib/tips.ts`).
@@ -429,8 +523,9 @@ export interface AppCopy {
      *
      * It exists because this row now offers two very different things under one
      * word, and one of them collides with a label the app already uses:
-     * "Endireitar" is about the sheet's *curve*, while the "já endireitada" chip
-     * over the picture is about the crop the app did by itself at capture. The
+     * "Endireitar" is about the print's *tilt* inside the sheet and the
+     * sheet's *curve*, while the "já endireitada" chip over the picture is
+     * about the crop the app did by itself at capture. The
      * sheet says both out loud rather than leaving the reader to guess.
      */
     about: {
@@ -452,8 +547,6 @@ export interface AppCopy {
      * PDF will carry, so the quality being judged is the quality that ships.
      */
     full: {
-      /** The `⤢ ver inteira` pill that opens it. */
-      open: string;
       label: (n: number) => string;
       /** The header's own screen title. */
       title: string;
@@ -476,7 +569,8 @@ export interface AppCopy {
       back: string;
     };
     /**
-     * "Endireitar a folha curvada" — the per-page beta control.
+     * "Endireitar a folha" — the per-page beta control: the print's tilt first,
+     * then the sheet's curl.
      *
      * Descriptive, never diagnostic, and never a promise: the words say what
      * the app will *try*, and {@link AppCopy.preview.dewarp.outcomes} is the
@@ -484,7 +578,7 @@ export interface AppCopy {
      */
     dewarp: {
       label: string;
-      /** What kind of page it is for. */
+      /** What kind of page it is for: tilted text, and curved paper. */
       help: string;
       /**
        * What to do next, for the two outcomes that are worth retrying.
@@ -496,6 +590,12 @@ export interface AppCopy {
        * support code, which is the half a screenshot needs.
        */
       retryHint: string;
+      /**
+       * The same, for a tilt that was straightened while the curve could not
+       * be checked: the switch is on, so a tap would turn it off — the retry
+       * is off and on again, and the card says so.
+       */
+      retryCurlHint: string;
       /**
        * The whole of what is downloaded, said once per session before anything
        * is fetched: the size, that the cache may lose it, and that the picture
@@ -526,15 +626,37 @@ export interface AppCopy {
       /** The cancel was tapped and the run is unwinding — instant, honest. */
       cancelling: string;
       /**
-       * One sentence per outcome bucket, never a technical reason.
-       * `better-flat` is a confirmation, not a warning: the A/B ran and kept
-       * the better image. Only `download` and `transient` earn the warn tone,
-       * because only they are worth a retry.
+       * One sentence per outcome of a tap (`scan-store.ts`'s
+       * `StraightenOutcome`), never a technical reason.
+       *
+       * The first four say what was corrected — the print's tilt, the sheet's
+       * curl, both, or the tilt with the curl left as it was — so a page that
+       * only got its tilt fixed is never told "mantivemos a original".
+       * `nothing` is the one decline that states a fact about the page, and it
+       * may, because it was measured (level print, flat page). Every other
+       * decline is a *limit* of the correction and must say so without
+       * claiming the page reads better as it is. Only `download` and
+       * `transient` earn the warn tone, because only they are worth a retry.
        */
       outcomes: Record<
-        "better-flat" | "unverified" | "page" | "download" | "transient",
+        | "tilt"
+        | "curl"
+        | "both"
+        | "tilt-only"
+        | "tilt-retry"
+        | "nothing"
+        | "declined"
+        | "unverified"
+        | "page"
+        | "download"
+        | "transient",
         string
       >;
+      /**
+       * Added to the card when Endireitar is tapped again over an answer that
+       * is final for this photo: why the tap changed nothing, and what would.
+       */
+      retapHint: string;
       /** This device missed the budget twice; the control is off for the session. */
       unavailable: string;
       /**
@@ -576,27 +698,23 @@ export interface AppCopy {
     /** The primary while a render runs — inert, and saying why. */
     oneMoment: string;
     closeAction: string;
-    /** The ⋯ menu's three rows. */
-    menuItems: {
-      about: string;
-      /** `?debug=1` only. Dev-facing, and the sheet behind it is untranslated. */
-      diagnostics: string;
-      remove: string;
+    /**
+     * The bin deletes at once; this toast offers the way back for a few
+     * seconds ("Página excluída · Desfazer"). No confirmation sheet.
+     */
+    undoDelete: {
+      message: string;
+      action: string;
+      /** The Undo button's full name, for whoever meets it out of context. */
+      actionLabel: (n: number) => string;
     };
     /**
-     * The confirmation the ⋯ menu opens. It states the consequence — what the
-     * document is left with — rather than asking "are you sure?".
+     * The editor after its only page was deleted, while the undo is still on
+     * offer. When the toast goes, the editor closes onto the empty document.
      */
-    confirmDelete: {
-      title: (n: number) => string;
-      /**
-       * `remaining` is what the document is left with. Zero has its own
-       * sentence: "o PDF fica com 0 páginas" is a count nobody thinks in, and
-       * what actually happens there is that the document ends.
-       */
-      body: (remaining: number) => string;
-      confirm: string;
-      keep: string;
+    emptied: {
+      title: string;
+      body: string;
     };
   };
 
@@ -785,7 +903,6 @@ export interface AppCopy {
       previous: string;
       next: string;
       shortcuts: string;
-      goGerar: string;
       empty: string;
       /** The confirm before a page goes away — it states the consequence. */
       removeDialog: {
@@ -900,7 +1017,16 @@ const PT: AppCopy = {
       searching: "Procurando documento",
       notFound: "Não achei a folha — toque para capturar",
       moveBack: "Afaste um pouco",
+      movePhone: {
+        up: "Mova o celular para cima",
+        down: "Mova o celular para baixo",
+        left: "Mova o celular para a esquerda",
+        right: "Mova o celular para a direita",
+      },
       moveCloser: "Aproxime",
+      moveCloserNear: "Aproxime mais um pouco",
+      cornerCovered: "Canto coberto — afaste a folha de cima",
+      separateSheets: "Separe as folhas",
       lowLight: "Pouca luz",
       glare: "Reflexo — incline o celular",
       holdStill: "Segure firme",
@@ -935,20 +1061,59 @@ const PT: AppCopy = {
     preparingCamera: "preparando a câmera…",
   },
 
+  captureLayout: {
+    stepPill: "Passo 1 de 3 · Capturar",
+    stepShort: "1/3 · Capturar",
+    stepAria: "Passo 1 de 3: capturar",
+    captureWord: "Capturar",
+    closeAria: (pages) => (pages > 0 ? "Voltar para as páginas" : "Fechar"),
+    pagesAria: (pages) =>
+      pages === 0
+        ? "Nenhuma página capturada ainda"
+        : `Ver ${pages} ${pages === 1 ? "página capturada" : "páginas capturadas"}`,
+    review: "Conferir",
+    reviewAria: (pages) =>
+      `Conferir ${pages} ${pages === 1 ? "página" : "páginas"} — passo 2`,
+    filmstripTitle: (next) => `Capturar · página ${next}`,
+    filmstripLabel: "Páginas capturadas",
+    filmstripTile: (n, verdict) => `Página ${n} — ${verdict}. Toque para ver.`,
+    filmstripNext: (n) => `Próxima: página ${n}`,
+    filmstripCount: (n, max) => `${n} de ${max}`,
+    modeLabel: "Modo de captura",
+    modeManual: "Manual",
+    modeAuto: "Automático",
+    beta: "Beta",
+    autoLetter: "A",
+    autoSwitch: "Auto",
+  },
+
   confirm: {
-    title: "Confirme os cantos",
-    help: "Arraste se algum canto estiver fora da folha.",
-    slotCaption: "a página confirmada entra na galeria",
-    confirmCta: "Confirmar cantos",
+    pill: "Arraste um canto se precisar",
+    pageCorners: (n) => `Página ${n} · cantos`,
+    notFound: "Não achei a folha — arraste os cantos ou refaça",
+    confirmCta: "Confirmar",
     savingCta: "Guardando…",
-    retakeCta: "Refazer foto",
-    wholeCta: "Usar a foto inteira",
+    retakeCta: "Refazer",
+    wholeCta: "Foto inteira",
+    confirmLabel: "Confirmar cantos",
+    retakeLabel: "Refazer foto",
+    wholeLabel: "Usar a foto inteira",
     dialogLabel: (n) => `Confirme os cantos da página ${n}`,
     unavailableTitle: "Não dá para conferir esta foto",
     unavailableBody:
       "Não conseguimos abrir a foto neste aparelho. Refaça a foto — leva alguns segundos.",
     announceReady: "Confira os quatro cantos da folha.",
     announceDone: (n) => `Página ${n} confirmada.`,
+    attention: {
+      "corner-outside": "Um canto pode ter ficado fora da foto — confira",
+      moved: "A foto saiu diferente da câmera — confira os cantos",
+      "no-page": "Não achei a folha — arraste os cantos ou refaça",
+      unverified: "Não deu para conferir a folha inteira — veja os cantos",
+      "low-resolution": "Foto em resolução menor — refaça se o texto ficar ilegível",
+    },
+    estimatedPill: "Um canto estava coberto — confira o canto estimado",
+    estimatedBadge: "estimado",
+    estimatedHandle: (corner) => `${corner}: canto estimado — confira`,
   },
 
   review: {
@@ -968,7 +1133,6 @@ const PT: AppCopy = {
       preview: ["prévia", "do PDF"],
       add: ["mais uma", "página"],
     },
-    next: "Ir para o passo 3",
     preparing: "Preparando suas páginas…",
     emptyTitle: "Nenhuma página ainda",
     emptyBody: "Volte e fotografe a primeira página — leva alguns segundos.",
@@ -1054,19 +1218,29 @@ const PT: AppCopy = {
   preview: {
     dialogLabel: (n) => `Página ${n} ampliada`,
     close: "Fechar a visualização",
-    ofTotal: (total, document) => `de ${total} · ${document}`,
-    documentWord: "documento",
-    menu: "Mais opções desta página",
+    deletePage: "Excluir página",
+    position: (n, total) => `Página ${n} de ${total}`,
+    swipeHint: "deslize para ver as outras",
+    surfaceLabel: (n, full, compare) =>
+      `Página ${n}.` +
+      (full ? " Toque para ver inteira." : "") +
+      (compare ? " Segure para ver sem as melhorias." : ""),
     failedLine: "Esta página falhou — tente de novo.",
     adjustCorners: "Ajustar cantos",
-    correctLabel: "corrigir",
     tiles: {
-      rotate: "girar",
-      corners: "cantos",
-      straighten: "endireitar",
-      straightenApplied: "endireitada",
-      finish: "acabamento",
+      rotate: "Girar",
+      corners: "Cantos",
+      straighten: "Endireitar",
+      finish: "Acabamento",
     },
+    toolNotes: {
+      applied: "aplicado",
+      suggested: "recomendado",
+      failed: "indisponível — esta página falhou",
+      busy: "indisponível enquanto a página é preparada",
+      noCorners: "indisponível — ajuste os cantos primeiro",
+    },
+    aboutButton: "Sobre as melhorias",
     status: {
       ready: (finish) =>
         finish === "original"
@@ -1082,35 +1256,30 @@ const PT: AppCopy = {
       turning: (direction, degrees) =>
         `Girando para a ${direction} — ${degrees}°.`,
     },
-    cards: {
-      noCorners:
-        "A folha ficou muito perto da borda da foto. Você pode marcar os cantos na mão ou usar a página como ela está.",
-      failed:
-        "Não conseguimos preparar esta página. Tente de novo ou refaça a foto.",
-    },
     pager: {
       previous: "Página anterior",
       next: "Próxima página",
-      count: (n, total) => `${n} / ${total}`,
-      thumb: (n) => `Ir para a página ${n}`,
     },
     // Deliberately not "original": what it shows is the photo without the
     // clareamento, and that photo is already the app's own JPEG of the frame —
     // not the untouched thing the camera sensor saw.
     compare: "Sem melhorias",
     compareHint: "Segure para ver a foto sem as melhorias.",
+    compareToggle: (showingOriginal) =>
+      showingOriginal ? "Mostrar com as melhorias" : "Mostrar sem as melhorias",
     holdTip: "segure e solte para comparar",
     about: {
       title: "As melhorias desta página",
       dewarpTitle: "Endireitar",
       dewarpBody:
-        "Tira a curva da folha — a barriga de uma página de livro ou de um " +
-        "papel que não fica reto. É diferente do endireitamento automático: " +
-        "assim que você fotografa, o app já recorta a folha pelos cantos e " +
-        "corrige a inclinação, e é isso que a etiqueta “já endireitada” quer " +
-        "dizer. O Endireitar cuida da curva que sobra depois disso. Em algumas " +
-        "páginas o resultado fica pior; quando isso acontece, o app avisa e " +
-        "mantém a original. Tudo é feito no seu aparelho.",
+        "Endireita o texto que saiu torto dentro da folha e tira a curva da " +
+        "folha — a barriga de uma página de livro ou de um papel que não fica " +
+        "reto. É diferente do endireitamento automático: assim que você " +
+        "fotografa, o app já recorta a folha pelos cantos e a deixa reta, e é " +
+        "isso que a etiqueta “já endireitada” quer dizer. O Endireitar cuida do que sobra " +
+        "depois disso: primeiro a inclinação do texto, depois a curva. Quando " +
+        "não dá para corrigir com segurança, o app avisa e mantém a página " +
+        "como estava. Tudo é feito no seu aparelho.",
       finishTitle: "Acabamento",
       finishIntro:
         "Muda a luz e a tinta da folha, nunca o formato. Também é onde você " +
@@ -1118,7 +1287,6 @@ const PT: AppCopy = {
       holdNote: "Segure a página para ver como ela estava antes das melhorias.",
     },
     full: {
-      open: "ver inteira",
       label: (n) => `Página ${n} em tamanho real`,
       title: "Folha inteira",
       close: "Voltar para a página",
@@ -1132,9 +1300,11 @@ const PT: AppCopy = {
       back: "Voltar",
     },
     dewarp: {
-      label: "Endireitar a folha curvada",
-      help: "Para folha de livro ou papel que não fica reto.",
+      label: "Endireitar a folha",
+      help: "Para texto torto na foto, folha de livro ou papel que não fica reto.",
       retryHint: "Dá para tentar de novo: toque em endireitar.",
+      retryCurlHint:
+        "Para tentar a curva de novo, desligue e ligue o endireitar.",
       consent:
         `Baixa um modelo de ${DEWARP_ASSET_SIZE_LABEL} uma vez para endireitar ` +
         "folhas curvadas neste aparelho. A melhoria leva alguns segundos por " +
@@ -1163,11 +1333,25 @@ const PT: AppCopy = {
       cancel: "Cancelar",
       cancelling: "cancelando…",
       outcomes: {
-        "better-flat": "Conferimos: esta página fica melhor como está.",
+        tilt: "Endireitamos o texto, que estava torto.",
+        curl: "Tiramos a curva da folha.",
+        both: "Endireitamos o texto torto e tiramos a curva da folha.",
+        "tilt-only":
+          "Endireitamos o texto, que estava torto. A curva da folha ficou " +
+          "como estava.",
+        "tilt-retry":
+          "Endireitamos o texto, que estava torto, mas não deu para conferir " +
+          "a curva da folha agora.",
+        nothing: "O texto já estava reto e a folha, plana — não havia o que endireitar.",
+        declined:
+          "Não deu para endireitar esta página com segurança — mantivemos " +
+          "como estava.",
         unverified:
           "Mantivemos a página como estava — não deu para conferir se a " +
           "melhoria ajudaria.",
-        page: "Esta página ficou melhor sem a melhoria — mantivemos a original.",
+        page:
+          "Esta página está além do que o Endireitar consegue corrigir — " +
+          "mantivemos como estava.",
         download:
           "Não deu para baixar o arquivo da melhoria. Confira a conexão e " +
           "tente de novo.",
@@ -1175,6 +1359,9 @@ const PT: AppCopy = {
           "Algo deu errado e a página foi mantida como estava. " +
           "Dá para tentar de novo.",
       },
+      retapHint:
+        "Tocar de novo dá a mesma resposta para esta foto. Para tentar outra " +
+        "vez, ajuste os cantos ou refaça a foto.",
       unavailable:
         "A melhoria de curvatura não deu conta neste aparelho e foi pausada.",
       diagnostics: {
@@ -1196,21 +1383,14 @@ const PT: AppCopy = {
     nextPage: "Próxima página",
     oneMoment: "Um instante…",
     closeAction: "Fechar",
-    menuItems: {
-      about: "Sobre as melhorias",
-      diagnostics: "Detalhes técnicos",
-      remove: "Apagar a página",
+    undoDelete: {
+      message: "Página excluída",
+      action: "Desfazer",
+      actionLabel: (n) => `Desfazer: trazer a página ${n} de volta`,
     },
-    confirmDelete: {
-      title: (n) => `Apagar a página ${n}?`,
-      body: (remaining) =>
-        remaining === 0
-          ? "A foto sai do documento e ele fica vazio. Não tem como voltar atrás."
-          : `A foto sai do documento e o PDF fica com ${remaining} ${
-              remaining === 1 ? "página" : "páginas"
-            }. Não tem como voltar atrás.`,
-      confirm: "Apagar a página",
-      keep: "Manter",
+    emptied: {
+      title: "O documento ficou vazio.",
+      body: "Toque em Desfazer para trazer a página de volta.",
     },
   },
 
@@ -1398,7 +1578,6 @@ const PT: AppCopy = {
       previous: "Página anterior",
       next: "Próxima página",
       shortcuts: "← → páginas · R girar · C cantos · ⌫ apagar",
-      goGerar: "Ir para o passo 3",
       empty: "Nenhuma página aberta. Volte ao passo 1 e escolha os arquivos.",
       removeDialog: {
         title: (n) => `Apagar a página ${n}?`,
@@ -1528,7 +1707,16 @@ const EN: AppCopy = {
       searching: "Looking for the document",
       notFound: "Can't find the page — tap to capture",
       moveBack: "Move back a little",
+      movePhone: {
+        up: "Move the phone up",
+        down: "Move the phone down",
+        left: "Move the phone left",
+        right: "Move the phone right",
+      },
       moveCloser: "Move closer",
+      moveCloserNear: "Move a little closer",
+      cornerCovered: "Corner covered — move the sheet on top",
+      separateSheets: "Separate the sheets",
       lowLight: "Low light",
       glare: "Glare — tilt the phone",
       holdStill: "Hold still",
@@ -1564,20 +1752,59 @@ const EN: AppCopy = {
     preparingCamera: "getting the camera ready…",
   },
 
+  captureLayout: {
+    stepPill: "Step 1 of 3 · Capture",
+    stepShort: "1/3 · Capture",
+    stepAria: "Step 1 of 3: capture",
+    captureWord: "Capture",
+    closeAria: (pages) => (pages > 0 ? "Back to the pages" : "Close"),
+    pagesAria: (pages) =>
+      pages === 0
+        ? "No pages captured yet"
+        : `See ${pages} captured ${pages === 1 ? "page" : "pages"}`,
+    review: "Review",
+    reviewAria: (pages) =>
+      `Review ${pages} ${pages === 1 ? "page" : "pages"} — step 2`,
+    filmstripTitle: (next) => `Capture · page ${next}`,
+    filmstripLabel: "Captured pages",
+    filmstripTile: (n, verdict) => `Page ${n} — ${verdict}. Tap to see it.`,
+    filmstripNext: (n) => `Next: page ${n}`,
+    filmstripCount: (n, max) => `${n} of ${max}`,
+    modeLabel: "Capture mode",
+    modeManual: "Manual",
+    modeAuto: "Automatic",
+    beta: "Beta",
+    autoLetter: "A",
+    autoSwitch: "Auto",
+  },
+
   confirm: {
-    title: "Confirm the corners",
-    help: "Drag any corner that sits outside the sheet.",
-    slotCaption: "the confirmed page goes to the gallery",
-    confirmCta: "Confirm corners",
+    pill: "Drag a corner if you need to",
+    pageCorners: (n) => `Page ${n} · corners`,
+    notFound: "No sheet found — drag the corners or retake",
+    confirmCta: "Confirm",
     savingCta: "Saving…",
-    retakeCta: "Retake photo",
-    wholeCta: "Use the whole photo",
+    retakeCta: "Retake",
+    wholeCta: "Whole photo",
+    confirmLabel: "Confirm corners",
+    retakeLabel: "Retake photo",
+    wholeLabel: "Use the whole photo",
     dialogLabel: (n) => `Confirm the corners of page ${n}`,
     unavailableTitle: "This photo cannot be checked",
     unavailableBody:
       "We could not open the photo on this device. Take it again — it only takes a few seconds.",
     announceReady: "Check the four corners of the sheet.",
     announceDone: (n) => `Page ${n} confirmed.`,
+    attention: {
+      "corner-outside": "A corner may be outside the photo — check it",
+      moved: "The photo differs from the camera — check the corners",
+      "no-page": "No sheet found — drag the corners or retake",
+      unverified: "Could not check the whole sheet — look at the corners",
+      "low-resolution": "Lower-resolution photo — retake if the text is hard to read",
+    },
+    estimatedPill: "A corner was covered — check the estimated corner",
+    estimatedBadge: "estimated",
+    estimatedHandle: (corner) => `${corner}: estimated corner — check it`,
   },
 
   review: {
@@ -1597,7 +1824,6 @@ const EN: AppCopy = {
       preview: ["preview", "of the PDF"],
       add: ["one more", "page"],
     },
-    next: "Go to step 3",
     preparing: "Preparing your pages…",
     emptyTitle: "No pages yet",
     emptyBody: "Go back and photograph the first page — it takes a few seconds.",
@@ -1623,7 +1849,7 @@ const EN: AppCopy = {
       outro: "other",
     },
     previewCta: "See the PDF preview",
-    generate: "Create PDF",
+    generate: "Generate PDF",
     preparing: "Preparing your pages…",
     blocked: (n) =>
       n === 1
@@ -1681,19 +1907,29 @@ const EN: AppCopy = {
   preview: {
     dialogLabel: (n) => `Page ${n} enlarged`,
     close: "Close the preview",
-    ofTotal: (total, document) => `of ${total} · ${document}`,
-    documentWord: "document",
-    menu: "More options for this page",
+    deletePage: "Delete page",
+    position: (n, total) => `Page ${n} of ${total}`,
+    swipeHint: "swipe to see the others",
+    surfaceLabel: (n, full, compare) =>
+      `Page ${n}.` +
+      (full ? " Tap to see it whole." : "") +
+      (compare ? " Hold to see it without the enhancements." : ""),
     failedLine: "This page failed — try again.",
     adjustCorners: "Adjust corners",
-    correctLabel: "fix",
     tiles: {
-      rotate: "rotate",
-      corners: "corners",
-      straighten: "straighten",
-      straightenApplied: "straightened",
-      finish: "finish",
+      rotate: "Rotate",
+      corners: "Corners",
+      straighten: "Straighten",
+      finish: "Finish",
     },
+    toolNotes: {
+      applied: "applied",
+      suggested: "recommended",
+      failed: "unavailable — this page failed",
+      busy: "unavailable while the page is being prepared",
+      noCorners: "unavailable — adjust the corners first",
+    },
+    aboutButton: "About the improvements",
     status: {
       ready: (finish) =>
         finish === "original"
@@ -1708,33 +1944,28 @@ const EN: AppCopy = {
       elapsed: (seconds) => `${seconds} s`,
       turning: (direction, degrees) => `Turning ${direction} — ${degrees}°.`,
     },
-    cards: {
-      noCorners:
-        "The sheet ended up too close to the edge of the photo. You can mark the corners by hand, or use the page as it is.",
-      failed:
-        "We could not prepare this page. Try again, or retake the photo.",
-    },
     pager: {
       previous: "Previous page",
       next: "Next page",
-      count: (n, total) => `${n} / ${total}`,
-      thumb: (n) => `Go to page ${n}`,
     },
     compare: "No enhancements",
     compareHint: "Press and hold to see the photo without the enhancements.",
+    compareToggle: (showingOriginal) =>
+      showingOriginal ? "Show with the enhancements" : "Show without the enhancements",
     holdTip: "press and hold to compare",
     about: {
       title: "This page's improvements",
       dewarpTitle: "Straighten",
       dewarpBody:
-        "Takes the curve out of the sheet — the belly of a page from a book, " +
-        "or of paper that will not lie flat. It is not the automatic " +
-        "straightening: the moment you take the photo the app already crops " +
-        "the sheet by its corners and fixes the tilt, and that is what the " +
-        "“already straightened” label means. Straighten deals with the curve " +
-        "left over after that. On some pages the result is worse; when that " +
-        "happens the app says so and keeps the original. It all runs on your " +
-        "device.",
+        "Levels text that came out tilted inside the sheet, and takes the " +
+        "curve out of the sheet — the belly of a page from a book, or of paper " +
+        "that will not lie flat. It is not the automatic straightening: the " +
+        "moment you take the photo the app already crops the sheet by its " +
+        "corners and squares it up, and that is what the “already " +
+        "straightened” label means. " +
+        "Straighten deals with what is left after that: the tilt of the text " +
+        "first, then the curve. When it cannot be corrected safely, the app " +
+        "says so and keeps the page as it was. It all runs on your device.",
       finishTitle: "Finish",
       finishIntro:
         "Changes the light and the ink on the sheet, never its shape. It is " +
@@ -1743,7 +1974,6 @@ const EN: AppCopy = {
         "Hold the page to see how it looked before the improvements.",
     },
     full: {
-      open: "see it whole",
       label: (n) => `Page ${n} at actual size`,
       title: "The whole sheet",
       close: "Back to the page",
@@ -1757,9 +1987,10 @@ const EN: AppCopy = {
       back: "Back",
     },
     dewarp: {
-      label: "Straighten the curved sheet",
-      help: "For a page from a book, or paper that will not lie flat.",
+      label: "Straighten the sheet",
+      help: "For tilted text in the photo, a page from a book, or paper that will not lie flat.",
       retryHint: "You can try again: tap straighten.",
+      retryCurlHint: "To try the curve again, turn straighten off and on.",
       consent:
         `Downloads a ${DEWARP_ASSET_SIZE_LABEL} model once to straighten curved ` +
         "sheets on this device. The improvement takes a few seconds per page. " +
@@ -1788,11 +2019,24 @@ const EN: AppCopy = {
       cancel: "Cancel",
       cancelling: "cancelling…",
       outcomes: {
-        "better-flat": "We checked: this page reads better as it is.",
+        tilt: "We levelled the text, which was tilted.",
+        curl: "We took the curve out of the sheet.",
+        both: "We levelled the tilted text and took the curve out of the sheet.",
+        "tilt-only":
+          "We levelled the text, which was tilted. The curve of the sheet was " +
+          "left as it was.",
+        "tilt-retry":
+          "We levelled the text, which was tilted, but the curve of the sheet " +
+          "could not be checked this time.",
+        nothing: "The text was already level and the sheet flat — there was nothing to straighten.",
+        declined:
+          "We could not straighten this page safely — we kept it as it was.",
         unverified:
           "We kept the page as it was — there was not enough to tell " +
           "whether the improvement would help.",
-        page: "This page looked better without the improvement — we kept the original.",
+        page:
+          "This page is beyond what Straighten can correct — we kept it as " +
+          "it was.",
         download:
           "The improvement could not be downloaded. Check the connection and " +
           "try again.",
@@ -1800,6 +2044,9 @@ const EN: AppCopy = {
           "Something went wrong and the page was kept as it was. " +
           "You can try again.",
       },
+      retapHint:
+        "Tapping again gives the same answer for this photo. To try again, " +
+        "adjust the corners or retake the photo.",
       unavailable:
         "The curvature improvement was too slow on this device and is paused.",
       diagnostics: {
@@ -1821,21 +2068,14 @@ const EN: AppCopy = {
     nextPage: "Next page",
     oneMoment: "One moment…",
     closeAction: "Close",
-    menuItems: {
-      about: "About the improvements",
-      diagnostics: "Technical details",
-      remove: "Delete this page",
+    undoDelete: {
+      message: "Page deleted",
+      action: "Undo",
+      actionLabel: (n) => `Undo: bring page ${n} back`,
     },
-    confirmDelete: {
-      title: (n) => `Delete page ${n}?`,
-      body: (remaining) =>
-        remaining === 0
-          ? "The photo leaves the document and it becomes empty. There is no way back."
-          : `The photo leaves the document and the PDF is left with ${remaining} ${
-              remaining === 1 ? "page" : "pages"
-            }. There is no undo.`,
-      confirm: "Delete the page",
-      keep: "Keep it",
+    emptied: {
+      title: "The document is empty.",
+      body: "Tap Undo to bring the page back.",
     },
   },
 
@@ -2016,7 +2256,6 @@ const EN: AppCopy = {
       previous: "Previous page",
       next: "Next page",
       shortcuts: "← → pages · R turn · C corners · ⌫ delete",
-      goGerar: "Go to step 3",
       empty: "No page open. Go back to step 1 and choose the files.",
       removeDialog: {
         title: (n) => `Delete page ${n}?`,

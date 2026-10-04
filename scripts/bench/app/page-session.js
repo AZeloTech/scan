@@ -32,7 +32,6 @@ import { ClipPlayer, clipScript } from "./clip-player.js";
 import { drawSheet } from "./sheets.js";
 import { installPerfWatch } from "./perf-watch.js";
 import { pickPhotoSize, readPhotoSizeRange } from "../../../src/lib/still-capture.ts";
-import { MAX_LONG_EDGE } from "../../../src/lib/image.ts";
 import { scoreCaptures, scoreSession } from "../session-score.mjs";
 import { scoreReplayCaptures } from "../real-score.mjs";
 
@@ -150,17 +149,14 @@ function installProbe() {
 
 /**
  * What the app will ask `takePhoto()` for on this session's camera: its own
- * `pickPhotoSize` over the fake sensor's capabilities (`fake-camera.js`), at
- * the preview's shape and the page grid's long edge — so a still rendered
- * ahead is the size the call asks for.
+ * `pickPhotoSize` over the fake sensor's capabilities (`fake-camera.js`) — the
+ * sensor's full size — so a still rendered ahead is the size the call asks for.
  */
 function requestFor(session) {
   const { width, height } = session.still.sensor;
   return pickPhotoSize(
     readPhotoSizeRange({ imageWidth: { min: 640, max: width, step: 1 } }, "imageWidth"),
     readPhotoSizeRange({ imageHeight: { min: 480, max: height, step: 1 } }, "imageHeight"),
-    MAX_LONG_EDGE,
-    session.frame.width / session.frame.height,
   );
 }
 
@@ -176,7 +172,7 @@ async function prepare(id, seed, options = {}) {
   if (options.still) script.still = { ...script.still, ...options.still };
   knobs = options.knobs ?? {};
   const stills = options.stills ?? true;
-  player = new SessionPlayer(script, { stills });
+  player = new SessionPlayer(script, { stills, streamScale: options.streamScale ?? 1 });
   const info = await player.prerender(options.onProgress, { cache: options.cache ?? null });
   info.stillsMs = await player.prepareStills(requestFor);
   installFakeCamera({ player, permission: options.permission ?? script.permission, stills });
@@ -250,6 +246,19 @@ function visibleCrop(video) {
  * frame the user is aiming through (`boxes`, scored as layout shifts).
  */
 const boxes = [];
+/**
+ * The part of the camera frame the person can actually see, sampled with the
+ * box (`regions`) and measured here, independently of the app's own answer:
+ * the `<video>`'s content box under its computed `object-fit` /
+ * `object-position`, clipped by its own box, every clipping ancestor and the
+ * viewport, then trimmed by the opaque edge bands the layout declares
+ * (`[data-scan-occluder="top|bottom|left|right"]`) — as fractions of the
+ * frame, plus its size in CSS px. A build that declares no occluders is
+ * measured as the crop alone. `blocks`: the opaque controls over the
+ * picture, found independently of anything the app declares
+ * ({@link opaqueControls}) — the scorer counts a corner under one as hidden.
+ */
+const regions = [];
 let boxTimer = null;
 let stageVideo = null;
 function sampleBox(why) {
@@ -257,8 +266,110 @@ function sampleBox(why) {
   if (!stage || !stage.isConnected) return;
   const r = stage.getBoundingClientRect();
   if (r.width === 0 || r.height === 0) return;
-  boxes.push({ at: performance.now(), why, x: r.left, y: r.top, width: r.width, height: r.height });
+  const at = performance.now();
+  boxes.push({ at, why, x: r.left, y: r.top, width: r.width, height: r.height });
+  const region = visibleRegion(stageVideo);
+  if (region !== null) regions.push({ at, ...region });
 }
+
+function visibleRegion(video) {
+  if (video === null || !video.isConnected || video.videoWidth === 0 || video.videoHeight === 0) return null;
+  const box = video.getBoundingClientRect();
+  if (box.width === 0 || box.height === 0) return null;
+  const style = getComputedStyle(video);
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  let w = box.width;
+  let h = box.height;
+  if (style.objectFit !== "fill") {
+    const pick = style.objectFit === "contain" || style.objectFit === "scale-down" ? Math.min : Math.max;
+    const scale = style.objectFit === "none" ? 1 : pick(box.width / vw, box.height / vh);
+    w = vw * scale;
+    h = vh * scale;
+  }
+  const [px, py] = style.objectPosition.split(" ").map((v) => (v.endsWith("%") ? parseFloat(v) / 100 : 0.5));
+  const left = box.left + (box.width - w) * (px ?? 0.5);
+  const top = box.top + (box.height - h) * (py ?? 0.5);
+  const clip = { l: box.left, t: box.top, r: box.right, b: box.bottom };
+  const cut = (rect) => {
+    clip.l = Math.max(clip.l, rect.left);
+    clip.t = Math.max(clip.t, rect.top);
+    clip.r = Math.min(clip.r, rect.right);
+    clip.b = Math.min(clip.b, rect.bottom);
+  };
+  for (let el = video.parentElement; el !== null && el !== document.documentElement; el = el.parentElement) {
+    const cs = getComputedStyle(el);
+    if (cs.overflowX !== "visible" || cs.overflowY !== "visible") cut(el.getBoundingClientRect());
+  }
+  const vv = window.visualViewport;
+  cut({ left: vv?.offsetLeft ?? 0, top: vv?.offsetTop ?? 0, right: (vv?.offsetLeft ?? 0) + (vv?.width ?? innerWidth), bottom: (vv?.offsetTop ?? 0) + (vv?.height ?? innerHeight) });
+  for (const el of document.querySelectorAll("[data-scan-occluder]")) {
+    const o = el.getBoundingClientRect();
+    if (o.width === 0 || o.height === 0) continue;
+    const edge = el.getAttribute("data-scan-occluder");
+    if (edge === "top") clip.t = Math.max(clip.t, o.bottom);
+    else if (edge === "bottom") clip.b = Math.min(clip.b, o.top);
+    else if (edge === "left") clip.l = Math.max(clip.l, o.right);
+    else if (edge === "right") clip.r = Math.min(clip.r, o.left);
+  }
+  const cssW = Math.max(0, clip.r - clip.l);
+  const cssH = Math.max(0, clip.b - clip.t);
+  const blocks = opaqueControls(video, { l: left, t: top, w, h }, clip);
+  return {
+    blocks,
+    x: (clip.l - left) / w,
+    y: (clip.t - top) / h,
+    width: cssW / w,
+    height: cssH / h,
+    cssW,
+    cssH,
+    viewW: vv?.width ?? innerWidth,
+    viewH: vv?.height ?? innerHeight,
+    fit: style.objectFit,
+  };
+}
+/**
+ * What sits OVER the picture and hides it, found on the page itself rather
+ * than from what the app declares (`data-scan-occluder`): every rendered
+ * element outside the video's own ancestry whose painted background is at
+ * least half opaque (its colour's alpha times the opacity of it and every
+ * ancestor) — the glass buttons, the hint pill, a diagnostics HUD — as
+ * rectangles in frame fractions, only where they overlap the visible part.
+ * A layer covering most of the stage (the white capture flash, the file
+ * surface) is not a control and is left out.
+ */
+function opaqueControls(video, frame, clip) {
+  const ancestry = new Set();
+  for (let el = video; el !== null; el = el.parentElement) ancestry.add(el);
+  const stage = video.parentElement?.getBoundingClientRect() ?? null;
+  const out = [];
+  for (const el of document.body.querySelectorAll("*")) {
+    if (ancestry.has(el) || el instanceof SVGElement) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    if (r.right <= clip.l || r.left >= clip.r || r.bottom <= clip.t || r.top >= clip.b) continue;
+    if (stage !== null && r.width * r.height >= 0.9 * stage.width * stage.height) continue;
+    const cs = getComputedStyle(el);
+    if (cs.visibility !== "visible" || cs.display === "none") continue;
+    const alpha = colourAlpha(cs.backgroundColor);
+    if (alpha <= 0) continue;
+    let opacity = alpha;
+    for (let a = el; a !== null && opacity >= 0.5; a = a.parentElement) opacity *= Number(getComputedStyle(a).opacity);
+    if (opacity < 0.5) continue;
+    out.push({ x: (r.left - frame.l) / frame.w, y: (r.top - frame.t) / frame.h, width: r.width / frame.w, height: r.height / frame.h });
+  }
+  return out;
+}
+
+function colourAlpha(colour) {
+  const m = /rgba?\(([^)]+)\)/.exec(colour);
+  if (m === null) return colour === "transparent" ? 0 : 1;
+  const parts = m[1].split(/[\s,/]+/).filter(Boolean);
+  if (parts.length < 4) return 1;
+  const a = parts[3];
+  return a.endsWith("%") ? parseFloat(a) / 100 : parseFloat(a);
+}
+
 function watchStage(video) {
   stageVideo = video;
   if (boxTimer !== null) clearInterval(boxTimer);
@@ -312,11 +423,37 @@ async function confirmWatcher() {
   }
 }
 
-/** The auto-capture toggle, by its accessible name — absent in a build without one. */
+/**
+ * The auto-capture control, as a switch — or null where there is none. Two
+ * shapes: a pressed-state toggle named "Captura automática" (`standard`,
+ * `onehand`, `collapse`), and `rail`'s MANUAL · AUTOMÁTICO radio pair (the
+ * default layout).
+ */
 function autoToggle() {
   const label = copy.capture.autoCapture;
-  if (typeof label !== "string") return null;
-  return buttons().find((b) => b.getAttribute("aria-label") === label && !b.disabled) ?? null;
+  const toggle =
+    typeof label === "string" ? buttons().find((b) => b.getAttribute("aria-label") === label && !b.disabled) : undefined;
+  if (toggle !== undefined) {
+    const on = () => toggle.getAttribute("aria-pressed") === "true";
+    return {
+      on,
+      set: (want) => {
+        if (on() !== want) toggle.click();
+      },
+    };
+  }
+  const modeLabel = copy.captureLayout?.modeLabel;
+  const group = [...document.querySelectorAll('[role="radiogroup"]')].find((g) => g.getAttribute("aria-label") === modeLabel);
+  const radios = group === undefined ? [] : [...group.querySelectorAll('[role="radio"]')];
+  if (radios.length !== 2) return null;
+  const [manual, auto] = radios;
+  const on = () => auto.getAttribute("aria-checked") === "true";
+  return {
+    on,
+    set: (want) => {
+      if (on() !== want) (want ? auto : manual).click();
+    },
+  };
 }
 
 /** The scripted user, from the primer to the last confirm (unscripted: only the primer). */
@@ -342,7 +479,7 @@ async function act({ scripted = true } = {}) {
     const toggle = await waitFor(autoToggle, 3000);
     if (toggle === null) log("auto-toggle-missing");
     else {
-      if (toggle.getAttribute("aria-pressed") !== "true") toggle.click();
+      toggle.set(true);
       log("auto-on");
     }
     confirming = true;
@@ -391,9 +528,17 @@ function flow() {
   return createElement(ScanFlow, {
     assetBaseUrl: "/assets/",
     lang: "pt-BR",
-    // The auto-capture toggle is experimental and off unless the host asks:
-    // only a script that switches it on asks.
-    experimentalAutoCapture: script?.autoCapture === true,
+    // The auto-capture toggle: a script that switches it on asks for it
+    // (`true` also puts it on `standard`); otherwise the prop is left out, as
+    // a host that says nothing would — the default `rail` shows the toggle
+    // (off), `standard` does not.
+    experimentalAutoCapture: script?.autoCapture === true ? true : undefined,
+    // The capture layout, when the page is asked for one (`?layout=standard|
+    // classic|filmstrip|onehand|collapse`, from `npm run bench -- --layout` or
+    // the playground); the library's default (`rail`) otherwise.
+    captureLayout: new URLSearchParams(location.search).get("layout") ?? undefined,
+    // `?diag=1`: the diagnostics HUD (`experimentalDiagnostics`), for screenshots.
+    experimentalDiagnostics: new URLSearchParams(location.search).get("diag") === "1" || undefined,
     onComplete: () => hostEvents.push({ name: "complete", at: performance.now() }),
     onCancel: (reason) => hostEvents.push({ name: "cancel", reason, at: performance.now() }),
     onEvent: (event) => hostEvents.push({ ...event, at: performance.now() }),
@@ -426,8 +571,8 @@ async function run({ scripted = true } = {}) {
   // screen and its confirmation.
   if (script.autoCapture === true) {
     const toggle = autoToggle();
-    if (toggle !== null && toggle.getAttribute("aria-pressed") === "true") {
-      toggle.click();
+    if (toggle !== null && toggle.on()) {
+      toggle.set(false);
       log("auto-off");
     }
     // Settled: no photo being taken (the shutter enabled), none waiting for
@@ -480,6 +625,7 @@ async function run({ scripted = true } = {}) {
     remounts,
     visible: actions.find((a) => a.what === "camera-live")?.visible ?? null,
     boxes,
+    regions,
     torch: globalThis.__benchTorch ?? [],
   };
 }
@@ -600,8 +746,22 @@ const style = document.createElement("style");
 style.textContent = "html, body { margin: 0; background: #111; } .app-h { height: 100svh; }";
 document.head.appendChild(style);
 
+/**
+ * What the layout shows of the frame, for the scripted user to frame pages
+ * in (`--frame-by screen`): the newest measured visible region (frame
+ * fractions) and every opaque control seen over it since the camera went
+ * live — or null before the first sample.
+ */
+function view() {
+  const last = regions[regions.length - 1];
+  if (last === undefined) return null;
+  const blocks = regions.flatMap((r) => r.blocks ?? []);
+  return { x: last.x, y: last.y, width: last.width, height: last.height, blocks, samples: regions.length };
+}
+
 window.__session = {
   prepare,
+  view,
   prepareClip,
   run,
   sheet,

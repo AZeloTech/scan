@@ -29,8 +29,8 @@ import { useDialogChrome } from "@/hooks/useDialogChrome";
  * It used to hang off a `?` at the end of the editor's improve rule, wearing a
  * 44 px hit target pulled back to exactly `-my-[17px]` so it would not steal
  * height from the picture above it. The rule is gone with the fixed-band
- * redesign and so is that construct: the sheet is now a row of the editor's ⋯
- * menu, where a control is allowed to be 56 px tall.
+ * redesign and so is that construct. It is opened from the (i) beside the
+ * editor's "Página N de M", on any page, and from "por quê?" on a flagged one.
  */
 export function ImprovementsInfoSheet({ onClose }: { onClose: () => void }) {
   const copy = useCopy();

@@ -137,6 +137,33 @@ async function drive(name, port) {
   await page.waitForFunction(() => window.__scanSmoke?.done === true, null, { timeout: 120_000 });
   const report = await page.evaluate(() => window.__scanSmoke);
 
+  // The same page on a phone: <ScanFlow> with no `captureLayout` and camera
+  // permission granted lands on the capture screen — which must be the
+  // library's default layout. (The desktop viewport above gets the desktop
+  // flow, which has no capture screen.)
+  const phone = await browser.newContext({
+    permissions: ["camera"],
+    viewport: { width: 412, height: 915 },
+    deviceScaleFactor: 2,
+    isMobile: true,
+    hasTouch: true,
+  });
+  const phonePage = await phone.newPage();
+  phonePage.on("pageerror", (error) => consoleErrors.push(`[phone] ${String(error)}`));
+  phonePage.on("request", (request) => {
+    const url = request.url();
+    if (!url.startsWith(origin) && !url.startsWith("data:") && !url.startsWith("blob:")) offOrigin.push(url);
+  });
+  phonePage.on("response", (response) => {
+    if (response.status() === 404) notFound.push(response.url());
+  });
+  await phonePage.goto(origin, { waitUntil: "networkidle" });
+  const layout = await phonePage
+    .waitForSelector("[data-scan-layout]", { timeout: 30_000 })
+    .then((element) => element.getAttribute("data-scan-layout"))
+    .catch(() => null);
+  await phone.close();
+
   await browser.close();
 
   const failures = [];
@@ -149,6 +176,7 @@ async function drive(name, port) {
     failures.push(`live detection would not run in its worker: ${report.detectWorker ?? "not reported"}`);
   }
   if (!report.pdfBytes) failures.push("no PDF was built");
+  if (layout !== "rail") failures.push(`the default capture screen is not the rail layout (got ${layout ?? "none"})`);
   if (offOrigin.length > 0) {
     failures.push(
       `${offOrigin.length} off-origin request(s) — this library must never leave the ` +
@@ -171,7 +199,7 @@ async function drive(name, port) {
     return false;
   }
   console.log(
-    `${name}: ok — ML ready, PDF built (${report.pdfBytes} bytes, ${report.pages} page(s)), ` +
+    `${name}: ok — ML ready, PDF built (${report.pdfBytes} bytes, ${report.pages} page(s)), default layout ${layout}, ` +
       `no off-origin requests, no 404s`
   );
   return true;

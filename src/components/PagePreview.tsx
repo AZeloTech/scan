@@ -2,12 +2,14 @@
 
 import * as React from "react";
 import clsx from "clsx";
-import { useDocumentName, useStore } from "@/hooks/useScanStore";
+import { useStore } from "@/hooks/useScanStore";
 import { useDialogChrome } from "@/hooks/useDialogChrome";
+import { useScanRuntime } from "@/hooks/useScanRuntime";
 import { usePageTurn } from "@/hooks/usePageTurn";
 import { usePageView } from "@/hooks/usePageView";
 import { useRotatedFit } from "@/hooks/useRotatedFit";
-import { overlayIn, overlayOut } from "@/lib/motion";
+import { overlayIn, overlayOut, prefersReducedMotion } from "@/lib/motion";
+import { dragOffset, HOLD_MS, inEdgeZone, pressIntent, swipeStep } from "@/lib/page-swipe";
 import {
   DewarpPanel,
   DewarpTile,
@@ -24,72 +26,84 @@ import { CorrectionTile } from "@/components/CorrectionTile";
 import { FullImageView } from "@/components/FullImageView";
 import { GirarSheet, type PageTurn } from "@/components/GirarSheet";
 import { ImprovementsInfoSheet } from "@/components/ImprovementsInfoSheet";
-import { DeletePageSheet, PageMenu } from "@/components/PageMenu";
 import { PageThumb } from "@/components/PageThumb";
 import { PreviewCanvas } from "@/components/PreviewCanvas";
 import { hasSeenCompareTip, markCompareTipSeen } from "@/lib/tips";
-import { localeTag } from "@/lib/i18n";
-import type { PageTile } from "@/lib/page-tiles";
-import { displayRotation, effectiveFinish } from "@/lib/scan-store";
-import { useCopy, useLang } from "@/components/I18n";
-import { Meta, Notice } from "@/components/ui";
 import {
-  CheckIcon,
+  createPendingRemoval,
+  landingAfterRemoval,
+  UNDO_MS,
+  withoutHeld,
+  type HeldPage,
+  type PendingRemoval,
+} from "@/lib/page-undo";
+import type { PageTile } from "@/lib/page-tiles";
+import {
+  comparableRendering,
+  displayRotation,
+  effectiveFinish,
+  straightenOutcomeRetryable,
+} from "@/lib/scan-store";
+import { useCopy } from "@/components/I18n";
+import { Meta } from "@/components/ui";
+import {
+  CameraIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   ContrastIcon,
   CropIcon,
   ExclamationIcon,
-  ExpandIcon,
-  MoreIcon,
+  InfoIcon,
   RotateIcon,
   SpinnerIcon,
+  TrashIcon,
   XIcon,
 } from "@/components/icons";
 
 /**
- * The page editor — one fixed structure, every state.
+ * The page editor — "E3 · Deslizar + Editar" (owner-approved, 2026-09-29).
  *
- * The screen it replaces mixed two layouts, stacked two "we are working"
- * indicators on top of each other, truncated its own labels and moved the
- * primary button when the state changed. This one has six bands and they are
- * always the same six, top to bottom:
+ * One fixed structure, every state, top to bottom:
  *
- *  1. **header** — which page this is, the way out, and the ⋯ menu;
- *  2. **status line**, 38 px — the ONE place on this screen that talks about
- *     state. Every sentence is composed here at render from `rendered.*` and
- *     {@link effectiveFinish}; the store keeps codes, never sentences;
- *  3. **the sheet** — the page itself, absorbing whatever height is left;
- *  4. **the explanation card** — the one band allowed to appear and disappear,
- *     because it only exists when one line is not enough;
- *  5. **the four corrections** — always four columns, applied state on the tile
- *     that applied it, disabled shown rather than hidden;
- *  6. **the footer**, fixed — a secondary and the primary, and neither of them
- *     ever moves.
+ *  1. **the way out and the bin** — × top-left, delete top-right. The bin
+ *     deletes at once and a toast offers "Desfazer" for a few seconds
+ *     (`lib/page-undo.ts`: the page is held out of the document, not removed,
+ *     until the toast goes or the editor does); never a browser dialog;
+ *  2. **the page**, large and centred, absorbing whatever height is left. With
+ *     more than one page it *is* the pager: swipe left and right, the
+ *     neighbours peeking at the edges. A tap opens it whole; a hold shows it
+ *     without the improvements;
+ *  3. **"Página N de M"** with a small (i) beside it — "Sobre as melhorias",
+ *     on any page — and "deslize para ver as outras" when M > 1. The position
+ *     is also the pager's live announcement;
+ *  4. **the status line** — the ONE place on this screen that talks about
+ *     state, composed here at render from `rendered.*` and
+ *     {@link effectiveFinish} (the store keeps codes, never sentences). It is
+ *     silent on a page that is fine; a flagged page, a run in flight or a turn
+ *     being narrated gets one short line, with its "por quê?" or "tentar de
+ *     novo" beside it. Its height is reserved, so nothing moves when it speaks;
+ *  5. **the curvature card**, the one band allowed to appear and disappear —
+ *     consent and the honest outcome of a straightening need a paragraph;
+ *  6. **four tools**, icon over word — Girar, Cantos, Endireitar, Acabamento —
+ *     opening the same sheets and switch they always did;
+ *  7. **the footer**, fixed — Refazer (Cancelar while a straightening runs) and
+ *     the primary, and neither of them ever moves.
  *
- * Each state swaps the *content* of those bands and nothing else. The three
- * things that used to float over the picture — the "sem melhorias" chip, the
- * "ver inteira" chip, the status pill and its tap-popover — are gone: a chip
- * over the page is a control claiming to belong to the photograph.
+ * ## The pager
  *
- * ## What it owns that it did not before
- *
- * **The pager.** With more than one page the editor keeps its own cursor: the
- * side arrows and the thumbnail rail move it, and the primary reads "Próxima
- * página" until the last page. The hosts still hand it the page that was
- * tapped; from there this component navigates in place. (Re*ordering* is still
- * deliberately not here — moving a page up is a comparison between rows, and
- * you cannot compare rows from inside one of them.)
+ * With more than one page the editor keeps its own cursor: the swipe, the
+ * arrow keys and two pager buttons (visually hidden until they take keyboard
+ * focus) move it, and the primary reads "Próxima página" until the last page.
+ * The hosts still hand it the page that was tapped. Re*ordering* is
+ * deliberately not here — moving a page is a comparison between rows, and you
+ * cannot compare rows from inside one of them.
  *
  * **Girar and Acabamento are two sheets**, not two doors onto one. They open
  * over the page they change, and the page keeps rendering behind them.
  *
- * **Delete left the header** and is a row of the ⋯ menu, behind a confirmation
- * that states the consequence.
- *
  * Modal hygiene per the a11y bar: focus moves in and is trapped, Escape closes
  * the innermost surface first, no history entry is pushed, and `touch-none` on
- * the picture stops a press-and-hold from being claimed as a pan.
+ * the stage keeps the swipe and the hold from being claimed as a pan.
  */
 
 /**
@@ -118,9 +132,8 @@ export function PagePreview({
   onClose,
 }: PagePreviewProps) {
   const copy = useCopy();
-  const { lang } = useLang();
   const store = useStore();
-  const documentName = useDocumentName();
+  const { diagnosticsSink } = useScanRuntime();
   const backdropRef = React.useRef<HTMLDivElement | null>(null);
   const panelRef = React.useRef<HTMLDivElement | null>(null);
   const closingRef = React.useRef(false);
@@ -130,13 +143,44 @@ export function PagePreview({
   // The page id rather than its index: a delete elsewhere in the document would
   // silently move an index onto a different page.
   const [cursor, setCursor] = React.useState(tile.pageId);
+
+  // ── the delete, and its undo ──────────────────────────────────────────────
+  //
+  // The bin holds the page out of the document; the store keeps it, untouched,
+  // until the toast runs out, another page is deleted, or the editor goes away
+  // (`lib/page-undo.ts`). Created in the effect, not in render: a StrictMode
+  // remount disposes the first one, and a disposed hold commits at once.
+  const [held, setHeld] = React.useState<HeldPage | null>(null);
+  const removalRef = React.useRef<PendingRemoval | null>(null);
+  React.useEffect(() => {
+    const removal = createPendingRemoval({
+      commit: (id) => store.removePage(id),
+      onChange: setHeld,
+    });
+    removalRef.current = removal;
+    return () => {
+      removalRef.current = null;
+      removal.dispose();
+    };
+  }, [store]);
+  /** The document as this editor shows it: without the held page, renumbered. */
+  const shown = React.useMemo(
+    () => withoutHeld(tiles, held?.pageId ?? null),
+    [tiles, held],
+  );
+  /** The last page was deleted and its undo is still on offer. */
+  const emptied = shown.length === 0;
+
   // A cursor that no longer names a page (deleted from under the editor) falls
   // back to the first one rather than to -1, which would leave the pager
   // counting from zero and the arrows reaching past both ends.
-  const found = tiles.findIndex((candidate) => candidate.pageId === cursor);
+  const found = shown.findIndex((candidate) => candidate.pageId === cursor);
   const index = found === -1 ? 0 : found;
-  const current = tiles[index] ?? tile;
-  const pageCount = tiles.length;
+  // With nothing left on show, the held page keeps the hooks below fed; the
+  // screen draws the empty state instead of it.
+  const current =
+    shown[index] ?? tiles.find((candidate) => candidate.pageId === held?.pageId) ?? tile;
+  const pageCount = shown.length;
   const multiPage = pageCount > 1;
 
   // …and the fallback is written back, so the rail, the arrows and the primary
@@ -144,16 +188,14 @@ export function PagePreview({
   // that is gone: the editor shows page 1 while the rail highlights nothing and
   // "‹" believes there is something to its left.
   React.useEffect(() => {
-    const first = tiles[0];
+    const first = shown[0];
     if (found === -1 && first !== undefined) setCursor(first.pageId);
-  }, [found, tiles]);
+  }, [found, shown]);
 
   // ── the surfaces this one can open over itself ────────────────────────────
   const [fullView, setFullView] = React.useState(false);
   const [girar, setGirar] = React.useState(false);
   const [acabamento, setAcabamento] = React.useState(false);
-  const [menu, setMenu] = React.useState(false);
-  const [confirmDelete, setConfirmDelete] = React.useState(false);
   const [about, setAbout] = React.useState(false);
   /**
    * The turn the girar sheet last made — the direction that was tapped and the
@@ -225,16 +267,14 @@ export function PagePreview({
   // saw. It is rendered on demand at display scale and never encoded — a JPEG
   // here would be a lossy generation spent on a comparison.
   //
-  // Hidden on a page whose curvature was corrected, for the reason the flip
-  // exists at all: the comparison is rendered through the homography, so on a
-  // dewarped page the two sides would differ in geometry as well as in finish —
-  // two documents either side of the flip, which is what this rules out.
+  // Hidden on a page whose curvature was corrected or whose text was
+  // straightened, for the reason the flip exists at all: the comparison is
+  // rendered through the homography of the confirmed outline, unrotated, so
+  // on either page the two sides would differ in geometry as well as in
+  // finish — two documents either side of the flip, which is what this rules
+  // out (`comparableRendering`).
   const rendered = page.rendered;
-  const canCompare =
-    !failed &&
-    rendered !== null &&
-    rendered.finish !== "original" &&
-    !rendered.dewarped;
+  const canCompare = !failed && comparableRendering(rendered);
   const [comparing, setComparing] = React.useState(false);
 
   // A new revision is a new page as far as the comparison is concerned — and so
@@ -289,15 +329,11 @@ export function PagePreview({
     ? () => setFullView(false)
     : about
         ? () => setAbout(false)
-        : confirmDelete
-          ? () => setConfirmDelete(false)
-          : menu
-            ? () => setMenu(false)
-            : girar
-              ? closeGirar
-              : acabamento
-                ? () => setAcabamento(false)
-                : null;
+        : girar
+          ? closeGirar
+          : acabamento
+            ? () => setAcabamento(false)
+            : null;
   const innerRef = React.useRef(inner);
   innerRef.current = inner;
 
@@ -328,11 +364,13 @@ export function PagePreview({
     dismissRef.current();
   });
 
-  // A page that vanished under the cursor (deleted from another surface) leaves
-  // nothing to edit.
+  // A document with no pages left leaves nothing to edit — counted on the
+  // host's list, not on the one shown: the last page held for its undo still
+  // counts, and the editor closes onto the empty document only once the hold
+  // is made real.
   React.useEffect(() => {
-    if (pageCount === 0) onClose();
-  }, [pageCount, onClose]);
+    if (tiles.length === 0) onClose();
+  }, [tiles.length, onClose]);
 
   // Keyed on the page as well as on the work: paging between two pages that are
   // both rendering is a different clock, and a counter carried across would be
@@ -357,11 +395,11 @@ export function PagePreview({
 
   // ── the status line, composed here and never stored ───────────────────────
   const outcome = dewarp.outcome;
-  const retryableOutcome = outcome === "download" || outcome === "transient";
+  const retryableOutcome = straightenOutcomeRetryable(outcome);
   const status: {
     tone: "ok" | "warn" | "busy" | "plain";
     text: string;
-    trailing: "elapsed" | "why" | null;
+    trailing: "elapsed" | "why" | "retry" | null;
   } = comparing
     ? { tone: "plain", text: copy.preview.compare, trailing: null }
     : turning !== null
@@ -378,7 +416,7 @@ export function PagePreview({
           trailing: null,
         }
       : failed
-        ? { tone: "warn", text: copy.preview.failedLine, trailing: null }
+        ? { tone: "warn", text: copy.preview.failedLine, trailing: "retry" }
         : processing
           ? {
               tone: "busy",
@@ -401,18 +439,6 @@ export function PagePreview({
                   trailing: null,
                 };
 
-  // ── the explanation card ──────────────────────────────────────────────────
-  const cardText = failed
-    ? copy.preview.cards.failed
-    : current.needsCorners
-      ? copy.preview.cards.noCorners
-      : null;
-  // A run in flight is the status line's business, and `DewarpPanel` draws only
-  // its screen-reader description while it lasts — so the band must not keep
-  // its padding open around nothing, which shifts the picture by 12 px for the
-  // length of the run and back again when it ends.
-  const showCard = cardText !== null || (dewarpPanelVisible(dewarp) && !dewarp.running);
-
   // ── the footer ────────────────────────────────────────────────────────────
   const isLast = index >= pageCount - 1;
   const advances = multiPage && !isLast && !failed;
@@ -423,12 +449,142 @@ export function PagePreview({
       : copy.preview.useAsIs;
 
   /**
-   * The finish and the turn the page is really wearing, for the two tiles that
+   * The finish and the turn the page is really wearing, for the two tools that
    * report a standing choice. `rendered.*` first, per the requested-vs-effective
-   * rule: a tile is a claim about the page, not about the request.
+   * rule: a tool is a claim about the page, not about the request.
    */
   const turned = (rendered?.rotation ?? page.rotation) !== 0;
   const finished = effectiveFinish(page) !== "original";
+  /** A dimmed tool says why; an applied one says so (its dot is decoration). */
+  const notes = copy.preview.toolNotes;
+  const toolNote = (applied: boolean): string | undefined =>
+    failed ? notes.failed : processing ? notes.busy : applied ? notes.applied : undefined;
+
+  // ── paging: the swipe, the keys, the buttons and the primary ─────────────
+  //
+  // One way to move, however it was asked for: the page slides out the way it
+  // was pushed and its neighbour slides in from the other side. Under reduced
+  // motion it simply changes.
+  const [slide, setSlide] = React.useState<{ x: number; animate: boolean }>({ x: 0, animate: false });
+  const stageRef = React.useRef<HTMLDivElement | null>(null);
+  /** When the stage last handled a pointer gesture — so the click it trails is not a second one. */
+  const gestureAt = React.useRef(0);
+  const slideTimer = React.useRef<number | null>(null);
+  React.useEffect(
+    () => () => {
+      if (slideTimer.current !== null) window.clearTimeout(slideTimer.current);
+    },
+    [],
+  );
+  /**
+   * The page a slide in flight is heading for, so a second step taken before it
+   * lands (a quick →→) counts from there rather than from the page still on
+   * screen.
+   */
+  const headingRef = React.useRef<number | null>(null);
+  const goTo = React.useCallback(
+    (step: -1 | 1) => {
+      const to = (headingRef.current ?? index) + step;
+      const target = shown[to];
+      if (target === undefined) return;
+      if (slideTimer.current !== null) window.clearTimeout(slideTimer.current);
+      slideTimer.current = null;
+      const width = stageRef.current?.clientWidth ?? 0;
+      if (prefersReducedMotion() || width === 0) {
+        headingRef.current = null;
+        setSlide({ x: 0, animate: false });
+        setCursor(target.pageId);
+        return;
+      }
+      headingRef.current = to;
+      // Out the way it was pushed…
+      setSlide({ x: -step * width, animate: true });
+      slideTimer.current = window.setTimeout(() => {
+        // …and the neighbour in from the other side.
+        setCursor(target.pageId);
+        setSlide({ x: step * width, animate: false });
+        slideTimer.current = window.setTimeout(() => {
+          slideTimer.current = null;
+          headingRef.current = null;
+          setSlide({ x: 0, animate: true });
+        }, 20);
+      }, SLIDE_MS);
+    },
+    [index, shown],
+  );
+
+  // ←/→ page, wherever focus is on the editor — or nowhere, which is where a
+  // swipe can leave it when the picture under the finger is replaced. Not
+  // while a sheet is open over the page: its keys are its own.
+  const goToRef = React.useRef(goTo);
+  goToRef.current = goTo;
+  React.useEffect(() => {
+    if (!multiPage) return;
+    function onKey(event: KeyboardEvent): void {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      if (event.altKey || event.ctrlKey || event.metaKey || event.defaultPrevented) return;
+      if (innerRef.current !== null) return;
+      const root = containerRef.current;
+      const target = event.target;
+      if (root === null || !(target instanceof Node)) return;
+      if (target !== document.body && !root.contains(target)) return;
+      event.preventDefault();
+      goToRef.current(event.key === "ArrowLeft" ? -1 : 1);
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [containerRef, multiPage]);
+
+  /**
+   * The bin. A slide still in flight is settled first, on the page it was
+   * heading for — the one about to be on screen — and *that* page, by id, is
+   * the one deleted, so a swipe and a quick tap on the bin can never delete a
+   * page other than the one the user was landing on. The editor then lands on
+   * the page that slid into its place (or the one before, after the last).
+   */
+  const deleteRef = React.useRef<HTMLButtonElement | null>(null);
+  const closeRef = React.useRef<HTMLButtonElement | null>(null);
+  const deletePage = () => {
+    const removal = removalRef.current;
+    if (removal === null || emptied) return;
+    let target = current;
+    if (headingRef.current !== null) {
+      const heading = shown[headingRef.current];
+      if (heading !== undefined) target = heading;
+    }
+    if (slideTimer.current !== null) window.clearTimeout(slideTimer.current);
+    slideTimer.current = null;
+    headingRef.current = null;
+    setSlide({ x: 0, animate: false });
+    const landing = landingAfterRemoval(shown, target.pageId);
+    removal.remove({ pageId: target.pageId, humanNumber: target.humanNumber });
+    diagnosticsSink?.emit({ type: "page", action: "removed", page: target.humanNumber });
+    if (landing !== null) setCursor(landing);
+  };
+
+  /** "Desfazer": the page is back where it was, with everything it had, and on screen. */
+  const undoDelete = () => {
+    const page = removalRef.current?.undo() ?? null;
+    if (page === null) return;
+    setCursor(page.pageId);
+    diagnosticsSink?.emit({ type: "page", action: "undone", page: page.humanNumber });
+    // The button that had focus is gone with the toast; the bin is where the
+    // user was a moment ago.
+    window.setTimeout(() => deleteRef.current?.focus(), 0);
+  };
+
+  // Emptied: the bin has nothing left to delete, so focus goes to the way out.
+  React.useEffect(() => {
+    if (emptied) closeRef.current?.focus();
+  }, [emptied]);
+
+  const advance = () => {
+    if (!advances) {
+      dismiss();
+      return;
+    }
+    goTo(1);
+  };
 
   return (
     <>
@@ -447,132 +603,125 @@ export function PagePreview({
         />
 
         {/* mx-auto + the app column's 30rem cap: the backdrop fills the desktop
-            viewport but the controls must not — full-width 66px tiles read as a
-            stretched toolbar, not a phone screen. */}
+            viewport but the controls must not. */}
         <div
           ref={panelRef}
           className="relative mx-auto flex min-h-0 w-full max-w-[30rem] flex-1 flex-col overflow-hidden pb-[max(env(safe-area-inset-bottom),18px)] pt-[max(env(safe-area-inset-top),14px)]"
         >
-          {/* ── 1. header ─────────────────────────────────────────────────── */}
-          <div className="flex shrink-0 items-center gap-2 px-3.5">
-            {/* Disabled only while a *cancellable* run is going: there the
-                footer's "Cancelar" is the one way out and two of them is one
-                too many. A plain re-render is a second of canvas work that
-                nothing waits on, and locking the whole header for it leaves
-                the screen with no live control at all on a one-page
-                document. */}
+          {/* ── 1. the way out, and the bin ───────────────────────────────── */}
+          {/* Both disabled only while a *cancellable* run is going: there the
+              footer's "Cancelar" is the one way out and two of them is one too
+              many. A plain re-render is a second of canvas work that nothing
+              waits on. */}
+          <div className="flex shrink-0 items-center justify-between px-4 pt-1.5">
             <RoundAction
+              buttonRef={closeRef}
               label={copy.preview.close}
               disabled={dewarp.running}
               onClick={dismiss}
             >
               <XIcon size={20} />
             </RoundAction>
-            <span className="flex min-w-0 flex-1 flex-col items-center gap-px">
-              <span className="max-w-full truncate font-display text-lg font-semibold leading-tight text-shell-ink">
-                {copy.common.page(current.humanNumber)}
-              </span>
-              <Meta onNight size="xs" className="block max-w-full truncate">
-                {copy.preview.ofTotal(
-                  pageCount,
-                  documentName === null
-                    ? copy.preview.documentWord
-                    : documentName.toLocaleLowerCase(localeTag(lang)),
-                )}
-              </Meta>
-            </span>
             <RoundAction
-              label={copy.preview.menu}
-              // Peach for the confirmation only. The plain menu is three
-              // ordinary rows — two of them are "sobre" and "detalhes" — and a
-              // warn-toned trigger over them announces a consequence that the
-              // sheet does not have until Apagar is actually tapped.
-              tone={confirmDelete ? "danger" : "neutral"}
-              disabled={dewarp.running}
-              expanded={menu}
-              onClick={() => setMenu(true)}
+              buttonRef={deleteRef}
+              label={copy.preview.deletePage}
+              disabled={dewarp.running || emptied}
+              onClick={deletePage}
             >
-              <MoreIcon size={20} />
+              <TrashIcon size={20} />
             </RoundAction>
           </div>
 
-          {/* ── 2. status line: one line, 38px, never two ─────────────────── */}
-          <div className="flex h-[38px] shrink-0 items-center gap-[7px] px-4">
-            {status.tone === "ok" && (
-              <span
-                aria-hidden="true"
-                className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-mist/[0.22] text-shell-accent"
-              >
-                <CheckIcon size={10} strokeWidth={2.6} />
-              </span>
-            )}
-            {status.tone === "warn" && (
-              <span
-                aria-hidden="true"
-                className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-peach-soft/[0.2] text-shell-warn"
-              >
-                <ExclamationIcon size={11} strokeWidth={2.6} />
-              </span>
-            )}
-            {status.tone === "busy" && (
-              <SpinnerIcon size={14} className="text-shell-accent" />
-            )}
-            <p
-              role="status"
-              className={clsx(
-                "min-w-0 truncate text-xs leading-none",
-                status.tone === "warn" ? "text-shell-warn" : "text-shell-ink2",
-              )}
-            >
-              {status.text}
-            </p>
-            {status.trailing === "elapsed" && (
-              <Meta onNight size="xs" className="ml-auto shrink-0">
-                {copy.preview.status.elapsed(elapsed)}
-              </Meta>
-            )}
-            {status.trailing === "why" && (
-              <button
-                type="button"
-                onClick={() => setAbout(true)}
-                // 44px of tap inside a band whose height is pinned: the button
-                // overflows the 38px line box instead of growing it, so the
-                // picture below keeps every pixel it had.
-                //
-                // The hover has to reach the `Meta` inside as well: the word
-                // takes its colour from the kit's own tone map, which a colour
-                // on the parent cannot beat. The child variant can — it is one
-                // specificity step above a plain utility — and the button keeps
-                // its own colour for the underline, which is `currentColor`.
-                //
-                // `[&>span]:hover:`, in that order: Tailwind applies the
-                // rightmost variant first, so `hover:[&>span]:` compiles to
-                // `>span:hover` — the hover would have to land on the word
-                // itself rather than anywhere on the 44 px target.
-                className="ml-auto inline-flex h-11 shrink-0 items-center text-shell-ink2 underline underline-offset-4 transition-colors duration-200 [&>span]:transition-colors [&>span]:duration-200 hover:text-shell-ink [&>span]:hover:text-shell-ink"
-              >
-                <Meta onNight size="xs">
-                  {copy.preview.status.why}
-                </Meta>
-              </button>
-            )}
-          </div>
+          {emptied ? (
+            <>
+              {/* The last page went: the document is empty while its undo is
+                  on offer, and the editor closes onto it when the toast goes. */}
+              <div className="relative flex min-h-0 flex-1 flex-col items-center justify-center gap-1.5 px-6 text-center">
+                <p className="text-[15px] font-semibold leading-tight text-shell-ink">
+                  {copy.preview.emptied.title}
+                </p>
+                <p className="text-[13px] leading-snug text-shell-ink2">
+                  {copy.preview.emptied.body}
+                </p>
+                <UndoToast held={held} removalRef={removalRef} onUndo={undoDelete} />
+              </div>
+              <div className="flex shrink-0 items-center px-4 pt-2.5">
+                <button
+                  type="button"
+                  onClick={dismiss}
+                  className="inline-flex h-14 min-w-0 flex-1 items-center justify-center rounded-full bg-shell-ink px-3 text-[17px] font-bold leading-none text-shell-on transition-colors duration-200 [@media(hover:hover)_and_(pointer:fine)]:hover:bg-cream"
+                >
+                  {copy.preview.closeAction}
+                </button>
+              </div>
+            </>
+          ) : (
+          <>
 
-          {/* ── 3. the sheet ─────────────────────────────────────────────── */}
-          <div className="relative flex min-h-0 flex-1 items-center justify-center gap-2.5 px-[18px]">
-            {multiPage && (
-              <PagerArrow
-                label={copy.preview.pager.previous}
-                disabled={index <= 0}
-                onClick={() => {
-                  const previous = tiles[index - 1];
-                  if (previous !== undefined) setCursor(previous.pageId);
-                }}
-              >
-                <ChevronLeftIcon size={16} />
-              </PagerArrow>
-            )}
-
+          {/* ── 2. the page — and, with more than one, the pager ──────────── */}
+          <PageStage
+            stageRef={stageRef}
+            slide={slide}
+            onDrag={(x) => setSlide({ x, animate: false })}
+            onSnapBack={() => setSlide({ x: 0, animate: true })}
+            onSwipe={goTo}
+            canPrev={index > 0}
+            canNext={index < pageCount - 1}
+            holdable={canCompare && !processing}
+            onHold={holdCompare}
+            onRelease={releaseCompare}
+            onTap={canOpenFull ? () => setFullView(true) : null}
+            gestureAt={gestureAt}
+            previous={shown[index - 1]}
+            next={shown[index + 1]}
+            overlay={
+              <>
+                {multiPage && (
+                  <>
+                <PagerButton
+                  side="left"
+                  label={copy.preview.pager.previous}
+                  disabled={index <= 0}
+                  onClick={() => goTo(-1)}
+                >
+                  <ChevronLeftIcon size={18} />
+                </PagerButton>
+                <PagerButton
+                  side="right"
+                  label={copy.preview.pager.next}
+                  disabled={index >= pageCount - 1}
+                  onClick={() => goTo(1)}
+                >
+                  <ChevronRightIcon size={18} />
+                </PagerButton>
+                  </>
+                )}
+                {canCompare && (
+                  <CompareToggle
+                    label={copy.preview.compareToggle(comparing)}
+                    pressed={comparing}
+                    disabled={processing}
+                    onClick={comparing ? releaseCompare : holdCompare}
+                  />
+                )}
+                {/* Said once per device, over the control it is about, and
+                    gone four seconds later. Not a `role="status"`: the same
+                    sentence is already the picture's own accessible name. */}
+                <UndoToast held={held} removalRef={removalRef} onUndo={undoDelete} />
+                {holdTip && canCompare && held === null && (
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-x-0 bottom-2 z-10 mx-auto w-fit rounded-full bg-night-deep/[0.72] px-3.5 py-2.5 text-[12.5px] font-semibold leading-none text-warm"
+                  >
+                    {copy.preview.holdTip}
+                  </span>
+                )}
+              </>
+            }
+          >
+            {/* The padding is the room the neighbours peek into; it is outside
+                the measured frame so the fit is computed on the page's box. */}
+            <div className="flex h-full min-w-0 flex-1 px-[60px]">
             <div
               ref={frameRef}
               className="flex h-full min-w-0 flex-1 items-center justify-center overflow-hidden py-[2px]"
@@ -581,11 +730,12 @@ export function PagePreview({
                 <p className="text-base text-shell-ink2">{copy.common.loadingPage}</p>
               ) : (
                 <PictureSurface
-                  comparable={canCompare}
-                  pressed={comparing}
-                  label={copy.preview.compareHint}
-                  disabled={processing}
-                  onHold={holdCompare}
+                  gestureAt={gestureAt}
+                  label={copy.preview.surfaceLabel(current.humanNumber, canOpenFull, canCompare)}
+                  interactive={canOpenFull || canCompare}
+                  pressed={canCompare ? comparing : undefined}
+                  onOpen={canOpenFull ? () => setFullView(true) : null}
+                  onHold={canCompare && !processing ? holdCompare : null}
                   onRelease={releaseCompare}
                 >
                   {/* The turn is GSAP's, on this wrapper: it tweens rotation
@@ -606,7 +756,7 @@ export function PagePreview({
                         // Otherwise a mouse hold on the desktop starts a drag
                         // and the comparison ends with a ghost under the cursor.
                         draggable={false}
-                        className="max-h-full max-w-full rounded-[5px] border border-warm/[0.14] object-contain shadow-2xl"
+                        className="max-h-full max-w-full rounded-[3px] object-contain shadow-[0_14px_36px_rgba(0,0,0,0.45)]"
                       />
                       {/* Same box, same geometry: only the finish differs, so
                           the swap reads as one picture changing, not two. */}
@@ -625,7 +775,7 @@ export function PagePreview({
                           cacheKey={`${page.id}:${rendered.revision}`}
                           active={comparing}
                           longEdge={COMPARE_LONG_EDGE}
-                          className="pointer-events-none absolute inset-0 h-full w-full rounded-[5px] object-contain"
+                          className="pointer-events-none absolute inset-0 h-full w-full rounded-[3px] object-contain"
                         />
                       )}
                     </div>
@@ -633,127 +783,140 @@ export function PagePreview({
                 </PictureSurface>
               )}
             </div>
+            </div>
+          </PageStage>
 
+          {/* ── 3. where we are ──────────────────────────────────────────── */}
+          <div className="flex shrink-0 flex-col items-center gap-1 px-4 pt-3.5 text-center">
+            {/* The (i) is balanced by an empty box of its width on the other
+                side, so "Página N de M" stays centred under the page. */}
+            <div className="flex items-center justify-center gap-1.5">
+              <span aria-hidden="true" className="h-6 w-6 shrink-0" />
+              <p
+                aria-live="polite"
+                aria-atomic="true"
+                className="text-[15px] font-semibold leading-tight text-shell-ink"
+              >
+                {copy.preview.position(index + 1, pageCount)}
+              </p>
+              <InfoButton
+                label={copy.preview.aboutButton}
+                onClick={() => setAbout(true)}
+              />
+            </div>
             {multiPage && (
-              <PagerArrow
-                label={copy.preview.pager.next}
-                disabled={index >= pageCount - 1}
-                onClick={() => {
-                  const next = tiles[index + 1];
-                  if (next !== undefined) setCursor(next.pageId);
-                }}
-              >
-                <ChevronRightIcon size={16} />
-              </PagerArrow>
-            )}
-
-            {/* Said once per device, over the control it is about, and gone
-                four seconds later. Not a `role="status"`: the same sentence is
-                already the picture's own accessible name, and a screen reader
-                that announced both would say it twice for one arrival. */}
-            {holdTip && canCompare && (
-              <span
-                aria-hidden="true"
-                className="pointer-events-none absolute inset-x-0 bottom-2 mx-auto w-fit rounded-full bg-night-deep/[0.72] px-3.5 py-2.5 text-[12.5px] font-semibold leading-none text-warm"
-              >
-                {copy.preview.holdTip}
-              </span>
+              <p className="text-[13px] leading-tight text-shell-ink2">
+                {copy.preview.swipeHint}
+              </p>
             )}
           </div>
 
-          {/* ── 4. the explanation card ──────────────────────────────────── */}
-          {/* `space-y` rather than a gap on the flow: the two cards can both be
-              up (a page that went in flat and whose curvature also had
-              something to report), and stacked flush they read as one box with
-              a line through it. */}
-          <div className={clsx("shrink-0 space-y-2 px-4", showCard && "pt-3")}>
-            {cardText !== null && (
-              <Notice tone="night">
-                {cardText}
-                {/* Only on a failed page, where there is no picture left to
-                    protect: a render that failed on a transient (a device that
-                    refused a 2-D context) usually succeeds on the second ask,
-                    and retaking the photo is a much bigger thing to ask. */}
-                {failed && (
-                  <button
-                    type="button"
-                    onClick={() => store.retryPage(pageId)}
-                    className="mt-1 flex min-h-tap items-center font-semibold text-shell-ink underline underline-offset-4"
-                  >
-                    {copy.common.retry}
-                  </button>
-                )}
-              </Notice>
+          {/* ── 4. the status line: silent when the page is fine ──────────── */}
+          {/* The height is reserved either way: a line that appears and
+              disappears would resize the page under a turn in flight. */}
+          <div className="flex h-8 shrink-0 items-center justify-center gap-[7px] px-4">
+            {status.tone === "warn" && (
+              <span
+                aria-hidden="true"
+                className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-peach-soft/[0.2] text-shell-warn"
+              >
+                <ExclamationIcon size={11} strokeWidth={2.6} />
+              </span>
             )}
+            {status.tone === "busy" && (
+              <SpinnerIcon size={14} className="text-shell-accent" />
+            )}
+            <p
+              role="status"
+              className={clsx(
+                "min-w-0 truncate text-[13px] leading-none",
+                status.tone === "warn" ? "font-semibold text-shell-warn" : "text-shell-ink2",
+              )}
+            >
+              {status.tone === "ok" ? "" : status.text}
+            </p>
+            {status.trailing === "elapsed" && (
+              <Meta onNight size="xs" className="shrink-0">
+                {copy.preview.status.elapsed(elapsed)}
+              </Meta>
+            )}
+            {status.trailing === "why" && (
+              <InlineAction onClick={() => setAbout(true)}>
+                {copy.preview.status.why}
+              </InlineAction>
+            )}
+            {status.trailing === "retry" && (
+              // Only on a failed page, where there is no picture left to
+              // protect: a render that failed on a transient (a device that
+              // refused a 2-D context) usually succeeds on the second ask,
+              // and retaking the photo is a much bigger thing to ask.
+              <InlineAction onClick={() => store.retryPage(pageId)}>
+                {copy.common.retry}
+              </InlineAction>
+            )}
+          </div>
+
+          {/* ── 5. the curvature card ────────────────────────────────────── */}
+          {/* A run in flight is the status line's business, and `DewarpPanel`
+              draws only its screen-reader description while it lasts — so the
+              band must not keep its padding open around nothing. */}
+          <div className={clsx("shrink-0 px-4", dewarpPanelVisible(dewarp) && !dewarp.running && "pb-1")}>
             <DewarpPanel control={dewarp} />
           </div>
 
-          {/* ── 5a. the band: "CORRIGIR ⤢" on one page, the rail on many ─── */}
-          {multiPage ? (
-            <PageRail
-              tiles={tiles}
-              cursor={cursor}
-              index={index}
-              disabled={processing}
-              canOpenFull={canOpenFull}
-              onSelect={setCursor}
-              onOpenFull={() => setFullView(true)}
-            />
-          ) : (
-            <div className="flex shrink-0 items-center justify-between gap-2.5 px-4 pt-3.5">
-              <Meta
-                caps
-                onNight
-                size="2xs"
-                className={clsx(processing && "opacity-60")}
-              >
-                {copy.preview.correctLabel}
-              </Meta>
-              <VerInteiraPill
-                disabled={!canOpenFull || processing}
-                onClick={() => setFullView(true)}
-              />
-            </div>
-          )}
-
-          {/* ── 5b. the four corrections ─────────────────────────────────── */}
+          {/* ── 6. the four tools ────────────────────────────────────────── */}
           {/* Dimmed rather than removed while a render runs: a row that
-              disappears is a row whose controls move under the thumb. The
-              dimming is each tile's own `disabled:` state and nothing else —
-              a wrapper opacity on top of it multiplies (0.42 × 0.40 ≈ 0.17)
-              and takes the row to the edge of invisible. */}
-          <div className="flex shrink-0 gap-[7px] px-4 pt-2.5">
+              disappears is a row whose controls move under the thumb. */}
+          {/* Four columns down to 340 px; narrower (a 200 % zoom on a phone is
+              ~210 px) two rows of two, so no word is cut. */}
+          <div className="grid shrink-0 grid-cols-4 gap-1 px-4 pt-1 max-[339px]:grid-cols-2">
             <CorrectionTile
               label={copy.preview.tiles.rotate}
               ariaLabel={copy.girar.title}
-              icon={<RotateIcon size={16} />}
+              icon={<RotateIcon size={22} />}
               state={turned ? "applied" : "default"}
               disabled={processing || failed}
+              note={toolNote(turned)}
               onClick={() => setGirar(true)}
             />
             <CorrectionTile
               label={copy.preview.tiles.corners}
               ariaLabel={copy.preview.adjustCorners}
-              icon={<CropIcon size={16} />}
+              icon={<CropIcon size={22} />}
               // The way out of "não achei as bordas", recommended rather than
-              // reported — the design's peach-highlighted exit.
+              // reported.
               state={current.needsCorners ? "suggested" : "default"}
               disabled={processing}
+              note={
+                processing
+                  ? notes.busy
+                  : current.needsCorners
+                    ? notes.suggested
+                    : undefined
+              }
               onClick={() => onAdjustCorners(current)}
             />
-            <DewarpTile control={dewarp} offered={canDewarp && !processing} />
+            <DewarpTile
+              control={dewarp}
+              offered={canDewarp && !processing}
+              unavailableNote={
+                failed ? notes.failed : processing ? notes.busy : notes.noCorners
+              }
+            />
             <CorrectionTile
               label={copy.preview.tiles.finish}
               ariaLabel={copy.finish.title}
-              icon={<ContrastIcon size={16} />}
+              icon={<ContrastIcon size={22} />}
               state={finished ? "applied" : "default"}
               disabled={processing || failed}
+              note={toolNote(finished)}
               onClick={() => setAcabamento(true)}
             />
           </div>
 
-          {/* ── 6. the footer, which never grows and never moves ─────────── */}
-          <div className="flex h-[70px] shrink-0 items-center gap-2.5 px-4 pt-3.5">
+          {/* ── 7. the footer, which never grows and never moves ─────────── */}
+          {/* Side by side down to 340 px; narrower, stacked, the primary on top. */}
+          <div className="flex shrink-0 items-center gap-2.5 px-4 pt-2.5 max-[339px]:flex-col-reverse max-[339px]:items-stretch max-[339px]:gap-2">
             {processing ? (
               // "Cancelar" takes the same slot "Refazer" had. A dewarp is the
               // only render worth stopping — the others are a second or two of
@@ -770,30 +933,26 @@ export function PagePreview({
                   : copy.preview.dewarp.cancel}
               </FooterSecondary>
             ) : (
-              <FooterSecondary onClick={() => onRetake(current)}>
+              <FooterSecondary
+                icon={<CameraIcon size={20} />}
+                onClick={() => onRetake(current)}
+              >
                 {copy.preview.retake}
               </FooterSecondary>
             )}
             <button
               type="button"
               disabled={processing}
-              onClick={() => {
-                if (!advances) {
-                  dismiss();
-                  return;
-                }
-                const next = tiles[index + 1];
-                if (next !== undefined) setCursor(next.pageId);
-              }}
+              onClick={advance}
               className={clsx(
-                "inline-flex h-14 flex-1 items-center justify-center gap-2.5 rounded-[14px] px-3",
-                "bg-shell-ink text-lg font-bold leading-none text-shell-on",
+                "inline-flex h-14 min-w-0 flex-1 items-center justify-center gap-2.5 rounded-full px-3 text-center",
+                "max-[339px]:h-auto max-[339px]:min-h-14 max-[339px]:flex-none max-[339px]:py-2",
+                "bg-shell-ink text-[17px] font-bold leading-none text-shell-on",
                 "transition-colors duration-200",
                 // Hover is applied only when the button is live — a "cancel the
                 // hover" utility stacked on the base one is two rules for the
-                // same property in the same state, which Tailwind resolves by
-                // stylesheet order (the rule `ui.tsx`'s `VARIANT_HOVER` records).
-                processing ? "cursor-not-allowed opacity-45" : "hover:bg-cream",
+                // same property in the same state (`ui.tsx`'s `VARIANT_HOVER`).
+                processing ? "cursor-not-allowed opacity-45" : "[@media(hover:hover)_and_(pointer:fine)]:hover:bg-cream",
               )}
             >
               {processing ? (
@@ -806,6 +965,8 @@ export function PagePreview({
               )}
             </button>
           </div>
+          </>
+          )}
         </div>
       </div>
 
@@ -817,31 +978,6 @@ export function PagePreview({
       )}
       {acabamento && (
         <AcabamentoSheet tile={current} onClose={() => setAcabamento(false)} />
-      )}
-      {menu && (
-        <PageMenu
-          humanNumber={current.humanNumber}
-          onAbout={() => {
-            setMenu(false);
-            setAbout(true);
-          }}
-          onRemove={() => {
-            setMenu(false);
-            setConfirmDelete(true);
-          }}
-          onClose={() => setMenu(false)}
-        />
-      )}
-      {confirmDelete && (
-        <DeletePageSheet
-          humanNumber={current.humanNumber}
-          remaining={pageCount - 1}
-          onConfirm={() => {
-            store.removePage(pageId);
-            onClose();
-          }}
-          onClose={() => setConfirmDelete(false)}
-        />
       )}
       {about && <ImprovementsInfoSheet onClose={() => setAbout(false)} />}
       {fullView && page.final !== null && (
@@ -859,8 +995,7 @@ export function PagePreview({
                 window.setTimeout(() => dismissRef.current(), 0);
                 return;
               }
-              const next = tiles[index + 1];
-              if (next !== undefined) setCursor(next.pageId);
+              goTo(1);
             },
           }}
           onClose={() => setFullView(false)}
@@ -901,40 +1036,258 @@ function useElapsedSeconds(active: boolean, key: string): number {
   return seconds;
 }
 
+/** How long the page takes to slide out (and its neighbour in). */
+const SLIDE_MS = 200;
+
+type Gesture = {
+  id: number;
+  x: number;
+  y: number;
+  t: number;
+  mode: "pending" | "swipe" | "hold" | "other";
+  timer: number | null;
+  /** Whether it went down on the page itself — a tap anywhere else opens nothing. */
+  onSurface: boolean;
+};
+
 /**
- * The picture, and the press-and-hold that takes the improvements off it.
+ * The page's stage: the swipe, the tap and the hold, told apart here.
  *
- * A `button` when there is something to compare and a plain box when there is
- * not — the gesture people try on a photo is a hold on the photo, and making
- * the whole picture the control is also the only way a keyboard can reach it
- * now that the floating chip is gone (Space and Enter hold it, exactly as the
- * chip did).
+ * One pointer, three meanings, decided by what it does first: moving sideways
+ * past the slop is a swipe (the page follows the finger, resisting
+ * at the ends), staying still for {@link HOLD_MS} is the compare hold, and
+ * letting go before either on the page itself is a tap — the page opens
+ * whole. The arithmetic is `lib/page-swipe.ts`'s. The hold used to start on touch-down; it waits a beat now so a swipe
+ * does not flash the un-improved page at its start.
  *
- * `touch-none` stops the browser claiming the press for a pan or a double-tap
- * zoom (nothing on this screen scrolls), `select-none` stops the long-press
+ * `touch-action: pinch-zoom` stops the browser claiming one finger for a pan
+ * or a double-tap zoom (nothing on this screen scrolls) while leaving it the
+ * two-finger pinch — a second finger abandons the page gesture, so zooming
+ * never turns the page. A touch starting in the edge zone
+ * ({@link inEdgeZone}) is left to the system's back gesture. `select-none` stops the long-press
  * selection halo, and `onContextMenu` stops Android's long-press menu and iOS's
  * "save image" sheet landing on top of the comparison.
+ *
+ * The neighbours peek 20 px in from the edges at half strength — the design's
+ * cue that there is something to swipe to — and ride along with the drag.
  */
-function PictureSurface({
-  comparable,
-  pressed,
-  label,
-  disabled,
+function PageStage({
+  stageRef,
+  slide,
+  onDrag,
+  onSnapBack,
+  onSwipe,
+  canPrev,
+  canNext,
+  holdable,
   onHold,
   onRelease,
+  onTap,
+  gestureAt,
+  previous,
+  next,
+  overlay,
   children,
 }: {
-  comparable: boolean;
-  pressed: boolean;
-  label: string;
-  disabled: boolean;
+  stageRef: React.RefObject<HTMLDivElement | null>;
+  slide: { x: number; animate: boolean };
+  onDrag: (x: number) => void;
+  onSnapBack: () => void;
+  onSwipe: (step: -1 | 1) => void;
+  canPrev: boolean;
+  canNext: boolean;
+  holdable: boolean;
   onHold: () => void;
   onRelease: () => void;
+  onTap: (() => void) | null;
+  gestureAt: React.MutableRefObject<number>;
+  previous: PageTile | undefined;
+  next: PageTile | undefined;
+  /** Drawn over the stage and not moved by the slide: the pager buttons, the tip. */
+  overlay: React.ReactNode;
   children: React.ReactNode;
 }) {
-  if (!comparable) {
+  const gesture = React.useRef<Gesture | null>(null);
+  const clear = React.useCallback(() => {
+    const g = gesture.current;
+    if (g !== null && g.timer !== null) window.clearTimeout(g.timer);
+    gesture.current = null;
+  }, []);
+  React.useEffect(() => clear, [clear]);
+  const swipeable = canPrev || canNext;
+
+  /** Drop the gesture in progress without acting on it. */
+  const abandon = () => {
+    const g = gesture.current;
+    if (g === null) return;
+    clear();
+    gestureAt.current = performance.now();
+    if (g.mode === "hold") onRelease();
+    else if (g.mode === "swipe") onSnapBack();
+  };
+
+  const finish = (event: React.PointerEvent<HTMLDivElement>, cancelled: boolean) => {
+    if (!event.isPrimary) return;
+    const g = gesture.current;
+    if (g === null || g.id !== event.pointerId) return;
+    clear();
+    gestureAt.current = performance.now();
+    if (g.mode === "hold") {
+      onRelease();
+      return;
+    }
+    if (g.mode === "swipe") {
+      const step = swipeStep({
+        dx: event.clientX - g.x,
+        ms: performance.now() - g.t,
+        width: stageRef.current?.clientWidth ?? 0,
+        canPrev,
+        canNext,
+        cancelled,
+      });
+      if (step !== null) onSwipe(step);
+      else onSnapBack();
+      return;
+    }
+    // (The pointer is captured by the stage, so `event.target` here is the
+    // stage itself — where it went down is what says it was the page.)
+    if (g.mode === "pending" && !cancelled && g.onSurface && onTap !== null) onTap();
+  };
+
+  return (
+    <div
+      ref={stageRef}
+      className="relative flex min-h-0 flex-1 select-none items-center overflow-hidden pt-3 [touch-action:pinch-zoom]"
+      onContextMenu={(event) => event.preventDefault()}
+      onPointerDown={(event) => {
+        if (event.pointerType === "mouse" && event.button !== 0) return;
+        // The pager buttons and the undo toast are controls of their own: a
+        // capture here would take their click away.
+        if (event.target instanceof Element && event.target.closest("[data-pager], [data-undo-toast]") !== null) return;
+        // A second finger is a pinch, not a page gesture: whatever the first
+        // one started ends here (a hold lets go, a drag snaps back) and the
+        // browser has the pinch.
+        if (!event.isPrimary) {
+          abandon();
+          return;
+        }
+        // A touch that starts in the platform's edge-swipe zone is the
+        // system's back gesture, not a page turn.
+        if (event.pointerType === "touch" && inEdgeZone(event.clientX, window.innerWidth)) {
+          clear();
+          return;
+        }
+        clear();
+        const g: Gesture = {
+          id: event.pointerId,
+          x: event.clientX,
+          y: event.clientY,
+          t: performance.now(),
+          mode: "pending",
+          timer: null,
+          onSurface: event.target instanceof Element && event.target.closest("[data-page-surface]") !== null,
+        };
+        if (holdable) {
+          g.timer = window.setTimeout(() => {
+            g.timer = null;
+            if (gesture.current === g && g.mode === "pending") {
+              g.mode = "hold";
+              onHold();
+            }
+          }, HOLD_MS);
+        }
+        gesture.current = g;
+        // The page's pointer, wherever the finger goes, until it lets go.
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        } catch {
+          // A pointer the browser already let go of — nothing to keep.
+        }
+      }}
+      onPointerMove={(event) => {
+        const g = gesture.current;
+        if (g === null || g.id !== event.pointerId) return;
+        const dx = event.clientX - g.x;
+        const dy = event.clientY - g.y;
+        if (g.mode === "pending") {
+          const intent = pressIntent(dx, dy, swipeable);
+          if (intent === "pending") return;
+          if (g.timer !== null) {
+            window.clearTimeout(g.timer);
+            g.timer = null;
+          }
+          g.mode = intent;
+        }
+        if (g.mode === "swipe") onDrag(dragOffset(dx, canPrev, canNext));
+      }}
+      onPointerUp={(event) => finish(event, false)}
+      onPointerCancel={(event) => finish(event, true)}
+    >
+      <div
+        className="relative flex h-full w-full items-center"
+        style={{
+          transform: slide.x === 0 ? undefined : `translate3d(${Math.round(slide.x)}px,0,0)`,
+          transition: slide.animate ? `transform ${SLIDE_MS}ms cubic-bezier(0.3,0,0.2,1)` : undefined,
+        }}
+      >
+        {previous !== undefined && <Peek tile={previous} side="left" />}
+        {children}
+        {next !== undefined && <Peek tile={next} side="right" />}
+      </div>
+      {overlay}
+    </div>
+  );
+}
+
+/** A neighbour, 20 px of it at the stage's edge, at half strength. Decoration only. */
+function Peek({ tile, side }: { tile: PageTile; side: "left" | "right" }) {
+  return (
+    <div
+      aria-hidden="true"
+      className={clsx(
+        "pointer-events-none absolute top-1/2 aspect-[5/7] h-[78%] -translate-y-1/2 opacity-50",
+        side === "left" ? "right-[calc(100%-20px)]" : "left-[calc(100%-20px)]",
+      )}
+    >
+      <PageThumb tile={tile} onNight radius="sm" className="h-full w-full" />
+    </div>
+  );
+}
+
+/**
+ * The picture, as a control for the keyboard and for assistive technology.
+ *
+ * Pointers are the stage's business ({@link PageStage}); this is the same two
+ * meanings for everything else: Enter (or an assistive "activate") opens the
+ * page whole, and Space held down shows it without the improvements, exactly as
+ * the old chip did. A click that trails a pointer gesture the stage already
+ * handled is ignored, so a tap never opens the page twice.
+ *
+ * A plain box when there is nothing to open and nothing to compare.
+ */
+function PictureSurface({
+  label,
+  interactive,
+  pressed,
+  onOpen,
+  onHold,
+  onRelease,
+  gestureAt,
+  children,
+}: {
+  label: string;
+  interactive: boolean;
+  /** `aria-pressed` while there is something to compare; undefined otherwise. */
+  pressed: boolean | undefined;
+  onOpen: (() => void) | null;
+  onHold: (() => void) | null;
+  onRelease: () => void;
+  gestureAt: React.MutableRefObject<number>;
+  children: React.ReactNode;
+}) {
+  if (!interactive) {
     return (
-      <div className="flex h-full w-full items-center justify-center">
+      <div data-page-surface className="flex h-full w-full items-center justify-center">
         {children}
       </div>
     );
@@ -943,28 +1296,27 @@ function PictureSurface({
   return (
     <button
       type="button"
-      aria-pressed={pressed}
+      data-page-surface
       aria-label={label}
-      disabled={disabled}
-      onPointerDown={onHold}
-      onPointerUp={onRelease}
-      onPointerCancel={onRelease}
-      onPointerLeave={onRelease}
+      aria-pressed={pressed}
+      onClick={() => {
+        if (performance.now() - gestureAt.current < 600) return;
+        onOpen?.();
+      }}
       onBlur={onRelease}
-      onContextMenu={(event) => event.preventDefault()}
       onKeyDown={(event) => {
-        if (event.key !== " " && event.key !== "Enter") return;
-        // Space would scroll the dialog, and both keys would fire a click on
-        // release — this control is a hold, not a toggle.
+        if (event.key !== " ") return;
+        // Space would scroll the dialog and fire a click on release — this
+        // key is a hold, not a toggle.
         event.preventDefault();
-        onHold();
+        if (!event.repeat) onHold?.();
       }}
       onKeyUp={(event) => {
-        if (event.key !== " " && event.key !== "Enter") return;
+        if (event.key !== " ") return;
         event.preventDefault();
         onRelease();
       }}
-      className="flex h-full w-full touch-none select-none items-center justify-center"
+      className="flex h-full w-full items-center justify-center"
     >
       {children}
     </button>
@@ -972,50 +1324,34 @@ function PictureSurface({
 }
 
 /**
- * A 44px circular icon control for the header.
- *
- * The label is always announced — an icon alone says nothing — and the ring is
- * 1.5px so it reads as a control rather than as decoration against a photograph
- * that may be very light right behind it. 44px rather than the app's 56px floor
- * is the contract's documented exception: a row of related icon buttons with a
- * gap between them.
+ * A 44 px round icon control for the top row: a filled disc, no ring, the
+ * label always announced (an icon alone says nothing).
  */
 function RoundAction({
   label,
-  tone = "neutral",
   disabled = false,
-  expanded,
+  buttonRef,
   onClick,
   children,
 }: {
   label: string;
-  tone?: "neutral" | "danger";
   disabled?: boolean;
-  /**
-   * Set on a control that opens a surface over the page — it then announces
-   * itself as opening a dialog, and says whether that dialog is up. Left
-   * undefined by the plain actions, which go somewhere rather than open
-   * something.
-   */
-  expanded?: boolean;
+  buttonRef?: React.Ref<HTMLButtonElement>;
   onClick: () => void;
   children: React.ReactNode;
 }) {
   return (
     <button
+      ref={buttonRef}
       type="button"
       aria-label={label}
       title={label}
-      aria-haspopup={expanded === undefined ? undefined : "dialog"}
-      aria-expanded={expanded}
       disabled={disabled}
       onClick={onClick}
       className={clsx(
-        "inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full border-[1.5px]",
+        "inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-shell-sunken text-shell-ink",
         "transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-40",
-        tone === "danger"
-          ? "border-shell-warn text-shell-warn"
-          : "border-shell-line text-shell-ink hover:border-shell-ink",
+        "[@media(hover:hover)_and_(pointer:fine)]:hover:text-shell-ink2",
       )}
     >
       {children}
@@ -1024,209 +1360,209 @@ function RoundAction({
 }
 
 /**
- * One step through the document, beside the picture.
- *
- * 26 px of visible pill inside a 44 px target: the extra 9 px either side is an
- * `::after` box, so the hit area lands on the picture's own padding without
- * taking a pixel of layout from it — a real 44 px button here would narrow the
- * page by 36 px on a 375 px phone.
+ * "Sobre as melhorias": a small (i) beside "Página N de M" that opens the
+ * explanation on any page — a fine one included, which had no way to it once
+ * the ⋯ menu went. 24 px drawn, 44 px hit (the `after:` box), so it can sit in
+ * the position line without making it taller. A flagged page keeps its
+ * "por quê?" as well: that one answers the line it sits in.
  */
-function PagerArrow({
-  label,
-  disabled,
-  onClick,
-  children,
-}: {
-  label: string;
-  disabled: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
+function InfoButton({ label, onClick }: { label: string; onClick: () => void }) {
   return (
     <button
       type="button"
       aria-label={label}
-      disabled={disabled}
+      aria-haspopup="dialog"
+      title={label}
+      data-about-button
       onClick={onClick}
       className={clsx(
-        "relative inline-flex h-11 w-[26px] shrink-0 items-center justify-center rounded-lg",
-        "border border-shell-line text-shell-ink transition-colors duration-200",
-        "hover:border-shell-ink disabled:cursor-not-allowed disabled:opacity-35",
-        // `inset-y-0` is load-bearing: with the horizontal inset alone the
-        // pseudo-element has no height at all, so the "extra 9 px" is a box of
-        // zero area and the target stays 26 px wide.
-        "after:absolute after:inset-y-0 after:-inset-x-[9px] after:content-['']",
+        "relative inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-shell-ink2",
+        "transition-colors duration-200 [@media(hover:hover)_and_(pointer:fine)]:hover:text-shell-ink",
+        "after:absolute after:-inset-[10px] after:content-['']",
       )}
     >
-      {children}
+      <InfoIcon size={18} />
     </button>
   );
 }
 
 /**
- * "⤢ ver inteira" — 34 px of visible pill, hit at 44 px through an `::after`
- * box for the same reason the pager arrows are: this band sits between the
- * picture and the tiles, and every pixel it grows by is a pixel off the page.
- * (The old `?` button in this position cost the picture 10 px before its
- * pull-back was measured exactly; see `ImprovementsInfoSheet`.)
- */
-function VerInteiraPill({
-  disabled,
-  onClick,
-}: {
-  disabled: boolean;
-  onClick: () => void;
-}) {
-  const copy = useCopy();
-
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      className={clsx(
-        "relative inline-flex h-[34px] shrink-0 items-center gap-1.5 rounded-full px-3",
-        "border border-shell-line text-xs leading-none text-shell-ink",
-        "transition-colors duration-200 hover:border-shell-ink",
-        "disabled:cursor-not-allowed disabled:opacity-40",
-        "after:absolute after:-inset-x-2 after:-inset-y-[5px] after:content-['']",
-      )}
-    >
-      <ExpandIcon size={14} />
-      {copy.preview.full.open}
-    </button>
-  );
-}
-
-/**
- * The multi-page band: the document as a strip of thumbnails, the position, and
- * the way into the full-size view.
+ * "Página excluída · Desfazer" — the delete's way back, over the foot of the
+ * page for {@link UNDO_MS}.
  *
- * It takes the slot the "CORRIGIR ⤢ ver inteira" row occupies on a single-page
- * document rather than adding a band of its own — the whole point of the fixed
- * structure is that the number of bands does not depend on the document.
- *
- * The thumbnails are 44 px tall (the tap floor's documented exception for a
- * gapped row of related controls) and hit 44 px wide through an `::after` box
- * that meets its neighbour's exactly in the middle of the 10 px gap, never
- * overlapping it. The current page's own thumb is bigger and wears a mist
- * **ring** rather than a border: `PageThumb` already sets `border`, and a
- * second border utility in the same class string is the stylesheet-order coin
- * flip the kit forbids.
+ * The live region is always in the tree (a region that appears together with
+ * its words is announced unreliably); the pill inside it comes and goes. While
+ * it is held — keyboard focus inside it, or a mouse over it — the countdown
+ * stops, and it starts over in full when let go: a toast must not vanish from
+ * under the control someone is on. No motion of its own, so there is nothing
+ * for reduced motion to switch off.
  */
-function PageRail({
-  tiles,
-  cursor,
-  index,
-  disabled,
-  canOpenFull,
-  onSelect,
-  onOpenFull,
+function UndoToast({
+  held,
+  removalRef,
+  onUndo,
 }: {
-  tiles: readonly PageTile[];
-  cursor: string;
-  index: number;
-  disabled: boolean;
-  canOpenFull: boolean;
-  onSelect: (pageId: string) => void;
-  onOpenFull: () => void;
+  held: HeldPage | null;
+  removalRef: React.MutableRefObject<PendingRemoval | null>;
+  onUndo: () => void;
 }) {
-  const copy = useCopy();
-  const railRef = React.useRef<HTMLDivElement | null>(null);
-
-  // Keep the page being edited in view when the arrows or the primary move the
-  // cursor. Written as a scroll offset rather than `scrollIntoView`, which is
-  // free to scroll every ancestor it can find — including the app shell this
-  // app deliberately locks.
+  const copy = useCopy().preview.undoDelete;
+  const pause = (paused: boolean) => removalRef.current?.pause(paused);
+  // A toast that goes while held (undone, or replaced by the next delete)
+  // must not leave the countdown stopped for the next one.
   React.useEffect(() => {
-    const rail = railRef.current;
-    if (rail === null) return;
-    const active = rail.querySelector<HTMLElement>('[data-current="true"]');
-    if (active === null) return;
-    rail.scrollTo({
-      left: active.offsetLeft - (rail.clientWidth - active.offsetWidth) / 2,
-      behavior: "smooth",
-    });
-  }, [cursor]);
-
+    if (held === null) return;
+    return () => removalRef.current?.pause(false);
+  }, [held, removalRef]);
   return (
-    <div className="flex shrink-0 items-end gap-2.5 px-4 pt-3">
-      <div
-        ref={railRef}
-        // The padding is the room the first thumb's hit extension needs: a
-        // scroll container clips whatever overflows its leading edge, and the
-        // negative margin puts that padding back where the rail's own `px-4`
-        // is, so nothing on screen moves. (The trailing edge needs no such
-        // thing — overflow past it is scrollable, not clipped.)
-        className="no-scrollbar relative -ml-[5px] flex min-w-0 flex-1 items-end gap-2.5 overflow-x-auto pl-[5px]"
-      >
-        {tiles.map((tile) => {
-          const isCurrent = tile.pageId === cursor;
-          return (
-            <button
-              key={tile.key}
-              type="button"
-              data-current={isCurrent}
-              aria-current={isCurrent ? "true" : undefined}
-              aria-label={copy.preview.pager.thumb(tile.humanNumber)}
-              onClick={() => onSelect(tile.pageId)}
-              className={clsx(
-                "relative shrink-0 rounded",
-                // `inset-y-0` for the same reason the pager arrows carry it: a
-                // pseudo-element with only a horizontal inset is a box of zero
-                // height, and the widened target never exists.
-                isCurrent
-                  ? "ring-2 ring-mist after:absolute after:inset-y-0 after:-inset-x-[2px] after:content-['']"
-                  : "after:absolute after:inset-y-0 after:-inset-x-[5px] after:content-['']",
-              )}
-            >
-              <PageThumb
-                tile={tile}
-                onNight
-                radius="sm"
-                className={clsx(
-                  isCurrent ? "h-[52px] w-10" : "h-11 w-[34px]",
-                )}
-              />
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="flex shrink-0 items-center gap-2 pb-1">
-        <Meta onNight size="2xs">
-          {copy.preview.pager.count(index + 1, tiles.length)}
-        </Meta>
-        <button
-          type="button"
-          aria-label={copy.preview.full.open}
-          title={copy.preview.full.open}
-          disabled={!canOpenFull || disabled}
-          onClick={onOpenFull}
-          className={clsx(
-            "relative inline-flex h-[34px] w-[34px] items-center justify-center rounded-full",
-            "border border-shell-line text-shell-ink transition-colors duration-200",
-            "hover:border-shell-ink disabled:cursor-not-allowed disabled:opacity-40",
-            "after:absolute after:-inset-[5px] after:content-['']",
-          )}
+    <div
+      role="status"
+      data-undo-toast
+      className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-4"
+    >
+      {held !== null && (
+        <div
+          className="pointer-events-auto inline-flex min-h-11 max-w-full items-center gap-1 rounded-full bg-night-deep/[0.92] py-0.5 pl-4 pr-1 text-[14px] font-semibold leading-tight text-warm shadow-[0_8px_24px_rgba(0,0,0,0.35)]"
+          onFocus={() => pause(true)}
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) pause(false);
+          }}
+          onPointerEnter={(event) => {
+            if (event.pointerType === "mouse") pause(true);
+          }}
+          onPointerLeave={(event) => {
+            if (event.pointerType === "mouse") pause(false);
+          }}
         >
-          <ExpandIcon size={15} />
-        </button>
-      </div>
+          <span className="min-w-0">{copy.message}</span>
+          <span aria-hidden="true" className="text-shell-ink2">
+            ·
+          </span>
+          <button
+            type="button"
+            aria-label={copy.actionLabel(held.humanNumber)}
+            data-undo-button
+            onClick={onUndo}
+            className="inline-flex min-h-11 shrink-0 items-center rounded-full px-3 font-bold text-cream underline underline-offset-4"
+          >
+            {copy.action}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
 /**
- * The footer's fixed 96 px slot — "Refazer" normally, "Cancelar" while
- * something is running. Same box either way, so the primary beside it never
+ * One step through the document, for the keyboard and screen readers: out of
+ * sight until it takes keyboard focus, then a 44 px disc at the stage's edge.
+ * The swipe is the gesture; this is its equivalent (so are ← and →).
+ */
+function PagerButton({
+  side,
+  label,
+  disabled,
+  onClick,
+  children,
+}: {
+  side: "left" | "right";
+  label: string;
+  disabled: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      data-pager
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      className={clsx(
+        "sr-only focus-visible:not-sr-only focus-visible:absolute focus-visible:top-1/2 focus-visible:z-10",
+        "focus-visible:flex focus-visible:h-11 focus-visible:w-11 focus-visible:-translate-y-1/2",
+        "focus-visible:items-center focus-visible:justify-center focus-visible:rounded-full",
+        "focus-visible:bg-shell-sunken focus-visible:text-shell-ink",
+        side === "left" ? "focus-visible:left-3" : "focus-visible:right-3",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+/**
+ * The compare hold's equivalent for a screen reader, whose double-tap is a
+ * click and can never be a hold: a toggle, "Mostrar sem as melhorias" /
+ * "Mostrar com as melhorias". Out of sight until it takes keyboard focus
+ * (like the pager buttons); always in the accessibility tree.
+ */
+function CompareToggle({
+  label,
+  pressed,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  pressed: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      data-pager
+      data-compare-toggle
+      aria-pressed={pressed}
+      disabled={disabled}
+      onClick={onClick}
+      className={clsx(
+        "sr-only focus-visible:not-sr-only focus-visible:absolute focus-visible:bottom-2 focus-visible:z-10",
+        "focus-visible:inset-x-0 focus-visible:mx-auto focus-visible:w-fit",
+        "focus-visible:flex focus-visible:min-h-11 focus-visible:items-center focus-visible:rounded-full focus-visible:px-4",
+        "focus-visible:bg-shell-sunken focus-visible:text-[13px] focus-visible:font-semibold focus-visible:text-shell-ink",
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
+/** The status line's one action — "por quê?" or "tentar de novo" — hit at 44 px. */
+function InlineAction({
+  onClick,
+  children,
+}: {
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={clsx(
+        "relative inline-flex shrink-0 items-center text-[13px] leading-none text-shell-ink2",
+        "underline underline-offset-4 transition-colors duration-200 [@media(hover:hover)_and_(pointer:fine)]:hover:text-shell-ink",
+        "after:absolute after:-inset-x-2 after:-inset-y-4 after:content-['']",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+/**
+ * The footer's fixed slot — "Refazer" normally, "Cancelar" while a
+ * straightening runs. Same box either way, so the primary beside it never
  * moves and the footer never grows.
  */
 function FooterSecondary({
+  icon,
   disabled = false,
   onClick,
   children,
 }: {
+  icon?: React.ReactNode;
   disabled?: boolean;
   onClick: () => void;
   children: React.ReactNode;
@@ -1237,12 +1573,14 @@ function FooterSecondary({
       disabled={disabled}
       onClick={onClick}
       className={clsx(
-        "inline-flex h-14 w-24 shrink-0 items-center justify-center whitespace-nowrap rounded-[14px]",
-        "border-[1.5px] border-shell-line text-sm font-semibold text-shell-ink",
-        "transition-colors duration-200 hover:border-shell-ink",
+        "inline-flex h-14 w-[132px] shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-full",
+        "max-[339px]:h-auto max-[339px]:min-h-14 max-[339px]:w-full max-[339px]:whitespace-normal max-[339px]:py-2",
+        "border border-shell-line text-base font-semibold text-shell-ink",
+        "transition-colors duration-200 [@media(hover:hover)_and_(pointer:fine)]:hover:border-shell-ink",
         "disabled:cursor-not-allowed disabled:opacity-40",
       )}
     >
+      {icon}
       {children}
     </button>
   );

@@ -32,7 +32,7 @@ import {
   type PageTransform,
   type SizeLadderRecord,
 } from "@/lib/honesty";
-import { encodeSurface } from "@/lib/encode";
+import { encodeQuality, encodeSurface } from "@/lib/encode";
 
 export interface PdfPageInput {
   /**
@@ -90,16 +90,23 @@ export interface SizeRung {
  * and it stops at 2000 px on the long edge because below that an A4 page's body
  * text drops under the cap height the capture gate measures for.
  *
- * Rung 0 is not an encode: the pages already **are** q85 at ≤3000 px (that is
- * what `lib/encode.ts` writes for the `final` role), so the first attempt
- * embeds exactly the bytes the review screen showed. Every later rung goes back
- * through that same encoder rather than a second one, so a document that had to
- * step down is still a document this library's one quality table produced.
+ * Rung 0 is not an encode: the pages already **are** the `final` JPEGs at
+ * their full resolution (`lib/encode.ts`), so the first attempt embeds exactly
+ * the bytes the review screen showed. The quality rungs keep every pixel
+ * (`longEdge` infinite): resolution is only given up once quality has run out,
+ * and only for a host that set `maxBytes`. Every later rung goes back through
+ * that same encoder rather than a second one, so a document that had to step
+ * down is still a document this library's one quality table produced.
  */
 export const SIZE_LADDER: readonly SizeRung[] = [
-  { quality: 0.85, longEdge: 3000 },
+  { quality: encodeQuality("final"), longEdge: Number.POSITIVE_INFINITY },
+  // The final is q95; a budget that held the q92 pages it used to be steps
+  // down only this far, not straight to q85.
+  { quality: 0.92, longEdge: Number.POSITIVE_INFINITY },
+  { quality: 0.85, longEdge: Number.POSITIVE_INFINITY },
+  { quality: 0.75, longEdge: Number.POSITIVE_INFINITY },
+  { quality: 0.65, longEdge: Number.POSITIVE_INFINITY },
   { quality: 0.75, longEdge: 3000 },
-  { quality: 0.65, longEdge: 3000 },
   { quality: 0.75, longEdge: 2400 },
   { quality: 0.75, longEdge: 2000 },
 ];
@@ -225,6 +232,17 @@ export interface PdfBuilt {
   bytes: number;
   /** Which rung of {@link SIZE_LADDER} produced it. 0 = exactly as reviewed. */
   rung: number;
+  /** Per page, in order: the image embedded — its own pixels, never resampled on rung 0. */
+  embedded: EmbeddedImage[];
+  /** The JPEG quality of the rung that shipped. */
+  quality: number;
+}
+
+/** One page's image as it is in the file. */
+export interface EmbeddedImage {
+  width: number;
+  height: number;
+  bytes: number;
 }
 
 /**
@@ -268,7 +286,7 @@ async function assemble(
   title: string | null,
   ladder: SizeLadderRecord,
   onPage: ((done: number, total: number) => void) | undefined,
-): Promise<Blob> {
+): Promise<{ blob: Blob; embedded: EmbeddedImage[] }> {
   const document = await PDFDocument.create();
   const trimmedTitle = (title ?? "").trim();
   document.setTitle(trimmedTitle.length === 0 ? DEFAULT_TITLE : trimmedTitle);
@@ -287,18 +305,22 @@ async function assemble(
   document.setCreationDate(now);
   document.setModificationDate(now);
 
+  const embedded: EmbeddedImage[] = [];
   for (const [index, input] of pages.entries()) {
-    const raw = new Uint8Array(await input.jpeg.arrayBuffer());
-    const image = await document.embedJpg(stripJpegMetadata(raw));
+    const raw = stripJpegMetadata(new Uint8Array(await input.jpeg.arrayBuffer()));
+    const image = await document.embedJpg(raw);
+    // One image pixel per PDF unit, drawn edge to edge: the viewer scales the
+    // page, nothing here resamples the image.
     const page = document.addPage([image.width, image.height]);
     page.drawImage(image, { x: 0, y: 0, width: image.width, height: image.height });
+    embedded.push({ width: image.width, height: image.height, bytes: raw.byteLength });
     onPage?.(index + 1, pages.length);
   }
 
   const bytes = await document.save();
   // `save()` returns a Uint8Array over its own buffer; copy the exact view into
   // the Blob so a larger backing ArrayBuffer can never leak into the file.
-  return new Blob([bytes.slice()], { type: "application/pdf" });
+  return { blob: new Blob([bytes.slice()], { type: "application/pdf" }), embedded };
 }
 
 /**
@@ -334,7 +356,7 @@ export async function buildPdf(
       rung === 0
         ? pages.map((input) => input.jpeg)
         : await Promise.all(pages.map((input) => reencode(input.jpeg, step)));
-    const blob = await assemble(
+    const { blob, embedded } = await assemble(
       pages.map((input, index) => ({
         jpeg: jpegs[index],
         transform: input.transform,
@@ -346,7 +368,7 @@ export async function buildPdf(
     onRung?.(rung, blob.size);
     floor = { bytes: blob.size, rung };
     if (maxBytes === undefined || blob.size <= maxBytes) {
-      return { ok: true, blob, pageCount: pages.length, bytes: blob.size, rung };
+      return { ok: true, blob, pageCount: pages.length, bytes: blob.size, rung, embedded, quality: step.quality };
     }
   }
 

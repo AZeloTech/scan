@@ -1,17 +1,17 @@
 "use client";
 
 import * as React from "react";
-import { DEFAULT_SHELL, deriveShellTheme, shellCssVars } from "@/lib/shell-theme";
+import { DEFAULT_SHELL } from "@/lib/shell-theme";
 
 /**
- * Paints the camera shell's colour onto the document.
+ * The camera shell's colour.
  *
- * The derived palette lands as CSS custom properties on `<html>` rather than in
- * a React context consumed by every component, because the consumers are
- * Tailwind classes (`bg-shell`, `text-shell-ink2`, …). One write, and every
- * camera screen is coloured — including the ones inside `position: fixed`
- * overlays, which a context provider mounted in a layout would not reach as
- * cleanly.
+ * The derived palette is CSS custom properties, because the consumers are
+ * Tailwind classes (`bg-shell`, `text-shell-ink2`, …). They are set as the
+ * inline style of `ScanFlow`'s `.scan-root` element (`SHELL_ROOT_STYLE` in
+ * `lib/shell-theme.ts`), which every screen — the `position: fixed` overlays
+ * included — descends from. (A provider that wrote them to `<html>` used to
+ * live here; it was never mounted, so the variables were never set.)
  *
  * **The shell is no longer a choice.** It was a 14-step ramp with a
  * picker over the viewfinder; the picker is gone and the value is fixed at
@@ -35,20 +35,4 @@ export function useShell(): { shell: string } {
   return React.useContext(ShellContext);
 }
 
-/** Stable identity: the value never changes, so it must not be a new object. */
-const VALUE = { shell: DEFAULT_SHELL };
 
-export function ShellThemeProvider({ children }: { children: React.ReactNode }) {
-  React.useEffect(() => {
-    const root = document.documentElement;
-    const vars = shellCssVars(deriveShellTheme(DEFAULT_SHELL));
-    for (const [name, value] of Object.entries(vars)) {
-      root.style.setProperty(name, value);
-    }
-    return () => {
-      for (const name of Object.keys(vars)) root.style.removeProperty(name);
-    };
-  }, []);
-
-  return <ShellContext.Provider value={VALUE}>{children}</ShellContext.Provider>;
-}

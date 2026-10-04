@@ -64,7 +64,7 @@ export function ConferirStep({
   onAdjusted,
   onSelect,
   onAddFiles,
-  onContinue,
+  onGenerate,
 }: {
   tiles: readonly PageTile[];
   current: PageTile | null;
@@ -72,7 +72,8 @@ export function ConferirStep({
   onAdjusted: (pageId: string) => void;
   onSelect: (pageId: string) => void;
   onAddFiles: () => void;
-  onContinue: () => void;
+  /** "Gerar PDF": starts the build and moves to step 3, where it is watched. */
+  onGenerate: () => void;
 }) {
   const copy = useCopy();
   const store = useStore();
@@ -344,14 +345,14 @@ export function ConferirStep({
             <button
               type="button"
               disabled={blocked}
-              onClick={onContinue}
+              onClick={onGenerate}
               className={clsx(
                 "ml-auto inline-flex h-[46px] items-center gap-2.5 rounded-xl px-5",
                 "text-sm font-bold text-paper transition-colors duration-200",
                 blocked ? "cursor-not-allowed bg-deep opacity-40" : "bg-deep hover:bg-leaf",
               )}
             >
-              {copy.desktop.conferir.goGerar}
+              {copy.gerar.generate}
               <span aria-hidden="true">→</span>
             </button>
           </div>

@@ -358,7 +358,7 @@ test("the chosen rung is recorded in the subject", async () => {
   const metadata = await metadataOf(result.blob);
 
   assert.ok(result.rung > 0);
-  assert.match(metadata.subject ?? "", /Size ladder: rung 1, q75, long edge 3000px\./);
+  assert.match(metadata.subject ?? "", /Size ladder: rung 1, q92, full resolution\./);
 });
 
 test("when the floor still overshoots, no file is produced", async () => {
@@ -381,7 +381,7 @@ test("when the floor still overshoots, no file is produced", async () => {
   // of them, because "remove all 6 pages" is not advice.
   assert.ok(result.removePages >= 1 && result.removePages < 6);
   // Every rung was genuinely attempted before giving up.
-  assert.deepEqual(rungs, [0, 1, 2, 3, 4]);
+  assert.deepEqual(rungs, SIZE_LADDER.map((_, rung) => rung));
   // And there is no `blob` on this branch at all — the caller cannot ship a
   // file that busts the budget by mistake.
   assert.equal("blob" in result, false);

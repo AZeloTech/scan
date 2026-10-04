@@ -39,8 +39,9 @@ test("every session script is deterministic and plain JSON", () => {
     assert.deepEqual(a, buildSession(id, 1), id);
     assert.deepEqual(JSON.parse(JSON.stringify(a)), a, id);
     assert.ok(a.duration > 5000, id);
-    // A session with auto-capture on may leave every capture to it.
-    assert.ok(a.autoCapture === true || a.actions.some((step) => step.tap !== undefined), `${id}: never taps the shutter`);
+    // A session with auto-capture on may leave every capture to it; the
+    // view probe (the runner's measuring stick) is no scan at all.
+    assert.ok(a.autoCapture === true || id === "view-probe" || a.actions.some((step) => step.tap !== undefined), `${id}: never taps the shutter`);
   }
   assert.notDeepEqual(buildSession("approach-hold", 1), buildSession("approach-hold", 2));
 });
@@ -267,3 +268,106 @@ test("a looped session plays its rendered frames forward and back, stills includ
   assert.equal(loopedTime(plain, 4321), 4321);
 });
 
+
+test("framed by the screen, a held page sits whole in the view, centred in it", async () => {
+  const { cameraFromPose, projectRect, viewBounds } = await import("./emulator/camera.js");
+  // The rail's cover crop of a 3:4 stream at 412×891, below the hint pill, above the controls.
+  const view = { x: 0.19, y: 0.12, width: 0.62, height: 0.65 };
+  for (const id of ["approach-hold", "partial-frame", "wider-still"]) {
+    for (let seed = 1; seed <= 4; seed += 1) {
+      const script = buildSession(id, seed, { size: "960x1280", view });
+      const hold = script.camera[script.camera.length - 1].pose;
+      const camera = cameraFromPose(hold, script.frame);
+      const b = viewBounds(view, script.frame.width, script.frame.height);
+      const layer = script.scene.layers.findLast((l) => l.document !== undefined);
+      const pts = projectRect(camera, layer);
+      for (const p of pts) assert.ok(p.u >= b.l && p.u <= b.r && p.v >= b.t && p.v <= b.b, `${id} #${seed}: corner ${p.u.toFixed(0)},${p.v.toFixed(0)} outside the view`);
+      const cx = pts.reduce((s, p) => s + p.u, 0) / 4 / script.frame.width;
+      assert.ok(cx > view.x && cx < view.x + view.width, `${id} #${seed}: page centre off the view`);
+    }
+  }
+  // Without a view, nothing changes: the script is the one framed in the whole frame.
+  assert.deepEqual(buildSession("approach-hold", 3, { size: "720x1280", view: null }), buildSession("approach-hold", 3, { size: "720x1280" }));
+});
+
+test("the scripted user's 'too far' line is the app's", async () => {
+  const { FOLLOW_RULES, framingMeasure } = await import("./emulator/session.js");
+  const { FRAMING_NEAR } = await import("./session-score.mjs");
+  const guidance = await import("../../src/lib/guidance.ts");
+  assert.equal(FOLLOW_RULES.fill.enter, guidance.FILL_ENTER);
+  assert.equal(FOLLOW_RULES.fill.exit, guidance.FILL_EXIT);
+  assert.equal(FRAMING_NEAR, guidance.FILL_NEAR);
+  // The measure is the app's own, on any quad.
+  for (let i = 0; i < 50; i += 1) {
+    const pts = [0, 1, 2, 3].map((k) => [Math.sin(i * 7 + k * 3) * 0.7 + 0.5, Math.cos(i * 5 + k * 2) * 0.7 + 0.5]);
+    const quad = { topLeft: { x: pts[0][0], y: pts[0][1] }, topRight: { x: pts[1][0], y: pts[1][1] }, bottomRight: { x: pts[2][0], y: pts[2][1] }, bottomLeft: { x: pts[3][0], y: pts[3][1] } };
+    close(framingMeasure("fill", pts), guidance.fillShare(quad), 1e-12, `quad ${i}`);
+  }
+});
+
+test("the scripted user follows 'Aproxime': comes in until the hint clears, and holds", async () => {
+  const { FOLLOW_RULES, framingMeasure, NATURAL_FILL } = await import("./emulator/session.js");
+  // The rail at 412×891 over a 9:16 stream: a 0.46-wide view.
+  const region = { x: 0.09, y: 0, width: 0.82, height: 1 };
+  const view = { x: 0.09, y: 0.06, width: 0.82, height: 0.8, region };
+  const rule = FOLLOW_RULES.fill;
+  const fillAt = (script, t) => {
+    const truth = sessionTruth(script, t);
+    return framingMeasure("fill", truth.corners.map(([x, y]) => [(x - region.x) / region.width, (y - region.y) / region.height]));
+  };
+  let approached = 0;
+  for (const id of ["approach-hold", "page-swap", "partial-frame", "too-far"]) {
+    for (let seed = 1; seed <= 3; seed += 1) {
+      const script = buildSession(id, seed, { size: "720x1280", view });
+      assert.deepEqual(JSON.parse(JSON.stringify(script)), script, `${id} #${seed}: plain JSON`);
+      for (const f of script.marks.follow ?? []) {
+        // Held, before anything asks, the way people hold a page.
+        assert.ok(f.natural >= NATURAL_FILL[0] - 0.02 && f.natural <= NATURAL_FILL[1] + 0.02, `${id} #${seed}: natural fill ${f.natural}`);
+        if (!f.approached) continue;
+        approached += 1;
+        assert.ok(f.before < rule.exit, `${id} #${seed}: approached from ${f.before}`);
+        assert.ok(f.reactAt > f.from && f.arriveAt > f.reactAt && f.arriveAt < f.to, `${id} #${seed}: approach timing`);
+        // Untrembled, the page is past the exit line on arrival and stays whole in the view.
+        const calm = { ...script, tremor: { ...script.tremor, keys: [{ t: 0, amplitude: 0 }] } };
+        for (const t of [f.arriveAt, (f.arriveAt + f.to) / 2, f.to - 1]) {
+          const fill = fillAt(calm, t);
+          assert.ok(fill >= rule.exit && fill <= 0.93, `${id} #${seed} @${t}: fill ${fill.toFixed(3)}`);
+        }
+        // Before the reaction, where the script had it.
+        close(fillAt(calm, f.from), f.before, 1e-6, `${id} #${seed}: before`);
+      }
+      // Ready is owed from the arrival, not before.
+      for (const w of script.marks.ready ?? []) assert.ok(!(script.marks.follow ?? []).some((f) => f.approached && w.from > f.from && w.from < f.arriveAt), `${id} #${seed}: ready window inside an approach`);
+    }
+  }
+  assert.ok(approached >= 8, `only ${approached} approaches`);
+  // Under the old area line the same people frame the same way, and are
+  // asked to come closer only for a page under its area (a receipt).
+  for (const id of ["approach-hold", "page-swap", "too-far"]) {
+    for (let seed = 1; seed <= 3; seed += 1) {
+      const before = buildSession(id, seed, { size: "720x1280", view, follow: FOLLOW_RULES.area });
+      const after = buildSession(id, seed, { size: "720x1280", view });
+      assert.deepEqual(before.follow.natural, after.follow.natural, `${id} #${seed}`);
+      assert.ok(before.marks.follow.every((f) => !f.approached || f.before < FOLLOW_RULES.area.exit), `${id} #${seed}`);
+    }
+  }
+});
+
+test("the PDF's pixels are the page's edges in the field phone's still", async () => {
+  const { fieldPagePixels } = await import("./session-score.mjs");
+  // A page across 54 % of a 9:16 frame's width: ~1239 px of the S25's 2295.
+  const page = [[0.23, 0.2], [0.77, 0.2], [0.77, 0.6], [0.23, 0.6]];
+  const px = fieldPagePixels(page, { width: 720, height: 1280 });
+  close(px.short, 0.54 * 2295, 1);
+  close(px.long, 0.4 * 4080, 1);
+  // A 3:4 stream: the crop is 3060 wide.
+  close(fieldPagePixels(page, { width: 960, height: 1280 }).short, Math.min(0.54 * 3060, 0.4 * 4080), 1);
+});
+
+test("follow: an imperfect person's aim error rides on the rule (`--follow fill:E:X@0.08`)", async () => {
+  const { parseFollow, FOLLOW_RULES } = await import("./emulator/session.js");
+  assert.deepEqual(parseFollow("fill"), FOLLOW_RULES.fill);
+  assert.deepEqual(parseFollow("fill@0.08"), { ...FOLLOW_RULES.fill, aimError: 0.08 });
+  assert.deepEqual(parseFollow("fill:0.78:0.83@0.05"), { kind: "fill", enter: 0.78, exit: 0.83, aimError: 0.05 });
+  assert.throws(() => parseFollow("fill@0.5"));
+});

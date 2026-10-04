@@ -20,4 +20,10 @@ export type {
   ScanCancelReason,
   ScanIntake,
   ScanLang,
+  ScanCaptureLayout,
+  ScanDiagnosticsEvent,
+  ScanDiagnosticsPayload,
+  ScanDiagnosticsEvidence,
+  ScanDiagnosticsSize,
+  ScanDiagnosticsVersion,
 } from "./types";

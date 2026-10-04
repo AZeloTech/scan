@@ -58,14 +58,14 @@ export const DEFAULT_STREAM = "720x1280";
  * build. Any change to any of them is another key, so a stale frame is never
  * replayed — and editing one session's script re-renders that session only.
  */
-export function frameCacheKey(id, seed, stream, browserVersion) {
+export function frameCacheKey(id, seed, stream, browserVersion, view = null, follow = undefined) {
   const hash = createHash("sha256");
   const dir = join(BENCH_DIR, "emulator");
   for (const name of readdirSync(dir).filter((n) => n.endsWith(".js")).sort()) {
     const source = readFileSync(join(dir, name), "utf8");
     hash.update(name).update(name === "session.js" ? source.slice(0, source.indexOf("registerSession({")) : source);
   }
-  hash.update(JSON.stringify(buildSession(id, seed, { size: stream })));
+  hash.update(JSON.stringify(buildSession(id, seed, { size: stream, view, ...(follow === undefined ? {} : { follow }) })));
   hash.update(FRAME_CACHE_VERSION).update(browserVersion);
   return `${id}-${seed}-${stream}-${hash.digest("hex").slice(0, 16)}`;
 }
@@ -127,7 +127,7 @@ function render(results) {
   out.push(`- run: ${results.createdAt} · commit ${results.git.commit}${results.git.dirty ? " (dirty)" : ""}`);
   out.push(`- browser: ${env.executable} · WebGL: ${env.renderer}`);
   out.push(
-    `- phone: ${PHONE.viewport.width}×${PHONE.viewport.height} CSS px @ DPR ${PHONE.deviceScaleFactor}, touch, Android UA · CPU throttle ${cfg.cpu}× (whole session)`,
+    `- phone: ${cfg.viewport ?? `${PHONE.viewport.width}x${PHONE.viewport.height}`} CSS px @ DPR ${PHONE.deviceScaleFactor}, touch, Android UA · CPU throttle ${cfg.cpu}× (whole session)`,
   );
   out.push(
     `- camera: ${cfg.stream} portrait preview at 30 fps — frames **pre-rendered** (SwiftShader draws one in ~0.1 s) and pushed into ` +
@@ -222,7 +222,7 @@ function render(results) {
           "viewfinder box samples that moved or resized.",
       );
       out.push("");
-      out.push("| session | hint windows: correct / wrong / none (first correct p50 ms) | churn /s (fast) | hold hints | ready precision / recall / on no page ms | auto: fires / false / tremor / pages fired of / repeat / not owed / latency p50 ms | auto failed/severe of n · manual failed/severe of n | layout shifts |");
+      out.push("| session | hint windows: correct / wrong / none (first correct p50 ms) | churn /s (fast) | hold hints | ready precision / recall / on no page ms | auto: fires / false / tremor / pages fired of / repeat / not owed / latency p50 ms · at the shutter: unsafe (moving / cut / unverified) | auto failed/severe of n · manual failed/severe of n | layout shifts |");
       out.push("|---|---|---:|---:|---:|---:|---:|---:|");
       for (const [session, { all: a }] of guided) {
         const g = a.guidance;
@@ -232,8 +232,122 @@ function render(results) {
         out.push(
           `| ${session} | ${windows || "–"} | ${g.changesPerSecond === null ? "–" : g.changesPerSecond.toFixed(2)} (${g.fastChanges}) | ${pct(g.holdHintShare, 0)} | ` +
             `${pct(g.readyPrecision, 0)} / ${pct(g.readyRecall, 0)} / ${ms(g.readyNoPageMs)} | ` +
-            `${g.fires} / ${g.falseFires} / ${g.firesDuringTremor} / ${g.pagesFired} of ${g.pages} / ${g.repeatFires} / ${(g.firesInNoFire ?? 0) + (g.firesInHintWindow ?? 0)} / ${ms(g.fireLatencyP50)} | ` +
+            `${g.fires} / ${g.falseFires} / ${g.firesDuringTremor} / ${g.pagesFired} of ${g.pages} / ${g.repeatFires} / ${(g.firesInNoFire ?? 0) + (g.firesInHintWindow ?? 0)} / ${ms(g.fireLatencyP50)} · ` +
+            `${g.firesUnsafe ?? 0} (${g.firesMovingAtShutter ?? 0} / ${g.firesCutAtShutter ?? 0} / ${g.firesUnverified ?? 0}) | ` +
             `${g.autoCaptures.failed}/${g.autoCaptures.severe} of ${g.autoCaptures.captures} · ${g.manualCaptures.failed}/${g.manualCaptures.severe} of ${g.manualCaptures.captures} | ${g.layoutShifts} of ${g.layoutSamples} |`,
+        );
+      }
+      out.push("");
+    }
+    // 5d+ phase B: what lies over the page, against auto-capture and the hints.
+    const paperRows = Object.entries(results.summary).filter(([, { all: a }]) => a.paperLock || a.paperPageless || a.pagelessLocks);
+    if (paperRows.length > 0) {
+      const hist = (m) => Object.entries(m ?? {}).sort((x, y) => y[1] - x[1]).map(([k, v]) => `${k} ${v}`).join(", ") || "–";
+      out.push("## Paper lock");
+      out.push("");
+      out.push(
+        "5d-paper: a page presented under the dim warm lamp (`marks.paperLock`, from the end of the approach to the tap). **locked** = the share of " +
+          "that whole window the loop held a found sheet **whose drawn quad was on the presented page** (every corner the frame shows within 8 % of " +
+          "the diagonal, the app's own \"another page\" line; time no sample covers counts as not locked), and in brackets the share also inside the " +
+          "wrong-crop line (3 %); **wrong** = the share it held a found sheet drawn anywhere else (the leaflet, the mat). **first lock** p50 / p90 over runs (a run that never locked counts as never); **dropouts** = locks lost inside the steady windows " +
+          "(the page held still) after the first lock, and the steady time not locked after it. **passes**: every regular pass in the window · no quad · " +
+          "turned away · read the evidence · said paper · kept (locked, the reading not paper). **verdicts**, then for a surface failure the first clause " +
+          "of each print rule (`print` text on its background, `panels` printed images in a white margin), and for a sides failure the weak sides. " +
+          "A page-less session lists its passes the same way; one page-less as a whole (`marks.pageless`: a document on a screen) shows the share of " +
+          "it held as a found sheet at all, in **wrong**, with its runs that locked.",
+      );
+      out.push("");
+      out.push("| session | runs | locked | wrong | first lock p50 / p90 ms | never | dropouts (/min) · steady unlocked | passes · no quad · turned away · read · paper · kept | verdicts | print | panels | weak sides |");
+      out.push("|---|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|");
+      for (const [session, { all: a }] of paperRows) {
+        const p = a.paperLock;
+        const q = a.pagelessLocks;
+        const c = p?.clauses ?? q?.clauses ?? a.paperPageless;
+        const wrong = p ? pct(p.wrongLockShare, 0) : q ? `**${pct(q.lockedShare, 0)}** (${q.runsLocked}/${q.runs} runs)` : "–";
+        out.push(
+          `| ${session} | ${p?.runs ?? q?.runs ?? a.runs} | ${p ? `**${pct(p.lockedShare, 0)}** (${pct(p.exactShare, 0)})` : "–"} | ${wrong} | ${p ? `${ms(p.firstLockP50)} / ${ms(p.firstLockP90)}` : "–"} | ${p?.neverLocked ?? "–"} | ` +
+            `${p ? `${p.dropouts} (${p.dropoutsPerMinute === null ? "–" : p.dropoutsPerMinute.toFixed(1)}) · ${pct(p.steadyUnlockedShare, 0)}` : "–"} | ` +
+            `${c ? `${c.detects ?? "–"} · ${c.noQuad ?? "–"} · ${c.rejected ?? "–"} · ${c.passes} · ${c.paper} · ${c.kept}` : "–"} | ${hist(c?.verdicts)} | ${hist(c?.print)} | ${hist(c?.panels)} | ${hist(c?.weakSides)} |`,
+        );
+      }
+      out.push("");
+    }
+    const covered = Object.entries(results.summary).filter(
+      ([, { all: a }]) => a.guidance && (a.guidance.firesOnCovered > 0 || a.guidance.firesUncertain > 0 || Object.values(a.guidance.occlusion ?? {}).some((v) => v > 0)),
+    );
+    if (covered.length > 0) {
+      out.push("## Covered corners");
+      out.push("");
+      out.push(
+        "Auto-capture never fires on an uncertain page (a corner inferred or unknown, or two sheets overlapping). **Fires uncertain**: automatic " +
+          "captures the app itself had called uncertain (must be 0); **on covered**: automatic captures in a session whose page has a covered corner " +
+          "throughout (`marks.covered`; must be 0). **Corner state**: time some corner was unknown / inferred / two sheets, from the overlay. " +
+          "**\"Canto coberto\"**: time shown while a corner was unknown (owed after 700 ms) / while none was (wrong); **\"Separe as folhas\"**: time shown.",
+      );
+      out.push("");
+      out.push("| session | fires: all / uncertain / on covered | unknown / inferred / two sheets ms | Canto coberto: right / wrong ms | Separe as folhas ms |");
+      out.push("|---|---:|---:|---:|---:|");
+      for (const [session, { all: a }] of covered) {
+        const g = a.guidance;
+        const o = g.occlusion;
+        out.push(
+          `| ${session} | ${g.fires} / ${g.firesUncertain} / ${g.firesOnCovered} | ${ms(o.unknownMs)} / ${ms(o.inferredMs)} / ${ms(o.separateMs)} | ` +
+            `${ms(o.coveredHintRightMs)} / ${ms(o.coveredHintWrongMs)} | ${ms(o.separateHintMs)} |`,
+        );
+      }
+      out.push("");
+    }
+    const seen = results.rows.filter((row) => row.score.visibility);
+    if (seen.length > 0) {
+      out.push("## Visible region");
+      out.push("");
+      out.push(
+        "The page against the part of the frame the person can see (`page-session.js` measures it on its own: the video's content box under " +
+          "its object-fit, clipped by the stage and the viewport, minus the layout's declared opaque bands; a build that declares none is the crop alone). " +
+          "**Holds**: framed holds (the ready windows where a script has them, else the default holds) where the ready cue came on — from an onset of that hold's own page, all four corners visible and uncovered at it — / all; " +
+          "**page visible**: share of hold time with all four corners inside the region; **Afaste false**: \"Afaste um pouco\" shown while the whole " +
+          "page was clearly visible (every corner ≥ 3 % of the region in — the app's own exit threshold), over the time it was; **Afaste right**: shown while it was not, over that time. **Ready**: cue-on instants every 50 ms (onsets) with a " +
+          "corner outside the region, under an opaque control found on the page (not declared by the app), or no page at all / all; then page-less · covered. **Auto**: automatic captures whose page has a corner outside the image / flagged of those / all fires. " +
+          "**Area**: the visible region as a share of the viewport (median).",
+      );
+      out.push("");
+      out.push("| session | holds ready / all | page visible | Afaste false | Afaste right | ready violations (onsets) | auto: corner outside / flagged / fires | area |");
+      out.push("|---|---:|---:|---:|---:|---:|---:|---:|");
+      const bySession = new Map();
+      for (const row of seen) {
+        const acc = bySession.get(row.session) ?? {
+          holds: 0, reached: 0, visibleMs: 0, hiddenMs: 0, clearMs: 0, falseMs: 0, rightMs: 0,
+          samples: 0, violations: 0, pageless: 0, blocked: 0, onsets: 0, onsetViolations: 0, fires: 0, outside: 0, flagged: 0, areas: [],
+        };
+        const v = row.score.visibility;
+        for (const h of v.holds) {
+          acc.holds += 1;
+          if (h.reached) acc.reached += 1;
+          acc.visibleMs += h.visibleMs;
+          acc.hiddenMs += h.hiddenMs;
+          acc.clearMs += h.clearMs ?? h.visibleMs;
+          acc.falseMs += h.moveBackFalseMs;
+          acc.rightMs += h.moveBackRightMs;
+        }
+        acc.samples += v.ready.samples;
+        acc.violations += v.ready.violations;
+        acc.pageless += v.ready.pageless ?? 0;
+        acc.blocked += v.ready.blocked ?? 0;
+        acc.onsets += v.ready.onsets;
+        acc.onsetViolations += v.ready.onsetViolations;
+        acc.fires += v.auto.fires;
+        acc.outside += v.auto.cornerOutside;
+        acc.flagged += v.auto.cornerOutsideFlagged;
+        if (v.area !== null) acc.areas.push(v.area);
+        bySession.set(row.session, acc);
+      }
+      const share = (a, b) => (b > 0 ? a / b : null);
+      for (const [session, a] of bySession) {
+        const areas = a.areas.sort((x, y) => x - y);
+        out.push(
+          `| ${session} | ${a.holds === 0 ? "–" : `${a.reached} / ${a.holds}`} | ${pct(share(a.visibleMs, a.visibleMs + a.hiddenMs), 0)} | ` +
+            `${pct(share(a.falseMs, a.clearMs), 0)} | ${pct(share(a.rightMs, a.hiddenMs), 0)} | ${a.violations} / ${a.samples} (${a.onsetViolations} / ${a.onsets}); ${a.pageless} · ${a.blocked} | ` +
+            `${a.outside} / ${a.flagged} / ${a.fires} | ${areas.length === 0 ? "–" : pct(areas[Math.floor(areas.length / 2)], 0)} |`,
         );
       }
       out.push("");
@@ -420,6 +534,7 @@ function filmStrip(script, record, score) {
 export function sessionKnobs(options) {
   const knobs = {};
   if (options.lane !== null && options.lane !== undefined) knobs.lane = options.lane;
+  if (options.fit !== null && options.fit !== undefined) knobs.fit = options.fit;
   if (options.cpu > 1) knobs.workerSlowdown = options.cpu;
   return knobs;
 }
@@ -431,18 +546,21 @@ export async function runSessionSuite({ page, throttle: _unused, options, outDir
   const sheets = [];
   const sheetDir = join(outDir, "sheets");
   mkdirSync(sheetDir, { recursive: true });
-  const listing = await openSessionPage(browser, origin);
+  const listing = await openSessionPage(browser, origin, options.layout, options.viewport);
   const known = await listing.page.evaluate(() => window.__session.sessions());
   await listing.context.close();
-  // A group name (`regression`, `all`) stands for its sessions.
+  // A group name (`regression`, `all`, `default` — a plain run's sessions) stands for its sessions.
+  const plain = known.filter((s) => s.inDefault !== false).map((s) => s.id);
   const ids = [
     ...new Set(
-      (options.sessions ?? known.filter((s) => s.inDefault !== false).map((s) => s.id)).flatMap((id) =>
+      (options.sessions ?? plain).flatMap((id) =>
         id === "all"
           ? known.map((s) => s.id)
-          : known.some((s) => s.group === id)
-            ? known.filter((s) => s.group === id).map((s) => s.id)
-            : [id],
+          : id === "default"
+            ? plain
+            : known.some((s) => s.group === id)
+              ? known.filter((s) => s.group === id).map((s) => s.id)
+              : [id],
       ),
     ),
   ];
@@ -451,15 +569,23 @@ export async function runSessionSuite({ page, throttle: _unused, options, outDir
   }
   const knobs = sessionKnobs(options);
   const browserVersion = browser.version();
+  // `--frame-by screen`: frame every page in what this layout shows at this
+  // viewport and stream, measured once, before the sessions are built.
+  const view = options.frameBy === "screen" ? await measureFramingView(browser, origin, options) : null;
+  if (view !== null) {
+    log(`session: framing by the screen — view x ${pctView(view.x)} y ${pctView(view.y)} w ${pctView(view.width)} h ${pctView(view.height)} % of the frame`);
+    log(`session: the app's visible region x ${pctView(view.region.x)} y ${pctView(view.region.y)} w ${pctView(view.region.width)} h ${pctView(view.region.height)} %`);
+  }
   for (const id of ids) {
     for (let seed = 1; seed <= options.sessionSeeds; seed += 1) {
       const started = Date.now();
-      const { context, page: phone, errors } = await openSessionPage(browser, origin);
+      const { context, page: phone, errors } = await openSessionPage(browser, origin, options.layout, options.viewport);
       try {
-        const cache = options.frameCache === false ? null : frameCacheKey(id, seed, options.stream, browserVersion);
+        const cache = options.frameCache === false ? null : frameCacheKey(id, seed, options.stream, browserVersion, view, options.follow);
         const prepared = await phone.evaluate(
-          ([name, s, size, key, settings]) => window.__session.prepare(name, s, { size, cache: key, knobs: settings }),
-          [id, seed, options.stream, cache, knobs],
+          ([name, s, size, key, settings, v, scale, follow]) =>
+            window.__session.prepare(name, s, { size, cache: key, knobs: settings, view: v, streamScale: scale, ...(follow === undefined ? {} : { follow }) }),
+          [id, seed, options.stream, cache, knobs, view, options.streamScale ?? 1, options.follow],
         );
         const throttle = await cpuThrottle(phone);
         await throttle.set(options.cpu);
@@ -529,13 +655,68 @@ export async function runSessionSuite({ page, throttle: _unused, options, outDir
   };
 }
 
-/** A fresh phone-shaped context on the session page, ready to prepare. */
-export async function openSessionPage(browser, origin) {
-  const context = await browser.newContext(PHONE);
+const pctView = (v) => (v * 100).toFixed(1);
+
+/**
+ * The part of the frame a person frames a page in on this layout, viewport
+ * and stream: the visible region the bench measures on the page itself (the
+ * video under its fit, clipped by the screen, minus the opaque bands) with
+ * the opaque controls drawn over its top or bottom (the top row, the hint
+ * pill) cut off too — a person keeps the page out from under them. Frame
+ * fractions, rounded (a stable frame-cache key).
+ */
+export async function measureFramingView(browser, origin, options) {
+  const { context, page } = await openSessionPage(browser, origin, options.layout, options.viewport);
+  try {
+    await page.evaluate(
+      ([size, scale, settings]) => window.__session.prepare("view-probe", 1, { size, streamScale: scale, knobs: settings }),
+      [options.stream, options.streamScale ?? 1, sessionKnobs(options)],
+    );
+    await page.evaluate(() => window.__session.run({ scripted: false }));
+    await page.waitForFunction(() => (window.__session.view()?.samples ?? 0) >= 15, null, { timeout: 30_000 });
+    return framingView(await page.evaluate(() => window.__session.view()));
+  } finally {
+    await context.close();
+  }
+}
+
+/**
+ * {@link measureFramingView}'s arithmetic: the region, trimmed by the
+ * controls over its top and bottom — with the untrimmed region alongside
+ * (`region`: what the app judges its hints in, which the scripted user
+ * follows; `buildSession` takes it off the view).
+ */
+export function framingView(region) {
+  let top = region.y;
+  let bottom = region.y + region.height;
+  const left = region.x;
+  const right = region.x + region.width;
+  const middle = (top + bottom) / 2;
+  for (const b of region.blocks ?? []) {
+    if (b.x + b.width <= left || b.x >= right || b.y + b.height <= top || b.y >= bottom) continue;
+    if (b.y + b.height / 2 < middle) top = Math.max(top, b.y + b.height);
+    else bottom = Math.min(bottom, b.y);
+  }
+  const round = (v) => Math.round(v * 1e4) / 1e4;
+  return {
+    x: round(left),
+    y: round(top),
+    width: round(right - left),
+    height: round(Math.max(0, bottom - top)),
+    region: { x: round(region.x), y: round(region.y), width: round(region.width), height: round(region.height) },
+  };
+}
+
+/**
+ * A fresh phone-shaped context on the session page, ready to prepare — on the
+ * given capture layout (`--layout`), or the library's default (`rail`).
+ */
+export async function openSessionPage(browser, origin, layout = null, viewport = null) {
+  const context = await browser.newContext(viewport === null || viewport === undefined ? PHONE : { ...PHONE, viewport });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(String(error)));
-  await page.goto(`${origin}/page-session.html`);
+  await page.goto(`${origin}/page-session.html${layout === null || layout === undefined ? "" : `?layout=${encodeURIComponent(layout)}`}`);
   await page.waitForFunction(() => window.__sessionReady === true, null, { timeout: 60_000 });
   return { context, page, errors };
 }
@@ -613,6 +794,13 @@ export function summarize(rows) {
         firesDuringTremor: 0,
         firesInNoFire: 0,
         firesInHintWindow: 0,
+        firesUncertain: 0,
+        firesUnverified: 0,
+        firesMovingAtShutter: 0,
+        firesCutAtShutter: 0,
+        firesUnsafe: 0,
+        firesOnCovered: 0,
+        occlusion: { unknownMs: 0, inferredMs: 0, separateMs: 0, coveredHintRightMs: 0, coveredHintWrongMs: 0, separateHintMs: 0 },
         pages: 0,
         pagesFired: 0,
         repeatFires: 0,
@@ -725,6 +913,13 @@ export function summarize(rows) {
       G.firesDuringTremor += g.auto.firesDuringTremor;
       G.firesInNoFire += g.auto.firesInNoFire ?? 0;
       G.firesInHintWindow += g.auto.firesInHintWindow ?? 0;
+      G.firesUncertain += g.auto.firesUncertain ?? 0;
+      G.firesUnverified += g.auto.firesUnverified ?? 0;
+      G.firesMovingAtShutter += g.auto.firesMovingAtShutter ?? 0;
+      G.firesCutAtShutter += g.auto.firesCutAtShutter ?? 0;
+      G.firesUnsafe += g.auto.firesUnsafe ?? 0;
+      G.firesOnCovered += g.auto.firesOnCovered ?? 0;
+      for (const k of Object.keys(G.occlusion)) G.occlusion[k] += g.occlusion?.[k] ?? 0;
       G.pages += g.auto.pages;
       G.pagesFired += g.auto.pagesFired;
       G.repeatFires += g.auto.repeatFires;
@@ -742,6 +937,34 @@ export function summarize(rows) {
     if (Number.isFinite(row.score.staleAfterSwapMs)) entry.stale.push(row.score.staleAfterSwapMs);
     if (row.score.falseLocksPerMinute !== undefined) entry.falseLocks.push(row.score.falseLocksPerMinute);
     if (Number.isFinite(row.score.falseLockExposure?.share)) entry.exposure.push(row.score.falseLockExposure.share);
+    const pl = row.score.paperLock;
+    if (pl) {
+      const P = (entry.paperLock ??= { runs: 0, windowMs: 0, observedMs: 0, lockedMs: 0, exactMs: 0, wrongLockMs: 0, first: [], dropouts: 0, steadyMs: 0, steadyUnlockedMs: 0, clauses: null });
+      P.runs += 1;
+      // The whole presented window is the denominator: time no sample covers is not locked.
+      P.windowMs += pl.windowMs ?? pl.observedMs;
+      P.observedMs += pl.observedMs;
+      P.lockedMs += pl.lockedMs;
+      P.wrongLockMs += pl.wrongLockMs ?? 0;
+      P.exactMs += pl.exactMs ?? 0;
+      P.first.push(pl.firstLockMs);
+      P.dropouts += pl.dropouts;
+      P.steadyMs += pl.steadyMs;
+      P.steadyUnlockedMs += pl.steadyUnlockedMs;
+      P.clauses = mergeClauses(P.clauses, pl.clauses);
+    }
+    if (row.score.paperPageless) entry.paperPageless = mergeClauses(entry.paperPageless ?? null, row.score.paperPageless);
+    const ql = row.score.pagelessLocks;
+    if (ql) {
+      const Q = (entry.pagelessLocks ??= { runs: 0, windowMs: 0, lockedMs: 0, locks: 0, longestMs: 0, runsLocked: 0, clauses: null });
+      Q.runs += 1;
+      Q.windowMs += ql.windowMs;
+      Q.lockedMs += ql.lockedMs;
+      Q.locks += ql.locks;
+      Q.longestMs = Math.max(Q.longestMs, ql.longestMs);
+      if (ql.locks > 0) Q.runsLocked += 1;
+      Q.clauses = mergeClauses(Q.clauses, ql.clauses);
+    }
   }
   const avg = (list) => (list.length > 0 ? list.reduce((s, v) => s + v, 0) / list.length : null);
   /** p50 over runs where a run that never got there counts as never (∞). */
@@ -832,6 +1055,43 @@ export function summarize(rows) {
           remountToLockP50: p50Never(e.remountLock),
           remountNeverLocked: e.remountLock.filter((v) => v === null).length,
           guidance: summarizeGuidance(e.guidance),
+          // 5d-paper: the found-sheet lock over presented pages, pooled over runs.
+          ...(e.paperLock
+            ? {
+                paperLock: {
+                  runs: e.paperLock.runs,
+                  // Locked on the presented page itself, over the whole presented window.
+                  lockedShare: e.paperLock.windowMs > 0 ? e.paperLock.lockedMs / e.paperLock.windowMs : null,
+                  wrongLockShare: e.paperLock.windowMs > 0 ? e.paperLock.wrongLockMs / e.paperLock.windowMs : null,
+                  exactShare: e.paperLock.windowMs > 0 ? e.paperLock.exactMs / e.paperLock.windowMs : null,
+                  observedShare: e.paperLock.windowMs > 0 ? e.paperLock.observedMs / e.paperLock.windowMs : null,
+                  firstLockP50: p50Never(e.paperLock.first),
+                  firstLockP90: p90Never(e.paperLock.first),
+                  neverLocked: e.paperLock.first.filter((v) => v === null).length,
+                  dropouts: e.paperLock.dropouts,
+                  dropoutsPerMinute: e.paperLock.steadyMs > 0 ? (e.paperLock.dropouts * 60000) / e.paperLock.steadyMs : null,
+                  steadyUnlockedShare: e.paperLock.steadyMs > 0 ? e.paperLock.steadyUnlockedMs / e.paperLock.steadyMs : null,
+                  clauses: e.paperLock.clauses,
+                },
+                // The headline --compare gates (larger is worse): the presented time not locked.
+                paperUnlockedShare: e.paperLock.windowMs > 0 ? 1 - e.paperLock.lockedMs / e.paperLock.windowMs : null,
+              }
+            : {}),
+          ...(e.paperPageless ? { paperPageless: e.paperPageless } : {}),
+          // A session page-less as a whole (a document on a screen): any lock at all, and its headline (larger is worse).
+          ...(e.pagelessLocks
+            ? {
+                pagelessLocks: {
+                  runs: e.pagelessLocks.runs,
+                  runsLocked: e.pagelessLocks.runsLocked,
+                  locks: e.pagelessLocks.locks,
+                  longestMs: e.pagelessLocks.longestMs,
+                  lockedShare: e.pagelessLocks.windowMs > 0 ? e.pagelessLocks.lockedMs / e.pagelessLocks.windowMs : null,
+                  clauses: e.pagelessLocks.clauses,
+                },
+                pagelessLockedShare: e.pagelessLocks.windowMs > 0 ? e.pagelessLocks.lockedMs / e.pagelessLocks.windowMs : null,
+              }
+            : {}),
           leaks:
             e.leaks.length === 0
               ? null
@@ -846,6 +1106,26 @@ export function summarize(rows) {
       },
     ]),
   );
+}
+
+/** Nearest-rank p90 over runs where a run that never got there counts as never (∞); null when that is never. */
+function p90Never(values) {
+  if (values.length === 0) return null;
+  const sorted = values.map((v) => (v === null ? Infinity : v)).sort((a, b) => a - b);
+  const value = sorted[Math.min(sorted.length - 1, Math.ceil(0.9 * sorted.length) - 1)];
+  return Number.isFinite(value) ? value : null;
+}
+
+/** Two {@link paperClauses} histograms added (the first may be null). */
+function mergeClauses(a, b) {
+  if (a === null) return JSON.parse(JSON.stringify(b));
+  const out = { ...a };
+  for (const key of ["detects", "noQuad", "rejected", "unread", "passes", "readRejected", "paper", "kept"]) out[key] = (a[key] ?? 0) + (b[key] ?? 0);
+  for (const key of ["verdicts", "print", "panels", "weakSides"]) {
+    out[key] = { ...a[key] };
+    for (const [k, v] of Object.entries(b[key])) out[key][k] = (out[key][k] ?? 0) + v;
+  }
+  return out;
 }
 
 /** A session's guidance numbers, pooled over its runs (time-weighted where they are times). */
@@ -880,6 +1160,13 @@ function summarizeGuidance(G) {
     firesDuringTremor: G.firesDuringTremor,
     firesInNoFire: G.firesInNoFire,
     firesInHintWindow: G.firesInHintWindow,
+    firesUncertain: G.firesUncertain,
+    firesUnverified: G.firesUnverified,
+    firesMovingAtShutter: G.firesMovingAtShutter,
+    firesCutAtShutter: G.firesCutAtShutter,
+    firesUnsafe: G.firesUnsafe,
+    firesOnCovered: G.firesOnCovered,
+    occlusion: G.occlusion,
     fireLatencyP50: latencies.length > 0 ? percentile(latencies, 50) : null,
     fireLatencies: latencies,
     pages: G.pages,

@@ -46,6 +46,7 @@ import {
   weightedPercentile,
   WRONG_CROP_MAX_CORNER_ERROR,
 } from "./metrics.mjs";
+import { FOLLOW_RULES, framingMeasure } from "./emulator/session.js";
 
 /** An overlay counts as shown to the user from this opacity up. */
 export const OVERLAY_SHOWN_OPACITY = 0.5;
@@ -66,6 +67,9 @@ export const CAPTURE_FAILURES = new Set(["wrong", "false positive", "no corners"
  * wrong-crop rate.
  */
 export const PAGELESS_CAPTURE = "page-less capture";
+
+/** An `auto-fire` probe belongs to the fire whose tap comes at most this long after it. */
+const FIRE_PROBE_BEFORE_MS = 250;
 
 /** The bench could not name the image that became the page: missing data, not a verdict. */
 export const UNSCORED_CAPTURE = "unscored";
@@ -255,6 +259,32 @@ export function scorePasses(record, gtAt, frame) {
 }
 
 /**
+ * A still's truth (normalized to the whole still) re-expressed in a crop of it
+ * (`crop` in the still's pixels): corners, the page quad, the content
+ * polygons, and whether the page is still whole inside the crop.
+ */
+export function cropStillTruth(still, crop) {
+  const { width, height } = still;
+  if (!(width > 0 && height > 0 && crop.width > 0 && crop.height > 0)) return null;
+  const map = ([u, v]) => [(u * width - crop.x) / crop.width, (v * height - crop.y) / crop.height];
+  const quad = still.quad === null || still.quad === undefined ? still.quad : still.quad.map(map);
+  const corners = still.corners === null || still.corners === undefined ? still.corners : still.corners.map(map);
+  const inside = ([u, v]) => u >= 0 && u <= 1 && v >= 0 && v <= 1;
+  const content = Array.isArray(still.content)
+    ? still.content.map((box) => ({ ...box, polygon: box.polygon.map(map) }))
+    : (still.content ?? null);
+  return {
+    ...still,
+    width: crop.width,
+    height: crop.height,
+    quad,
+    corners,
+    whole: Array.isArray(corners) ? corners.every(inside) : still.whole,
+    content,
+  };
+}
+
+/**
  * The image a capture made its page of, by the ids it carried: the still the
  * fake camera rendered for its attempt, or the preview frame its grab was
  * stamped with. `known: false` when the ids name nothing — never a guess.
@@ -264,11 +294,18 @@ export function capturedImage(script, record, capture) {
     const attempt = capture.stillAttempt ?? null;
     const rendered = attempt === null ? null : ((record.stills ?? []).find((s) => s.attempt === attempt) ?? null);
     if (rendered === null) return { known: false, source: "still (unidentified)" };
+    // The app cuts a sensor-native still to the preview's field of view
+    // (`stillCropFor`): the page's frame is that crop, so the truth moves with it.
+    const crop = capture.stillCrop ?? null;
+    const cropped = crop === null ? null : cropStillTruth(rendered, crop);
     return {
       known: true,
-      truth: rendered,
-      content: rendered.content ?? null,
-      source: `still ${rendered.width}×${rendered.height}`,
+      truth: cropped ?? rendered,
+      content: cropped === null ? (rendered.content ?? null) : cropped.content,
+      source:
+        cropped === null
+          ? `still ${rendered.width}×${rendered.height}`
+          : `still ${rendered.width}×${rendered.height} → ${crop.width}×${crop.height}`,
       stillIndex: rendered.index ?? null,
       k: rendered.k ?? null,
     };
@@ -353,6 +390,8 @@ export function scoreCaptures(script, record) {
       stillMs: still?.ms ?? null,
       stillUsed: capture.stillUsed,
       stillSize: capture.stillW === null ? null : [capture.stillW, capture.stillH],
+      stillCrop: capture.stillCrop ?? null,
+      stillReason: capture.stillReason ?? null,
       previewSize: [capture.previewW, capture.previewH],
       frame: [frame.width, frame.height],
       imageSource: image.source,
@@ -415,6 +454,11 @@ export function scoreCaptures(script, record) {
       captureMs: capture.doneAt - capture.t,
       confirmEdited: done?.edited ?? null,
       confirmOpened: open !== null,
+      // The app's own check of the image before the confirm screen (Phase 5a):
+      // the reason it flagged the page for attention, or null.
+      attention: capture.attention ?? null,
+      // Some corner of the page lies outside the image that became it.
+      cornerOutside: truthQuad === undefined || truthQuad === null ? null : !truthQuad.every(([x, y]) => x >= 0 && x <= 1 && y >= 0 && y <= 1),
     };
   });
 }
@@ -507,6 +551,25 @@ export function scoreSession(script, record) {
     // shows, exactly as a crop of the same frame would be.
     out.partial = windowed("page cut off", overlayAccuracy(series, { from: at(marks.partialFrom), to: at(marks.partialTo), frame }));
   }
+  if (marks.paperLock !== undefined) {
+    const lock = marks.paperLock;
+    out.paperLock = scorePaperLock(
+      record,
+      {
+        from: at(lock.from),
+        to: at(lock.to),
+        steady: (lock.steady ?? [lock]).map((w) => ({ from: at(w.from), to: at(w.to) })),
+      },
+      { truthAt: gtAt, frame },
+    );
+    const total = out.paperLock.observedMs + out.paperLock.unobservedMs;
+    if (total > 0 && out.paperLock.unobservedMs > MAX_UNOBSERVED_SHARE * total) {
+      out.missingData.push(`paper lock: ${Math.round(out.paperLock.unobservedMs)} of ${Math.round(total)} ms unobserved`);
+    }
+  }
+  if (marks.negativeFrom !== undefined) out.paperPageless = paperClauses(record, at(marks.negativeFrom), at(marks.negativeTo));
+  // A session that is page-less as a whole (a document on a screen): any lock in it, until the shutter.
+  if (marks.pageless === true) out.pagelessLocks = scorePagelessLocks(record, at(0), at(marks.tapAt ?? script.duration ?? 0));
   out.passes = scorePasses(record, gtAt, frame);
   out.captures = scoreCaptures(withTruth, record);
   out.captures.forEach((capture, index) => {
@@ -528,11 +591,53 @@ export function scoreSession(script, record) {
   };
   out.hints = hintTimeline(record);
   out.guidance = scoreGuidance(script, record, gtAt, out.captures);
+  out.visibility = scoreVisibility(script, record, gtAt, out.captures);
+  out.framing = scoreFraming(script, record, gtAt, out.captures, out.visibility);
   out.captureDetects = scoreCaptureDetects(record);
+  out.captureFreeze = scoreCaptureFreeze(record);
   out.perf = scorePerf(record);
   out.startup = scoreStartup(record, series, frame);
   if ((record.remounts ?? []).length > 0) out.remounts = scoreRemounts(record, series, frame);
   if (record.perfEnd) out.leaks = scoreLeaks(record);
+  return out;
+}
+
+/**
+ * How far the overlay moved between each capture's tap (or auto fire) and
+ * its confirm screen opening — it must hold still on the quad of the tap
+ * (`capturing`), whatever the camera does for the photo: the largest corner
+ * displacement (share of the frame) from the last quad drawn at the tap, over
+ * every overlay sample in between, and whether it faded or vanished there.
+ */
+export function scoreCaptureFreeze(record) {
+  const events = record.events ?? [];
+  const overlays = events.filter((e) => e.type === "overlay");
+  const out = [];
+  for (const capture of events.filter((e) => e.type === "capture")) {
+    const open = events.find((e) => e.type === "confirm-open" && e.t >= capture.t);
+    const to = open?.t ?? capture.doneAt ?? capture.t;
+    // The quad of the tap: the first frozen sample (the loop samples it as
+    // it freezes), else the last one drawn before the tap.
+    const frozen = overlays.find((o) => o.capturing === true && o.t >= capture.t - 1 && o.t < to) ?? null;
+    const before = frozen ?? overlays.filter((o) => o.t <= capture.t).at(-1) ?? null;
+    const base = before?.quad ?? null;
+    let move = 0;
+    let dropped = false;
+    let samples = 0;
+    for (const o of overlays) {
+      if (o === before || o.t < capture.t || o.t >= to) continue;
+      samples += 1;
+      if (base === null) continue;
+      if (o.quad === null || o.opacity < (before.opacity ?? 1) - 1e-6) {
+        dropped = true;
+        continue;
+      }
+      for (const key of ["topLeft", "topRight", "bottomRight", "bottomLeft"]) {
+        move = Math.max(move, Math.hypot(o.quad[key].x - base[key].x, o.quad[key].y - base[key].y));
+      }
+    }
+    out.push({ trigger: capture.trigger ?? null, from: capture.t, to, drawn: base !== null, samples, move, dropped });
+  }
   return out;
 }
 
@@ -742,7 +847,7 @@ export function hintTimeline(record) {
  * can be scored on the same windows ("sheet-found" and the prose tip are not
  * hints and are ignored).
  */
-export const HINT_KEYS = ["searching", "not-found", "move-back", "move-closer", "low-light", "glare", "hold-still"];
+export const HINT_KEYS = ["searching", "not-found", "move-back", "move-closer", "move-phone", "low-light", "glare", "hold-still", "corner-covered", "separate-sheets"];
 const LEGACY_HINTS = { "aim-at-document": "searching", "edges-not-found": "not-found", "fit-whole-page": "fit-whole-page", "low-light": "low-light" };
 const LEGACY_ORDER = ["low-light", "not-found", "searching", "fit-whole-page"];
 
@@ -837,6 +942,52 @@ function pageAt(script, t) {
 }
 
 /**
+ * How long after the shutter call a phone's still is exposed (the S25's is
+ * about 0.1 s): the window an automatic capture's page has to stay whole and
+ * still in, judged on the scene itself (the frames' ground truth), whatever
+ * image the capture ended up with — on the bench the still often arrives
+ * after the app's timeout, and the preview it falls back to is grabbed a
+ * second or two later, when the scene may be back where it was.
+ */
+export const SHUTTER_EXPOSE_MS = 150;
+/**
+ * The page's largest corner move over that window, as a share of the frame's
+ * diagonal, above which the shutter was called on a moving page: the app's
+ * own still line (`STILL_MAX`). A held phone's tremor moves it a few tenths of
+ * a percent (5b fires on held pages: p50 0.4 %, p90 0.9 %).
+ */
+export const SHUTTER_MOTION_MAX = 0.015;
+
+/**
+ * The scene at a shutter call at camera time `tapAt`, from the frames' ground
+ * truth (`record.frames`: `{ t, quad, whole }`): `whole` the page wholly in
+ * view on every frame from the one on screen at the call to the end of the
+ * exposure window; `motion` its largest corner move over that window (share
+ * of the frame's diagonal). Null when no frame covers it.
+ */
+export function shutterTruth(frames, tapAt, frame, exposeMs = SHUTTER_EXPOSE_MS) {
+  const list = frames ?? [];
+  let first = -1;
+  for (let i = 0; i < list.length; i += 1) if (list[i].t <= tapAt) first = i;
+  if (first < 0) return null;
+  const span = [];
+  for (let i = first; i < list.length && list[i].t <= tapAt + exposeMs; i += 1) span.push(list[i]);
+  const whole = span.every((f) => f.quad !== null && f.quad !== undefined && f.whole === true);
+  const diagonal = Math.hypot(frame.width, frame.height);
+  const a = span[0].quad;
+  let motion = 0;
+  if (a !== null && a !== undefined) {
+    for (const f of span) {
+      if (f.quad === null || f.quad === undefined) continue;
+      for (let k = 0; k < 4; k += 1) {
+        motion = Math.max(motion, Math.hypot((f.quad[k][0] - a[k][0]) * frame.width, (f.quad[k][1] - a[k][1]) * frame.height) / diagonal);
+      }
+    }
+  }
+  return { whole, motion };
+}
+
+/**
  * The guidance a session showed: each scripted hint window (`marks.hints`),
  * the hint's churn, hints shown over a framed hold, the ready cue's precision
  * (cue-on time with the overlay on the page, within `LOCK_TOLERANCE`) and
@@ -918,11 +1069,58 @@ export function scoreGuidance(script, record, gtAt, captures) {
   // and where a hint is owed (the hint windows): no capture is owed there.
   const noFire = marks.noFire ?? [];
   const hinted = marks.hints ?? [];
+  // What the app said the page's corners were at each fire (5d+ phase B,
+  // `auto-fire` probe): auto-capture never fires on an uncertain page. Each
+  // fire is matched to its own probe — the nearest one at most
+  // FIRE_PROBE_BEFORE_MS before its tap (or a hair after), used once — and a
+  // fire without one, or whose probe has no corners, is unverified: an
+  // unmeasured corner is as forbidden as an uncertain one.
+  const fireProbes = record.events.filter((e) => e.type === "auto-fire");
+  const usedProbes = new Set();
+  const fireProbeAt = (tapAt) => {
+    let best = null;
+    for (const e of fireProbes) {
+      const d = tapAt - (e.t - t0);
+      if (usedProbes.has(e) || d > FIRE_PROBE_BEFORE_MS || d < -50) continue;
+      if (best === null || Math.abs(d) < Math.abs(tapAt - (best.t - t0))) best = e;
+    }
+    if (best !== null) usedProbes.add(best);
+    return best;
+  };
+  const uncertainOf = (probeAt) => {
+    if (probeAt === null || probeAt.corners === null || probeAt.corners === undefined) return null;
+    return probeAt.separate === true || Object.values(probeAt.corners).some((p) => p !== "seen");
+  };
+  const toCamera = (marksAt) =>
+    marksAt === null || marksAt === undefined
+      ? null
+      : Object.fromEntries(Object.entries(marksAt).map(([k, v]) => [k, typeof v === "number" && Number.isFinite(v) ? v - t0 : null]));
+  // When the page was presented: the start of the hold the fire is in (an
+  // approach the scripted user made counts from before it), else its stable mark.
+  const presentedAt = (tapAt) => {
+    const starts = ((marks.follow ?? []).length > 0 ? marks.follow.map((f) => f.from) : (marks.ready ?? []).map((w) => w.from)).filter((v) => v <= tapAt);
+    return starts.length === 0 ? null : Math.max(...starts);
+  };
   const fires = captures
     .filter((c) => c.trigger === "auto")
     .map((c) => {
       const since = stable.filter((s) => s <= c.tapAt).pop();
+      const fp = fireProbeAt(c.tapAt);
+      const presented = presentedAt(c.tapAt);
+      const scene = shutterTruth(record.frames, c.tapAt, frame);
       return {
+        // 5b: the fire's timeline (camera ms) and the loop's interval then; when the page was presented; the capture's time to its corners.
+        timeline: toCamera(fp?.timeline),
+        intervalMs: fp?.intervalMs ?? null,
+        presentedAt: presented,
+        fromPresentedMs: presented === null ? null : c.tapAt - presented,
+        stableAt: since ?? null,
+        captureMs: c.captureMs ?? null,
+        // The app called a corner inferred / unknown, or two sheets, at the fire (must never be true); null: not
+        // reported or not measured (unverified — counted with the uncertain ones in `firesUnverified`).
+        uncertain: uncertainOf(fp),
+        // The script's page had a covered corner (`marks.covered`) at the fire.
+        covered: marks.covered === true,
         tapAt: c.tapAt,
         page: pageAt(script, c.tapAt),
         verdict: c.verdict,
@@ -932,6 +1130,11 @@ export function scoreGuidance(script, record, gtAt, captures) {
         inNoFire: noFire.find((w) => c.tapAt >= w.from && c.tapAt <= w.to)?.name ?? null,
         inHintWindow: hinted.find((w) => !w.expect.some((k) => k === "searching" || k === "not-found") && c.tapAt >= w.from && c.tapAt <= w.to)?.name ?? null,
         falseFire: marks.pageless === true || c.pagelessCapture === true || c.verdict === "false positive" || c.verdict === PAGELESS_CAPTURE,
+        // The scene at the shutter call itself (ground truth, `shutterTruth`), whatever image the capture got:
+        // the page wholly in view and still from the call through the exposure window.
+        sceneAtShutter: scene,
+        movingAtShutter: scene !== null && scene.motion > SHUTTER_MOTION_MAX,
+        cutAtShutter: scene !== null && !scene.whole,
       };
     });
   const pages = marks.pageless ? 0 : (marks.pages ?? (marks.stable?.length > 0 ? 1 : 0));
@@ -969,10 +1172,571 @@ export function scoreGuidance(script, record, gtAt, captures) {
       firesDuringTremor: fires.filter((f) => f.inTremor).length,
       firesInNoFire: fires.filter((f) => f.inNoFire !== null).length,
       firesInHintWindow: fires.filter((f) => f.inHintWindow !== null).length,
+      firesUncertain: fires.filter((f) => f.uncertain === true).length,
+      firesUnverified: fires.filter((f) => f.uncertain !== false).length,
+      firesMovingAtShutter: fires.filter((f) => f.movingAtShutter).length,
+      firesCutAtShutter: fires.filter((f) => f.cutAtShutter).length,
+      // Shutter calls that broke a rule at the call itself — in a no-fire or tremor window, on a moving or cut-off
+      // page, uncertain or unverified corners, page-less — whatever image came of it.
+      firesUnsafe: fires.filter(
+        (f) => f.inNoFire !== null || f.inTremor || f.movingAtShutter || f.cutAtShutter || f.uncertain !== false || marks.pageless === true,
+      ).length,
+      firesOnCovered: fires.filter((f) => f.covered).length,
       pages,
       pagesFired: firedPages.size,
-      repeatFires: Math.max(0, fires.filter((f) => !f.falseFire).length - firedPages.size),
+      // Every shutter call past the first on a page, whatever its image's verdict.
+      repeatFires: [...fires.reduce((by, f) => by.set(f.page, (by.get(f.page) ?? 0) + 1), new Map()).values()].reduce((n, k) => n + Math.max(0, k - 1), 0),
     },
     layout: { samples: boxes.length, shifts, maxShiftPx: shiftPx },
+    occlusion: occlusionHints(record, series, liveFrom, liveTo),
   };
+}
+
+/**
+ * The occlusion hints against what the app said about the corners (5d+
+ * phase B): time "Canto coberto" was up while a corner was unknown (right)
+ * or while none was (wrong); time some corner was unknown (it is owed after
+ * 700 ms of that); time "Separe as folhas" was up; time a corner was inferred
+ * (the dashed bracket, no hint) — all from the overlay's samples.
+ */
+function occlusionHints(record, series, liveFrom, liveTo) {
+  const samples = record.events.filter((e) => e.type === "overlay" && e.t >= liveFrom && e.t <= liveTo);
+  const out = { unknownMs: 0, inferredMs: 0, separateMs: 0, coveredHintRightMs: 0, coveredHintWrongMs: 0, separateHintMs: 0 };
+  for (let i = 0; i < samples.length - 1; i += 1) {
+    const span = Math.min(samples[i + 1].t - samples[i].t, 400);
+    const corners = samples[i].corners ?? null;
+    const unknown = corners !== null && Object.values(corners).includes("unknown");
+    const inferred = corners !== null && Object.values(corners).includes("inferred");
+    if (unknown) out.unknownMs += span;
+    if (inferred) out.inferredMs += span;
+    if (samples[i].separate === true) out.separateMs += span;
+    const key = hintAt(series, samples[i].t);
+    if (key === "corner-covered") {
+      if (unknown) out.coveredHintRightMs += span;
+      else out.coveredHintWrongMs += span;
+    }
+    if (key === "separate-sheets") out.separateHintMs += span;
+  }
+  return out;
+}
+
+/* ── the visible region: what the person can see (Phase 5a) ─────────────── */
+
+/** Step of the time grid the visible-region scores sample (ms). */
+const VIS_STEP_MS = 50;
+/** The overlay reports at least every 100 ms while the live loop runs; silence past this is no viewfinder. */
+const CUE_SILENT_MS = 300;
+
+/**
+ * "Clearly inside": every corner at least this far in from the region's
+ * edges (a share of its width and height) — the app's own exit threshold for
+ * "Afaste um pouco" (`BORDER_EXIT`, `src/lib/guidance.ts`). A page closer to
+ * the edge than that is *tight*: the hint may rightly still be up there
+ * (hysteresis, a detector a few pixels out), so it counts neither as a false
+ * "Afaste" nor as a right one.
+ */
+export const VIS_CLEAR_MARGIN = 0.03;
+
+/** Every corner of `quad` at least `share` of the region's own width/height inside it. */
+export function clearlyInside(quad, region, share = VIS_CLEAR_MARGIN) {
+  const mx = share * region.width;
+  const my = share * region.height;
+  return quad.every(
+    ([x, y]) => x >= region.x + mx && x <= region.x + region.width - mx && y >= region.y + my && y <= region.y + region.height - my,
+  );
+}
+
+/**
+ * The visible region at page time `t`: the last `regions` sample the page
+ * measured at or before it (`page-session.js`: the video's content box, its
+ * clips and the layout's declared occluders), else the crop the page measured
+ * as the camera went live (`record.visible`), else the whole frame.
+ */
+export function regionAt(record) {
+  const regions = record.regions ?? [];
+  const fallback = record.visible ?? { x: 0, y: 0, width: 1, height: 1 };
+  return (t) => {
+    let lo = 0;
+    let hi = regions.length - 1;
+    if (hi < 0 || regions[0].at > t) return regions[0] ?? fallback;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (regions[mid].at <= t) lo = mid;
+      else hi = mid - 1;
+    }
+    return regions[lo];
+  };
+}
+
+/** Every corner of `quad` (`[[x, y] × 4]`, frame fractions) inside `region`, `margin` in from its edges (fractions of the frame). */
+/**
+ * The opaque controls over the picture at a region sample (`blocks`, frame
+ * fractions, measured by the page independently of what the app declares:
+ * `page-session.js`) — does one of them sit on a corner of `quad`?
+ */
+export function cornerBlocked(quad, region) {
+  const blocks = region.blocks ?? [];
+  return quad.some(([x, y]) => blocks.some((b) => x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height));
+}
+
+/** Every corner inside the region and under no opaque control. */
+export function visibleOnScreen(quad, region) {
+  return insideRegion(quad, region) && !cornerBlocked(quad, region);
+}
+
+export function insideRegion(quad, region, margin = 0) {
+  return quad.every(
+    ([x, y]) =>
+      x >= region.x + margin && x <= region.x + region.width - margin && y >= region.y + margin && y <= region.y + region.height - margin,
+  );
+}
+
+/**
+ * The page against the part of the frame the person can see:
+ *
+ * - `holds` — each framed hold (`marks.ready` windows where a script has
+ *   them, else the default sessions' `holdFrom…holdTo` and
+ *   `lockFrom2…holdTo2`): whether the ready cue came on in it (`reached`),
+ *   the share of it the whole page was visible, and "Afaste um pouco" shown
+ *   while the whole page was clearly visible ({@link clearlyInside};
+ *   `moveBackFalseMs` over `clearMs`) or
+ *   while it was not (`moveBackRightMs` over `hiddenMs`);
+ * - `ready` — every displayed instant (every VIS_STEP_MS) with the ready
+ *   cue on, judged against the truth on screen: `violations` where a corner
+ *   of the page lay outside the visible region or under an opaque control
+ *   (`blocked`), or where there was no page at all (`pageless`); and the
+ *   same at the cue's onsets. A hold is `reached` only from an onset of its
+ *   own page with the whole page on screen (a cue carried over from the
+ *   sheet before does not count);
+ * - `auto` — automatic captures whose page has a corner outside the image
+ *   that became it, and how many of those the app flagged;
+ * - `area` — the visible region's size as a share of the viewport (the
+ *   camera the person perceives), median over the live run.
+ */
+export function scoreVisibility(script, record, gtAt, captures) {
+  const marks = script.marks ?? {};
+  const t0 = record.startedAt;
+  const at = (cameraMs) => t0 + cameraMs;
+  const region = regionAt(record);
+  const series = hintSeries(record);
+  const windows =
+    (marks.ready ?? []).length > 0
+      ? marks.ready.map((w) => [w.from, w.to])
+      : [
+          ...(marks.holdFrom !== undefined && marks.holdTo !== undefined ? [[marks.holdFrom, marks.holdTo]] : []),
+          ...(marks.lockFrom2 !== undefined && marks.holdTo2 !== undefined ? [[marks.lockFrom2, marks.holdTo2]] : []),
+        ];
+  // A report frozen by a capture in flight (`capturing`) is the tapped
+  // photo's marks held still, not a cue inviting one: no cue.
+  const cue = record.events.filter((e) => e.type === "overlay").map((e) => ({ t: e.t, ready: e.ready === true && e.capturing !== true }));
+  // The cue as displayed at `t`: the overlay's last report, while it is
+  // still reporting (every ≤ 100 ms while the loop runs). A longer silence
+  // is a viewfinder that is not on screen — a confirm screen over it, the
+  // loop stopped — and shows no cue.
+  const readyAt = (t) => {
+    let last = null;
+    for (const s of cue) {
+      if (s.t > t) break;
+      last = s;
+    }
+    return last !== null && last.ready && t - last.t <= CUE_SILENT_MS;
+  };
+  // Where the cue came ON (its onsets), from the overlay's reports.
+  const onsets = [];
+  {
+    let previous = false;
+    for (const s of cue) {
+      if (s.ready && !previous) onsets.push(s.t);
+      previous = s.ready;
+    }
+  }
+  /** Every corner of the truth on screen at `t` inside the region and clear of every opaque control. */
+  const seenWhole = (t) => {
+    const gt = gtAt(t);
+    if (gt === undefined || gt === null) return false;
+    return visibleOnScreen(toPoints(gt), region(t));
+  };
+  const holds = windows.map(([from, to], index) => {
+    const w = { ms: 0, readyMs: 0, visibleMs: 0, hiddenMs: 0, clearMs: 0, moveBackFalseMs: 0, moveBackRightMs: 0, unknownMs: 0 };
+    // A hold is "ready" only from a cue onset of ITS page: after the previous
+    // hold ended (a cue carried over from the sheet before is not this
+    // one's), before this one ends, with all four corners of the page on
+    // screen at that onset (review finding 8).
+    const pageSince = index === 0 ? Number.NEGATIVE_INFINITY : at(windows[index - 1][1]);
+    const onset = onsets.find((t) => t > pageSince && t < at(to) && seenWhole(t)) ?? null;
+    for (let t = at(from); t < at(to); t += VIS_STEP_MS) {
+      w.ms += VIS_STEP_MS;
+      if (onset !== null && t >= onset && readyAt(t)) w.readyMs += VIS_STEP_MS;
+      const gt = gtAt(t);
+      if (gt === undefined || gt === null) {
+        w.unknownMs += VIS_STEP_MS;
+        continue;
+      }
+      const r = region(t);
+      const visible = visibleOnScreen(toPoints(gt), r);
+      const moveBack = hintAt(series, t) === "move-back";
+      if (visible) {
+        w.visibleMs += VIS_STEP_MS;
+        if (clearlyInside(toPoints(gt), r)) {
+          w.clearMs += VIS_STEP_MS;
+          if (moveBack) w.moveBackFalseMs += VIS_STEP_MS;
+        }
+      } else {
+        w.hiddenMs += VIS_STEP_MS;
+        if (moveBack) w.moveBackRightMs += VIS_STEP_MS;
+      }
+    }
+    return {
+      from,
+      to,
+      ...w,
+      onsetAt: onset === null ? null : onset - t0,
+      reached: w.readyMs > 0,
+      visibleShare: rate(w.visibleMs, w.visibleMs + w.hiddenMs),
+      moveBackFalseShare: rate(w.moveBackFalseMs, w.clearMs),
+    };
+  });
+  // The cue as displayed, every VIS_STEP_MS from the first report to the
+  // last (not only at the overlay's reports): each instant it is on is
+  // judged against the truth on screen. A page-less instant with the cue on
+  // is a violation too (`pageless`); an instant with no truth is not judged.
+  const ready = { samples: 0, violations: 0, pageless: 0, blocked: 0, onsets: 0, onsetViolations: 0, worstOutside: 0 };
+  const judge = (t) => {
+    const gt = gtAt(t);
+    if (gt === undefined) return null;
+    if (gt === null) return { ok: false, pageless: true, blocked: false, outside: 0 };
+    const quad = toPoints(gt);
+    const r = region(t);
+    const inside = insideRegion(quad, r);
+    const clear = inside && !cornerBlocked(quad, r);
+    const outside = inside ? 0 : Math.max(...quad.map(([x, y]) => Math.max(r.x - x, x - (r.x + r.width), r.y - y, y - (r.y + r.height))));
+    return { ok: clear, pageless: false, blocked: inside && !clear, outside };
+  };
+  if (cue.length > 0) {
+    for (let t = cue[0].t; t <= cue[cue.length - 1].t; t += VIS_STEP_MS) {
+      if (!readyAt(t)) continue;
+      const j = judge(t);
+      if (j === null) continue;
+      ready.samples += 1;
+      if (j.ok) continue;
+      ready.violations += 1;
+      if (j.pageless) ready.pageless += 1;
+      if (j.blocked) ready.blocked += 1;
+      ready.worstOutside = Math.max(ready.worstOutside, j.outside);
+    }
+  }
+  for (const t of onsets) {
+    const j = judge(t);
+    if (j === null) continue;
+    ready.onsets += 1;
+    if (!j.ok) ready.onsetViolations += 1;
+  }
+  const autos = captures.filter((c) => c.trigger === "auto");
+  const outside = autos.filter((c) => c.cornerOutside === true);
+  const liveFrom = record.actions?.find((a) => a.what === "camera-live")?.at ?? t0;
+  const areas = (record.regions ?? [])
+    .filter((r) => r.at >= liveFrom && r.viewW > 0 && r.viewH > 0)
+    .map((r) => (r.cssW * r.cssH) / (r.viewW * r.viewH))
+    .sort((a, b) => a - b);
+  const last = (record.regions ?? []).at(-1) ?? null;
+  return {
+    holds,
+    ready,
+    auto: {
+      fires: autos.length,
+      cornerOutside: outside.length,
+      cornerOutsideFlagged: outside.filter((c) => c.attention !== null).length,
+      flagged: autos.filter((c) => c.attention !== null).length,
+    },
+    area: areas.length === 0 ? null : areas[Math.floor(areas.length / 2)],
+    region: last === null ? (record.visible ?? null) : { x: last.x, y: last.y, width: last.width, height: last.height, fit: last.fit },
+  };
+}
+
+/* ── framing: how close the page is held, and what that gives the PDF ──── */
+
+/**
+ * The app's "too far" line (`FILL_ENTER` / `FILL_EXIT`, `src/lib/guidance.ts`,
+ * mirrored by the emulator's `FOLLOW_RULES.fill`) and the share past it the
+ * scorer counts a page as plainly big enough — "Aproxime" shown over such a
+ * page is a wrong hint (the hysteresis and a detector a few pixels out
+ * excuse anything closer to the line).
+ */
+export const FRAMING_RULE = FOLLOW_RULES.fill;
+export const FRAMING_CLEAR = 0.03;
+/** "Aproxime mais um pouco" from this fill up (`FILL_NEAR`). */
+export const FRAMING_NEAR = 0.6;
+
+/**
+ * The phone the PDF's resolution is reported for: the Galaxy S25 Ultra's
+ * still (4080×3060), cut to the preview's field of view — 2295×4080 for a
+ * 9:16 stream, 3060×4080 for 3:4 (the owner's field run). The page's pixels
+ * in the PDF are its edges' lengths in that crop.
+ */
+export const FIELD_STILL_LONG = 4080;
+export const FIELD_STILL_SHORT = 3060;
+/** A4's short side, inches: the PDF's dpi for an A4 page. */
+const A4_SHORT_IN = 210 / 25.4;
+
+/** A truth quad (`[[x, y] × 4]`, frame fractions) in fractions of `region`. */
+function inRegionPoints(points, region) {
+  return points.map(([x, y]) => [(x - region.x) / region.width, (y - region.y) / region.height]);
+}
+
+/**
+ * The page's size in the field phone's still (cut to the preview's field of
+ * view, `frame` the stream's shape): the longer of each pair of opposite
+ * edges, as the warp makes it — `{ short, long }` px.
+ */
+export function fieldPagePixels(points, frame) {
+  const portrait = frame.height >= frame.width;
+  const aspect = portrait ? frame.width / frame.height : frame.height / frame.width;
+  const shortPx = Math.min(FIELD_STILL_SHORT, FIELD_STILL_LONG * aspect);
+  const [w, h] = portrait ? [shortPx, FIELD_STILL_LONG] : [FIELD_STILL_LONG, shortPx];
+  const edge = (a, b) => Math.hypot((b[0] - a[0]) * w, (b[1] - a[1]) * h);
+  const [tl, tr, br, bl] = points;
+  const across = Math.max(edge(tl, tr), edge(bl, br));
+  const down = Math.max(edge(tl, bl), edge(tr, br));
+  return { short: Math.min(across, down), long: Math.max(across, down) };
+}
+
+/**
+ * Framing over each hold (the windows {@link scoreVisibility} judges, from
+ * when the page was *presented* — a hold the scripted user came in on,
+ * `marks.follow`, counts from before the approach):
+ *
+ * - `fillAtStart` / `fillAtReady` — the page's fill (its reach along the
+ *   visible region's limiting axis, as the app measures it) when presented
+ *   and when the ready cue came on; `toReadyMs` — presented → cue on;
+ * - `closerMs` "Aproxime" shown, `closerWrongMs` shown over a page plainly
+ *   big enough ({@link FRAMING_CLEAR} past the exit line), `moveBackMs`
+ *   "Afaste um pouco" shown, `otherMs` any other hint, `changes` the hint's
+ *   changes inside the hold;
+ * - the session's "Aproxime" onsets with the page's fill then (`closerOnsets`)
+ *   — near ones get "Aproxime mais um pouco";
+ * - every capture: the page's fill at the tap and its size in the field
+ *   phone's still ({@link fieldPagePixels}) and the dpi that is for A4.
+ */
+export function scoreFraming(script, record, gtAt, captures, visibility) {
+  const marks = script.marks ?? {};
+  const t0 = record.startedAt;
+  const at = (cameraMs) => t0 + cameraMs;
+  const region = regionAt(record);
+  const series = hintSeries(record);
+  const follow = marks.follow ?? [];
+  const fillAt = (t) => {
+    const gt = gtAt(t);
+    if (gt === undefined || gt === null) return null;
+    return framingMeasure("fill", inRegionPoints(toPoints(gt), region(t)));
+  };
+  const holds = (visibility?.holds ?? []).map((h) => {
+    const approach = follow.find((f) => f.arriveAt === h.from || f.from === h.from) ?? null;
+    const presented = approach === null ? h.from : approach.from;
+    const w = { closerMs: 0, closerWrongMs: 0, moveBackMs: 0, otherMs: 0, ms: 0 };
+    for (let t = at(presented); t < at(h.to); t += 50) {
+      w.ms += 50;
+      const key = hintAt(series, t);
+      if (key === null) continue;
+      if (key === "move-closer") {
+        w.closerMs += 50;
+        const fill = fillAt(t);
+        if (fill !== null && fill >= FRAMING_RULE.exit + FRAMING_CLEAR) w.closerWrongMs += 50;
+      } else if (key === "move-back") w.moveBackMs += 50;
+      else w.otherMs += 50;
+    }
+    const changes = series.filter((e) => e.t > at(presented) && e.t < at(h.to)).length;
+    return {
+      from: presented,
+      to: h.to,
+      approached: approach?.approached === true,
+      approach,
+      fillAtStart: fillAt(at(presented)),
+      reached: h.reached,
+      toReadyMs: h.onsetAt === null ? null : Math.max(0, h.onsetAt - presented),
+      fillAtReady: h.onsetAt === null ? null : fillAt(at(h.onsetAt)),
+      changes,
+      ...w,
+    };
+  });
+  const closerOnsets = series.filter((e) => e.key === "move-closer").map((e) => ({ t: e.t - t0, fill: fillAt(e.t) }));
+  const shots = captures.map((c) => {
+    const gt = gtAt(at(c.tapAt));
+    if (gt === undefined || gt === null) return { trigger: c.trigger, tapAt: c.tapAt, fill: null, px: null, dpi: null };
+    const points = toPoints(gt);
+    const px = fieldPagePixels(points, script.frame);
+    return { trigger: c.trigger, tapAt: c.tapAt, fill: fillAt(at(c.tapAt)), px, dpi: px.short / A4_SHORT_IN };
+  });
+  return { rule: FRAMING_RULE, holds, closerOnsets, captures: shots };
+}
+
+/**
+ * Why the passes whose frame was sampled in `[from, to]` did or did not read
+ * as paper (the probe's `paperWhy`, `src/lib/paper-evidence.ts`
+ * `evidenceDiagnostic`). Every regular pass in the window is counted
+ * (`detects`), and the ones that never got a reading are named: no quad at
+ * all (`noQuad`), a quad turned away (`rejected`: under the floor,
+ * superseded, failed its sanity checks) and an accepted quad with no reading
+ * (`unread`) — so the paper share is never of the read passes alone. Of the
+ * read passes (`passes`): those that said paper, the verdicts (`ok` /
+ * `sides` / `surface`), for a surface failure the first clause each print
+ * rule failed (`print:` the text rule, `panels:` the printed-images rule),
+ * and for a sides failure the sides under the rule's support line; those of
+ * them that were turned away too (`readRejected`); and those on a locked
+ * sheet that did not say paper (`kept`: the lock outlived the reading).
+ */
+export function paperClauses(record, from, to) {
+  const out = { detects: 0, noQuad: 0, rejected: 0, unread: 0, passes: 0, readRejected: 0, paper: 0, kept: 0, verdicts: {}, print: {}, panels: {}, weakSides: {} };
+  const bump = (m, k) => (m[k] = (m[k] ?? 0) + 1);
+  for (const e of record.events ?? []) {
+    if (e.type !== "detect" || e.warmUp || !(e.frameAt >= from && e.frameAt <= to)) continue;
+    out.detects += 1;
+    if (!e.ok) out.noQuad += 1;
+    else if (!e.accepted) out.rejected += 1;
+    const w = e.paperWhy;
+    if (!w) {
+      if (e.ok && e.accepted) out.unread += 1;
+      continue;
+    }
+    out.passes += 1;
+    if (!e.accepted) out.readRejected += 1;
+    if (w.verdict === "ok") out.paper += 1;
+    else if (e.locked) out.kept += 1;
+    bump(out.verdicts, w.verdict);
+    if (w.verdict === "surface") {
+      bump(out.print, w.failPrint ?? "ok");
+      bump(out.panels, w.failPanels ?? "ok");
+    }
+    if (w.verdict === "sides") {
+      for (const [key, side] of [["sideT", "T"], ["sideR", "R"], ["sideB", "B"], ["sideL", "L"]]) {
+        if (w[key] !== null && w[key] !== undefined && w[key] < 0.55) bump(out.weakSides, side);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * How far (largest visible corner error, share of the frame's diagonal) a
+ * locked quad may lie from the presented page and still be a lock *of that
+ * page*: the app's own "another page" line (`JUMP_RESET_DIAG`). Within
+ * {@link WRONG_CROP_MAX_CORNER_ERROR} it is also a lock a capture could use
+ * as drawn (`exactMs`).
+ */
+export const PAPER_LOCK_SAME_SHEET = 0.08;
+
+/**
+ * The found-sheet lock over a presented page (`marks.paperLock`, page time).
+ * A moment counts as **locked** only when the loop held a sheet as found
+ * (the overlay probe's `locked`) *and* the quad it drew was on the presented
+ * page — every corner the frame shows within {@link PAPER_LOCK_SAME_SHEET}
+ * of the truth (`truthAt`, `frame`; {@link visibleDistance}); within the
+ * wrong-crop line as well it is `exactMs`. A lock drawn on anything else
+ * (the leaflet, the mat, a screen) is `wrongLockMs`, never a lock of the
+ * page. Shares are of the **whole window**: time no sample
+ * covers counts as not locked (and a window mostly unobserved is flagged by
+ * the caller). Also: the time from the window's start to the first lock of
+ * the page (null: never), the locks lost inside the `steady` windows after
+ * that first lock (`dropouts`; the page was held still there) and the steady
+ * time not locked after it, and the paper clauses of the window's passes
+ * ({@link paperClauses}). Without `truthAt` every lock counts (old callers).
+ */
+export function scorePaperLock(record, { from, to, steady = [{ from, to }] }, { truthAt = null, frame = null } = {}) {
+  /**
+   * The drawn quad's error from the page: undefined when nothing is drawn
+   * (no quad, or faded under the shown line — not a lock the person sees);
+   * null when it is not on the page at all (no page, nothing to judge).
+   */
+  const errorOf = (e) => {
+    if (truthAt === null) return 0;
+    if (e.quad === null || e.quad === undefined || !(e.opacity >= OVERLAY_SHOWN_OPACITY)) return undefined;
+    const gt = truthAt(e.t);
+    if (gt === null || gt === undefined) return null;
+    return visibleDistance(toPoints(e.quad), gt, frame);
+  };
+  const series = (record.events ?? [])
+    .filter((e) => e.type === "overlay" && !e.capturing)
+    .map((e) => {
+      const error = e.locked === true ? errorOf(e) : undefined;
+      const held = error !== undefined;
+      const page = held && error !== null && error <= PAPER_LOCK_SAME_SHEET;
+      return { t: e.t, locked: page, exact: page && error <= WRONG_CROP_MAX_CORNER_ERROR, wrong: held && !page };
+    });
+  const { intervals, observedMs, unobservedMs } = sampleTimeline(series, { from, to });
+  const windowMs = Math.max(0, to - from);
+  let lockedMs = 0;
+  let exactMs = 0;
+  let wrongLockMs = 0;
+  let firstLock = null;
+  for (const interval of intervals) {
+    if (interval.sample.wrong) wrongLockMs += interval.to - interval.from;
+    if (interval.sample.exact) exactMs += interval.to - interval.from;
+    if (!interval.sample.locked) continue;
+    lockedMs += interval.to - interval.from;
+    if (firstLock === null) firstLock = interval.from;
+  }
+  let dropouts = 0;
+  let steadyMs = 0;
+  let steadyUnlockedMs = 0;
+  if (firstLock !== null) {
+    for (const w of steady) {
+      const start = Math.max(w.from, firstLock);
+      if (start >= w.to) continue;
+      // The whole steady window counts; an unobserved stretch is not locked.
+      steadyMs += w.to - start;
+      const timeline = sampleTimeline(series, { from: start, to: w.to });
+      let lockedHere = 0;
+      let was = null;
+      for (const interval of timeline.intervals) {
+        if (interval.sample.locked) lockedHere += interval.to - interval.from;
+        if (was === true && !interval.sample.locked) dropouts += 1;
+        was = interval.sample.locked;
+      }
+      steadyUnlockedMs += w.to - start - lockedHere;
+    }
+  }
+  return {
+    windowMs,
+    observedMs,
+    unobservedMs,
+    lockedMs,
+    exactMs,
+    wrongLockMs,
+    lockedShare: windowMs > 0 ? lockedMs / windowMs : null,
+    firstLockMs: firstLock === null ? null : firstLock - from,
+    dropouts,
+    steadyMs,
+    steadyUnlockedMs,
+    clauses: paperClauses(record, from, to),
+  };
+}
+
+/**
+ * A page-less session's locks (`marks.pageless`: a screen showing a
+ * document, say — not the paper): the share of the session the loop held
+ * *anything* as a found sheet (`lockedShare`, the whole window), the longest
+ * such lock, and the paper clauses of its passes — so its headline is never
+ * blind to a lock that no auto fire followed.
+ */
+export function scorePagelessLocks(record, from, to) {
+  const series = (record.events ?? [])
+    .filter((e) => e.type === "overlay" && !e.capturing)
+    .map((e) => ({ t: e.t, locked: e.locked === true }));
+  const { intervals } = sampleTimeline(series, { from, to });
+  const windowMs = Math.max(0, to - from);
+  let lockedMs = 0;
+  let run = 0;
+  let longestMs = 0;
+  let locks = 0;
+  let was = false;
+  for (const interval of intervals) {
+    const span = interval.to - interval.from;
+    if (interval.sample.locked) {
+      lockedMs += span;
+      run = was ? run + span : span;
+      if (!was) locks += 1;
+      longestMs = Math.max(longestMs, run);
+    }
+    was = interval.sample.locked;
+  }
+  return { windowMs, lockedMs, lockedShare: windowMs > 0 ? lockedMs / windowMs : null, locks, longestMs, clauses: paperClauses(record, from, to) };
 }

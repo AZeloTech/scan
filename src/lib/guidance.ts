@@ -21,12 +21,23 @@
  *     the reason and the torch is the remedy — unless a page is suspected
  *     cut off or far away, when framing it comes first, as below;
  *  2. a corner at or past the edge of what the viewfinder shows —
- *     "Afaste um pouco";
- *  3. the page small in the viewfinder — "Aproxime";
+ *     "Afaste um pouco" when the page is as big as asked or would not fit
+ *     anyway, else "Mova o celular para cima / para baixo / para a esquerda /
+ *     para a direita" ({@link moveDirection}: the way that brings the cut
+ *     side into view);
+ *  3. the page not filling the viewfinder — "Aproxime" ("Aproxime mais um
+ *     pouco" when it already nearly does: {@link FILL_NEAR});
+ *  3b. another sheet overlapping the page — "Separe as folhas"; a corner
+ *     something lies over and its edges cannot place — "Canto coberto —
+ *     afaste a folha de cima" ({@link OcclusionHint}, after
+ *     {@link OCCLUSION_HINT_AFTER_MS}): the page is framed, but what lies
+ *     on it is what keeps it from being ready;
  *  4. too dark — "Pouca luz" (with the torch offered where the camera has one);
  *  5. a reflection washing out part of the page — "Reflexo — incline o
  *     celular";
- *  6. a found sheet that keeps moving, or a blurred frame — "Segure firme";
+ *  6. a found sheet that keeps moving, or a blurred frame — "Segure firme"
+ *     (not the moment "Aproxime" or "Afaste um pouco" is answered: the page
+ *     moves because the person is moving it as asked);
  *  7. nothing: the page is ready.
  *
  * Each condition has an entry and an exit threshold (hysteresis), and the
@@ -51,11 +62,11 @@
  * have held {@link AUTO_FIRE_MS} — and a detection pass on a frame sampled
  * after that has found the page where it was — it fires, once per
  * page. After a fire it waits for the page to change (a sheet somewhere
- * else, no sheet for a second, or the scene changed) or for two seconds and
- * the phone moving, all counted from when the viewfinder came back from the
- * confirm screen, before it may fire again. It goes through the same capture
- * as a tap — capture priority, refinement, the confirm screen — and never
- * replaces the shutter.
+ * else, or no sheet for a second), counted from when the
+ * viewfinder came back from the confirm screen, before it may fire again —
+ * the phone moving over the same page is not another page. It goes through
+ * the same capture as a tap — capture priority, refinement, the confirm
+ * screen — and never replaces the shutter.
  *
  * Pure: no DOM, no clock of its own (every call is given `now`); tested in
  * `guidance.test.ts`. Thresholds were set on the bench's guidance sessions
@@ -64,7 +75,31 @@
 
 import { CORNER_KEYS, type NormalizedQuad } from "@/lib/quad";
 
-export type HintKey = "searching" | "not-found" | "move-back" | "move-closer" | "low-light" | "glare" | "hold-still";
+export type HintKey =
+  | "searching"
+  | "not-found"
+  | "move-back"
+  | "move-closer"
+  | "move-phone"
+  | "corner-covered"
+  | "separate-sheets"
+  | "low-light"
+  | "glare"
+  | "hold-still";
+
+/**
+ * What lies over the found page (`lib/corner-check.ts`), as the hint slot
+ * hears it: `separate` — another sheet overlaps it ("Separe as folhas");
+ * `covered` — a corner something lies over that its edges do not let anyone
+ * place ("Canto coberto — afaste a folha de cima"). Each only once it has
+ * held {@link OCCLUSION_HINT_AFTER_MS} of locked tracking. A corner that is
+ * covered but placed from its edges (inferred) says nothing here: the dashed
+ * bracket is its cue, and auto-capture holds.
+ */
+export type OcclusionHint = "separate" | "covered" | null;
+
+/** A covered corner or an overlapping sheet must hold this long on a found page before its hint is owed. */
+export const OCCLUSION_HINT_AFTER_MS = 700;
 
 /**
  * No sheet for this long since the loop started (or one was last seen)
@@ -92,13 +127,53 @@ export const BORDER_ENTER = 0.015;
 export const BORDER_EXIT = 0.03;
 
 /**
- * The page's share of the viewfinder under which it is too far: enter below
- * {@link AREA_ENTER}, leave above {@link AREA_EXIT}. A page held for a photo
- * covers 0.2–0.5 of the view in the bench's hold sessions (a receipt or an ID
- * card down to 0.19).
+ * How much of the viewfinder the page fills ({@link fillShare}: its reach
+ * along the view's limiting axis) under which it is too far: enter below
+ * {@link FILL_ENTER}, leave only at {@link FILL_EXIT} or more.
+ *
+ * Not an area: the viewfinder on a tall phone is about 0.46 as wide as it is
+ * tall and an A4 page 0.71, so a page as big as the screen can show it covers
+ * at most ~65 % of it — an area target of 70–80 % could never be met. Reach is
+ * what the PDF's resolution follows: on the Galaxy S25 Ultra the visible part
+ * of the 4080×3060 still is 2295 px wide, so a page across 54 % of it (the
+ * owner's field run, under the old area rule) is ~1240 px — 150 dpi for A4 —
+ * and across 85 % of it ~1950 px (235 dpi).
+ *
+ * The band from {@link FILL_EXIT} to "Afaste um pouco" ({@link BORDER_ENTER}:
+ * a corner within 1.5 % of the edge, i.e. a centred page reaching 97 %) is
+ * where a held page lives; the gap between enter and exit keeps a page held
+ * at the line from toggling the hint (set on the bench's hover and
+ * follow-the-hint sessions, `scripts/bench/README.md`).
+ *
+ * 0.70 / 0.75, down from 0.78 / 0.83 (2026-10-01): on the owner's next field
+ * run a page took 42 s to get the ready cue — real people hold a page off
+ * the middle and come closer along the camera's axis, so a corner met the
+ * edge before the page reached 0.83 and the two hints took turns. With
+ * "Aproxime" now asking only while the page has room ({@link framingHint}),
+ * the simulated people (`npm run bench:framing`: off-centre ≤ 8 %, turned
+ * ≤ 10°, A4 / Letter / ID card) reach the cue in a median of 2.8 s at
+ * 0.70 / 0.75 against 3.9 s at 0.78 / 0.83, for ~4 % fewer pixels (the S25
+ * still's page ~1300 px across against ~1360; the area rule before both
+ * gave ~940).
  */
-export const AREA_ENTER = 0.14;
-export const AREA_EXIT = 0.17;
+export const FILL_ENTER = 0.7;
+export const FILL_EXIT = 0.75;
+
+/**
+ * At or above this fill when it appears, "Aproxime" is said as "Aproxime mais
+ * um pouco": the page is found and already nearly big enough — a small move
+ * is asked for, not a big one that overshoots into "Afaste um pouco". The
+ * wording is chosen when the hint appears and kept while it shows (no text
+ * change under the person's eyes).
+ */
+export const FILL_NEAR = 0.6;
+
+/**
+ * A page the model is sure of but could not take as a found sheet is a *far*
+ * page (`hooks/useLiveDetect.ts`'s candidate) only while it covers less than
+ * this share of the view: under the model's own coverage floor.
+ */
+export const FAR_CANDIDATE_AREA = 0.17;
 
 /**
  * Too dark to frame by: the frame's brightest twentieth (its 95th luma
@@ -175,24 +250,153 @@ export const READY_DENSE_READINGS = 6;
  * them.
  */
 export const READY_MIN_READINGS = 5;
-/** Auto-capture: the ready cue held for this long. */
+/**
+ * Auto-capture's countdown: this long from the page settling
+ * ({@link AutoCapture})…
+ */
 export const AUTO_FIRE_MS = 500;
+/**
+ * …or this long when the newest {@link AUTO_AGREE_READINGS} confirming
+ * readings agree within {@link AUTO_AGREE_MAX} (share of the diagonal) — a
+ * page held that still needs no extra wait; any other hold keeps the full one.
+ */
+export const AUTO_FIRE_FAST_MS = 300;
+export const AUTO_AGREE_READINGS = 3;
+export const AUTO_AGREE_MAX = 0.6 / 100;
+/**
+ * The countdown starts once the page has *settled*: everything the ready cue
+ * asks for, but with its newest {@link SETTLE_READINGS} readings still (within
+ * {@link STILL_MAX} of each other) over at least {@link SETTLE_WINDOW_MS},
+ * instead of the cue's full window and drift. The stillness the cue asks for
+ * is then gathered DURING the countdown — the fire still needs the cue's full
+ * conditions, on, at that moment.
+ */
+export const SETTLE_READINGS = 3;
+export const SETTLE_WINDOW_MS = 200;
+
+/** Settled ({@link SETTLE_READINGS}): readings (frame time, quad in the visible crop), the view's `aspect`. */
+export function settledOn(readings: readonly { at: number; quad: NormalizedQuad }[], aspect: number): boolean {
+  if (readings.length < SETTLE_READINGS) return false;
+  const recent = readings.slice(-SETTLE_READINGS);
+  if (recent[recent.length - 1].at - recent[0].at < SETTLE_WINDOW_MS) return false;
+  const motion = motionOf(recent, aspect, Number.POSITIVE_INFINITY);
+  return motion !== null && motion <= STILL_MAX;
+}
+/**
+ * …and never sooner than this after the page was found (the live loop's
+ * lock, held since): the minimum dwell (R3). A page that has been in view
+ * for under a second is a page still arriving or about to leave — the
+ * bench's whip-off (held 0.9 s, then pulled away in 200 ms) fired at
+ * 0.9 s on a page the camera was already leaving, the motion not yet in
+ * any frame the app had. The countdown is drawn over the whole wait.
+ */
+export const AUTO_MIN_DWELL_MS = 1200;
+
+/**
+ * The fire's final look (R3): the newest pass that found the page where it
+ * was must have read a frame at least this far into the countdown…
+ */
+export const AUTO_CONFIRM_AFTER_MS = 150;
+/**
+ * …no older than this at the fire (or 1.5 of the loop's interval when that
+ * is longer, never more than {@link AUTO_FRAME_AGE_MAX_MS}); the live loop
+ * also looks at the camera at the fire, against that frame (no motion since).
+ */
+export const AUTO_FRAME_AGE_MS = 250;
+export const AUTO_FRAME_AGE_MAX_MS = 600;
+/**
+ * …and the camera seen quiet for at least this long since the first frame
+ * that qualified (read after the countdown's start, after the minimum dwell
+ * and after the last motion seen — a camera-watch trip, a pass that lost the
+ * page, readings that moved): the passes and the watch (every 100 ms, and
+ * once more at the instant) looked at frames newer than that one and saw
+ * nothing move. A motion they see starts a new epoch, and the wait with it.
+ * A motion that starts after the newest frame the app has cannot be seen by
+ * any look at the frames: this narrows that window, it cannot close it.
+ */
+export const AUTO_QUIET_MS = 150;
+
+/**
+ * When the readings (frame time, quad in the visible crop) last showed the
+ * page moving: the frame time of the newest reading more than
+ * {@link STILL_MAX} (share of the diagonal, any corner) from the one before
+ * it; null when none was. Auto-capture's motion epoch (`motionAt`): only a
+ * frame read after it confirms a fire.
+ */
+export function lastMovedAt(readings: readonly { at: number; quad: NormalizedQuad }[], aspect: number): number | null {
+  const diagonal = Math.hypot(1, aspect);
+  for (let i = readings.length - 1; i > 0; i -= 1) {
+    const a = readings[i - 1].quad;
+    const b = readings[i].quad;
+    for (const key of CORNER_KEYS) {
+      if (Math.hypot(b[key].x - a[key].x, (b[key].y - a[key].y) * aspect) / diagonal > STILL_MAX) return readings[i].at;
+    }
+  }
+  return null;
+}
+
+/** Settled ({@link settledOn}) on the readings read after `motionAt` alone (null: all of them) — stillness that is not from before the motion. */
+export function settledSince(readings: readonly { at: number; quad: NormalizedQuad }[], aspect: number, motionAt: number | null): boolean {
+  return settledOn(motionAt === null ? readings : readings.filter((r) => r.at > motionAt), aspect);
+}
+
+/**
+ * The camera watch against its own baseline: a score at least
+ * {@link WATCH_ONSET_RATIO} times the median of the watch's previous
+ * {@link WATCH_ONSET_HISTORY} scores on the held page (at least three of
+ * them), and over {@link WATCH_ONSET_MIN}, is motion starting — still under
+ * the watch's fixed line, which a textured desk's tremor alone can come near.
+ * Bench whip-off (5b): a fire 92 ms into a whip had the newest frame 83 ms
+ * in, scoring 0.018 against a hold that scored 0.002–0.005; on held pages,
+ * 2 % of the countdowns' samples crossed 3× their median.
+ */
+export const WATCH_ONSET_RATIO = 3;
+export const WATCH_ONSET_MIN = 0.012;
+export const WATCH_ONSET_HISTORY = 5;
+
+/** Motion starting, by {@link WATCH_ONSET_RATIO}: `score` against the watch's `previous` scores on this page (oldest first). */
+export function watchOnset(score: number, previous: readonly number[]): boolean {
+  if (previous.length < 3) return false;
+  const recent = previous.slice(-WATCH_ONSET_HISTORY).sort((a, b) => a - b);
+  const median = recent[Math.floor(recent.length / 2)];
+  return score > Math.max(WATCH_ONSET_MIN, WATCH_ONSET_RATIO * median);
+}
+
+/** The frame-age bound of the fire's final look for a loop reading every `intervalMs`. */
+export function autoFrameAgeMax(intervalMs: number): number {
+  return Math.min(AUTO_FRAME_AGE_MAX_MS, Math.max(AUTO_FRAME_AGE_MS, 1.5 * intervalMs));
+}
+
+/**
+ * The newest {@link AUTO_AGREE_READINGS} readings (frame time, quad in the
+ * visible crop) agree within {@link AUTO_AGREE_MAX} of the view's diagonal —
+ * every corner of each within that of the newest one's.
+ */
+export function readingsAgree(readings: readonly { at: number; quad: NormalizedQuad }[], aspect: number): boolean {
+  if (readings.length < AUTO_AGREE_READINGS) return false;
+  const recent = readings.slice(-AUTO_AGREE_READINGS);
+  const newest = recent[recent.length - 1];
+  const diagonal = Math.hypot(1, aspect);
+  for (const reading of recent) {
+    for (const key of CORNER_KEYS) {
+      const move = Math.hypot(newest.quad[key].x - reading.quad[key].x, (newest.quad[key].y - reading.quad[key].y) * aspect);
+      if (move / diagonal > AUTO_AGREE_MAX) return false;
+    }
+  }
+  return true;
+}
 /**
  * After a fire: another page is a sheet at least this far (share of the
  * diagonal) from the one taken — the live loop's own jump threshold — …
  */
 export const REARM_JUMP = 0.08;
-/** …or no sheet for this long while the viewfinder was live… */
-export const REARM_GONE_MS = 1000;
-/** …or this long since the fire and the phone moved in between… */
-export const REARM_AFTER_MS = 2000;
 /**
- * …or the scene itself changed since the fire (a page swapped in at much
- * the same place while the confirm screen was up): the viewfinder's 24×24
- * luma against the one at the fire (`frameMotionScore`, `lib/frame-motion.ts`)
- * at least this far apart — the live loop's own "the scene moved" line.
+ * …or no sheet for this long while the viewfinder was live. Nothing else:
+ * one capture per presentation (R4). The viewfinder's luma changing, or the
+ * phone moving over the same page, is not another page — both re-armed
+ * until 5b, and a page held through the confirm screen was taken twice.
  */
-export const REARM_SCENE_CHANGE = 0.1;
+export const REARM_GONE_MS = 1000;
 
 /**
  * The part of the camera frame the viewfinder shows (its object-cover crop),
@@ -267,6 +471,132 @@ function lerpAt(a: number[], b: number[], t: number): number[] {
 }
 
 /**
+ * How much of the view the page fills along its limiting axis: the larger of
+ * its extent's share of the view's width and of its height (its bounding box,
+ * clipped to the view). An upright A4 page in a tall phone's viewfinder is
+ * width-limited, a long receipt height-limited, a page turned sideways
+ * width-limited again — each reads how far it is from filling the screen.
+ *
+ * The bounding box, not the quad's side lengths: a page turned in the view
+ * reaches the edges with its corners before its sides are as long as the
+ * view, so a side-length target could ask for a size no framing allows ("Aproxime"
+ * up to the moment "Afaste um pouco" takes over, and back). A box inside the
+ * view is exactly four corners inside it, so 1 is always reachable.
+ */
+export function fillShare(quad: NormalizedQuad): number {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const key of CORNER_KEYS) {
+    const { x, y } = quad[key];
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  }
+  const clip = (v: number) => Math.min(1, Math.max(0, v));
+  return Math.max(clip(maxX) - clip(minX), clip(maxY) - clip(minY));
+}
+
+/** Whether the page fills too little of the view ({@link FILL_ENTER} / {@link FILL_EXIT}); `showing` is the hint up already. */
+export function tooFar(quad: NormalizedQuad, showing: boolean): boolean {
+  return fillShare(quad) < (showing ? FILL_EXIT : FILL_ENTER);
+}
+
+/**
+ * The page's bounding box, unclipped, as shares of the view: whether it
+ * would fit with every corner `margin` inside the view were it centred.
+ */
+export function fitsCentred(quad: NormalizedQuad, margin: number): boolean {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const key of CORNER_KEYS) {
+    const { x, y } = quad[key];
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  }
+  return maxX - minX <= 1 - 2 * margin && maxY - minY <= 1 - 2 * margin;
+}
+
+/**
+ * The framing rules: the lines {@link framingHint} judges a page by. One
+ * object so the bench can try another set (`scripts/bench/framing-sim.mjs`);
+ * the app always uses {@link FRAMING}.
+ */
+export interface FramingRules {
+  /** "Aproxime" below this fill… */
+  fillEnter: number;
+  /** …and until this fill once it shows. */
+  fillExit: number;
+  /** A page whose nearest corner is within `roomEnter` of the edge (`roomExit` once "Aproxime" shows) cannot come closer without re-aiming… */
+  roomEnter: number;
+  roomExit: number;
+  /** …and at this fill or more is taken as framed where it is; under it, "Mova o celular" toward the page. */
+  fillFloor: number;
+  /** A corner this close to the edge (`borderExit` to clear) is cut off. */
+  borderEnter: number;
+  borderExit: number;
+}
+
+/**
+ * The page at the edge of the view while it fills less than "Aproxime"'s
+ * exit line is an aim problem, not a distance one — it would fit if it were
+ * centred — so the hint is "Mova o celular" (its way: {@link moveDirection}), never "Afaste um pouco".
+ * And "Aproxime" asks only while the page has room to come closer: a page
+ * held off-centre reaches the edge before it reaches the exit line (on a
+ * full-bleed camera the controls make the clear part of the screen sit above
+ * the camera's optical centre, so a page drifts towards its top as the phone
+ * comes closer), and asking for more there is what made the field's 42 s
+ * ping-pong (2026-10-02: "Aproxime" at 0.735, "Afaste" at 0.745, 0.796, …).
+ * Such a page is taken as framed from {@link FramingRules.fillFloor}.
+ *
+ * Measured on simulated people (`npm run bench:framing`): off-centre by up to
+ * 8 %, turned up to 10°, A4 / Letter / an ID card, on the owner's viewports
+ * with their insets.
+ */
+export const FRAMING: FramingRules = {
+  fillEnter: FILL_ENTER,
+  fillExit: FILL_EXIT,
+  roomEnter: 0.07,
+  roomExit: 0.05,
+  fillFloor: 0.65,
+  borderEnter: BORDER_ENTER,
+  borderExit: BORDER_EXIT,
+};
+
+/**
+ * The framing hint for a page in the view (`sheet`, visible-crop fractions):
+ * "move-back", "move-phone" (its way: {@link moveDirection}), "move-closer" or none. `cutOff`: its paper is known
+ * to run on past the edge (the quad is short of the page — only backing off
+ * shows how big it is); `covered`: a corner is under a control drawn over the
+ * picture; `current`: the hint showing (or pending), for the hysteresis.
+ */
+export function framingHint(
+  sheet: NormalizedQuad,
+  { cutOff = false, covered = false }: { cutOff?: boolean; covered?: boolean },
+  current: HintKey | null,
+  rules: FramingRules = FRAMING,
+): "move-back" | "move-phone" | "move-closer" | null {
+  if (cutOff) return "move-back";
+  const margin = borderMargin(sheet);
+  const fill = fillShare(sheet);
+  const edging = current === "move-back" || current === "move-phone";
+  if (covered || margin < (edging ? rules.borderExit : rules.borderEnter)) {
+    // Too big to fit even centred, or already as big as asked: back off. Else re-aim.
+    return fill >= rules.fillExit || !fitsCentred(sheet, rules.borderExit) ? "move-back" : "move-phone";
+  }
+  const closer = current === "move-closer";
+  if (fill >= (closer ? rules.fillExit : rules.fillEnter)) return null;
+  if (margin >= (closer ? rules.roomExit : rules.roomEnter)) return "move-closer";
+  return fill >= rules.fillFloor ? null : "move-phone";
+}
+
+/**
  * How much a sheet moved lately: over its recent readings (time, quad in the
  * visible crop), the largest corner move between the newest and any reading
  * within `windowMs` before it, as a share of the view's diagonal (`aspect` =
@@ -292,6 +622,17 @@ export function motionOf(readings: readonly { at: number; quad: NormalizedQuad }
   return span >= MOTION_MIN_SPAN_MS ? largest / diagonal : null;
 }
 
+/**
+ * The median spacing (ms) of the newest readings' frame times — how often
+ * the loop actually reads the page — or 0 with fewer than three of them.
+ */
+export function readingSpacing(readings: readonly { at: number }[]): number {
+  const recent = readings.slice(-(READY_MIN_READINGS + 1));
+  if (recent.length < 3) return 0;
+  const gaps = recent.slice(1).map((r, i) => r.at - recent[i].at).sort((a, b) => a - b);
+  return gaps[Math.floor(gaps.length / 2)];
+}
+
 /** What the live loop knows at one moment. */
 export interface GuidanceInput {
   now: number;
@@ -307,6 +648,8 @@ export interface GuidanceInput {
   sheet: NormalizedQuad | null;
   /** The page is known to run on past the viewfinder's edge though its quad does not reach it (an edgeless side with paper beyond) — suspected or found. */
   cutOff?: boolean;
+  /** A corner of the page is under a control drawn over the picture: hidden as at an edge. */
+  covered?: boolean;
   /** When a sheet (found or candidate) was last seen; null: not since `since`. */
   sheetSeenAt: number | null;
   /** The view's height over its width (for distances along its diagonal). */
@@ -319,13 +662,15 @@ export interface GuidanceInput {
   bright: number | null;
   /** Share of the found sheet's interior clipped white; null unknown. */
   glare: number | null;
+  /** What lies over the found page, once it has held ({@link OcclusionHint}); absent: nothing. */
+  occlusion?: OcclusionHint;
 }
 
 /**
  * The hint the moment calls for, before any debouncing — `current` (the hint
  * showing or pending) sets which side of each hysteresis band applies.
  */
-export function rawHint(input: GuidanceInput, current: HintKey | null): HintKey | null {
+export function rawHint(input: GuidanceInput, current: HintKey | null, rules: FramingRules = FRAMING): HintKey | null {
   const keep = (key: HintKey): boolean => current === key;
   const dark = input.bright !== null && input.bright < (keep("low-light") ? BRIGHT_EXIT : BRIGHT_ENTER);
   const sheet = input.sheet;
@@ -333,29 +678,186 @@ export function rawHint(input: GuidanceInput, current: HintKey | null): HintKey 
     // Not found: a page suspected at the edge or far away (framing it comes
     // first, as for a found one), too dark to see into, or nothing at all.
     if (sheet !== null) {
-      if (input.cutOff === true || borderMargin(sheet) < (keep("move-back") ? BORDER_EXIT : BORDER_ENTER)) return "move-back";
-      if (areaShare(sheet) < (keep("move-closer") ? AREA_EXIT : AREA_ENTER)) return "move-closer";
+      const framing = framingHint(sheet, input, current, rules);
+      if (framing !== null) return framing;
     }
     if (dark) return "low-light";
     const quiet = input.now - Math.max(input.since, input.sheetSeenAt ?? input.since);
     return quiet >= NOT_FOUND_AFTER_MS ? "not-found" : quiet >= SEARCHING_AFTER_MS ? "searching" : null;
   }
+  // What lies over the page comes before framing it — unless the page is
+  // clipped by the view (cut off past its edge, a corner under a control, a
+  // corner at or past the view's edge: {@link BORDER_ENTER}, kept to
+  // {@link BORDER_EXIT} while a framing hint is up): two sheets spanned as
+  // one look too big, and "Afaste um pouco" is not what separates them.
+  const edging = current === "move-back" || current === "move-phone";
+  const clipped =
+    input.cutOff === true || input.covered === true || borderMargin(sheet) < (edging ? rules.borderExit : rules.borderEnter);
+  if (!clipped && input.occlusion === "separate") return "separate-sheets";
+  if (!clipped && input.occlusion === "covered") return "corner-covered";
   // A found sheet whose paper runs on past the viewfinder's edge is cut off
   // too, wherever the model drew its corners.
-  if (input.cutOff === true || borderMargin(sheet) < (keep("move-back") ? BORDER_EXIT : BORDER_ENTER)) return "move-back";
-  if (areaShare(sheet) < (keep("move-closer") ? AREA_EXIT : AREA_ENTER)) return "move-closer";
+  const framing = framingHint(sheet, input, current, rules);
+  if (framing !== null) return framing;
+  if (input.occlusion === "separate") return "separate-sheets";
+  if (input.occlusion === "covered") return "corner-covered";
   if (dark) return "low-light";
   if (input.glare !== null && input.glare >= (keep("glare") ? GLARE_EXIT : GLARE_ENTER)) return "glare";
   const shaky = input.motion !== null && input.motion > (keep("hold-still") ? SHAKY_EXIT : SHAKY_ENTER);
+  // The page moving while "Aproxime" / "Afaste um pouco" is up is the person
+  // doing as asked, not a shaking hand: the slot clears instead of trading
+  // one hint for "Segure firme" (the ready cue waits for stillness all the
+  // same). Once it has cleared, a hand still moving gets "Segure firme".
+  if (shaky && input.sharp !== false && (current === "move-closer" || current === "move-back" || current === "move-phone")) return null;
   if (shaky || input.sharp === false) return "hold-still";
   return null;
+}
+
+/** The hints that ask the person to move the phone. */
+export const FRAMING_HINTS: ReadonlySet<HintKey | null> = new Set<HintKey | null>(["move-closer", "move-back", "move-phone"]);
+
+/**
+ * The hold-still hint's motion ({@link motionOf} over `windowMs`) on the
+ * readings since `framedAt` — when a hint asking the person to move the phone
+ * last left the slot (null: never). The move the person made because they
+ * were asked to is not a shaking hand: without this, the end of an
+ * "Aproxime", still in the window when its hint clears, put "Segure firme" up
+ * for its whole minimum show on a phone already held still (bench
+ * `present-auto`, cpu 4). A hand still shaking after the clear is caught as
+ * soon as the readings since span {@link MOTION_MIN_SPAN_MS}. The ready cue's
+ * own stillness and drift are not affected.
+ */
+export function shakeMotion(
+  readings: readonly { at: number; quad: NormalizedQuad }[],
+  aspect: number,
+  windowMs: number,
+  framedAt: number | null,
+): number | null {
+  const since = framedAt === null ? readings : readings.filter((r) => r.at >= framedAt);
+  return motionOf(since, aspect, windowMs);
+}
+
+/** Which way to move the phone (relative to the phone held as the screen shows it). */
+export type MoveDirection = "up" | "down" | "left" | "right";
+
+/**
+ * The other axis has to be this much more off before "Mova o celular" turns
+ * to it: a page off in both directions does not have its hint swing between
+ * them.
+ */
+export const DIRECTION_SWITCH = 1.25;
+
+/**
+ * Which way the phone should move to bring the page's cut side into view
+ * (`sheet` in visible-crop fractions): one direction at a time, on the axis
+ * where the page is furthest off-centre for the room it has there — its
+ * bounding box's centre off the view's middle, over the slack the page
+ * leaves on that axis. A page off to the top (touching or past the top edge)
+ * asks for "up": the camera moving up moves the picture down, bringing the
+ * page's top into view. `current` is the direction showing: the other axis
+ * takes over only at {@link DIRECTION_SWITCH} times as far off.
+ */
+export function moveDirection(sheet: NormalizedQuad, current: MoveDirection | null = null): MoveDirection {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const key of CORNER_KEYS) {
+    const { x, y } = sheet[key];
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  }
+  const dx = (minX + maxX) / 2 - 0.5;
+  const dy = (minY + maxY) / 2 - 0.5;
+  // The room the page leaves on each axis (never quite zero: a page as big as
+  // the view on one axis is off on it however little it is off).
+  const rx = Math.abs(dx) / Math.max(0.02, (1 - (maxX - minX)) / 2);
+  const ry = Math.abs(dy) / Math.max(0.02, (1 - (maxY - minY)) / 2);
+  const horizontal: MoveDirection = dx < 0 ? "left" : "right";
+  const vertical: MoveDirection = dy < 0 ? "up" : "down";
+  const onX = current === "left" || current === "right";
+  const onY = current === "up" || current === "down";
+  if (onX) return ry > rx * DIRECTION_SWITCH ? vertical : horizontal;
+  if (onY) return rx > ry * DIRECTION_SWITCH ? horizontal : vertical;
+  return rx > ry ? horizontal : vertical;
+}
+
+/**
+ * Which way to move the phone to bring a corner out from under a control
+ * drawn over the picture (`spot`, the control's region, in the same frame
+ * fractions as `visible`, the visible crop): towards the control's side of
+ * the view — the camera moving that way moves the picture away from it.
+ * The page's own centre ({@link moveDirection}) says nothing about this: a
+ * page centred a little high whose lower corner lies under the bottom bar
+ * would be told "up", pushing that corner further under the bar.
+ */
+export function coveredDirection(spot: VisibleRect, visible: VisibleRect): MoveDirection {
+  const dx = (spot.x + spot.width / 2 - (visible.x + visible.width / 2)) / Math.max(1e-6, visible.width);
+  const dy = (spot.y + spot.height / 2 - (visible.y + visible.height / 2)) / Math.max(1e-6, visible.height);
+  if (Math.abs(dx) > Math.abs(dy)) return dx < 0 ? "left" : "right";
+  return dy < 0 ? "up" : "down";
+}
+
+/**
+ * The direction "Mova o celular" says, under the hint's own rules: chosen when
+ * the hint appears and kept while it shows — another direction replaces it
+ * only once it has been the answer {@link HINT_APPEAR_MS} and the one showing
+ * has been up {@link HINT_MIN_SHOW_MS} (no text that changes under the
+ * person's eyes, no flicker between two directions).
+ */
+export class DirectionLatch {
+  private shown: MoveDirection | null = null;
+  private shownAt = Number.NEGATIVE_INFINITY;
+  private pending: MoveDirection | null = null;
+  private pendingSince = 0;
+
+  get value(): MoveDirection | null {
+    return this.shown;
+  }
+
+  /** `direction`: the answer now while the hint shows; null: the hint is not showing. */
+  update(direction: MoveDirection | null, now: number): MoveDirection | null {
+    if (direction === null) {
+      this.reset();
+      return null;
+    }
+    if (this.shown === null) {
+      this.shown = direction;
+      this.shownAt = now;
+      this.pending = null;
+      return this.shown;
+    }
+    if (direction === this.shown) {
+      this.pending = null;
+      return this.shown;
+    }
+    if (direction !== this.pending) {
+      this.pending = direction;
+      this.pendingSince = now;
+    }
+    if (now - this.pendingSince >= HINT_APPEAR_MS && now - this.shownAt >= HINT_MIN_SHOW_MS) {
+      this.shown = direction;
+      this.shownAt = now;
+      this.pending = null;
+    }
+    return this.shown;
+  }
+
+  reset(): void {
+    this.shown = null;
+    this.shownAt = Number.NEGATIVE_INFINITY;
+    this.pending = null;
+  }
 }
 
 /**
  * The hint on screen: another answer must hold {@link HINT_APPEAR_MS} before
  * it replaces the one showing, and a shown hint stays at least
  * {@link HINT_MIN_SHOW_MS} — so a condition that comes and goes on alternate
- * passes never makes the slot flicker.
+ * passes never makes the slot flicker. A framing hint whose ask is met is the
+ * exception: it clears at once (its hysteresis is its debounce).
  */
 export class HintDebounce {
   private shown: HintKey | null = null;
@@ -377,6 +879,18 @@ export class HintDebounce {
     if (candidate === this.shown) {
       this.pending = null;
       return this.shown;
+    }
+    // A framing hint whose ask has been met goes at once: the person is
+    // moving the phone as it says, and every moment it stays up after the
+    // page got there is a moment they keep moving — past the line, into the
+    // opposite hint (the field's "Aproxime" ↔ "Afaste" ping-pong). Its exit
+    // line (hysteresis) is what keeps it from flickering at the line.
+    if (candidate === null && FRAMING_HINTS.has(this.shown)) {
+      this.shown = null;
+      this.shownAt = now;
+      this.changedAt = now;
+      this.pending = null;
+      return null;
     }
     if (candidate !== this.pending) {
       this.pending = candidate;
@@ -403,10 +917,14 @@ export class HintDebounce {
 
 /**
  * Ready: the strict conditions (`strict`) held {@link READY_AFTER_MS} turn
- * it on — {@link onSince}, what auto-capture counts from, is null the moment
- * they fail. The cue on screen (the answer) stays on through a failure
- * shorter than {@link READY_EXIT_MS} while `keep` holds (the page still
- * found, no other hint owed), and goes at once when it does not.
+ * it on. The cue on screen (the answer) stays on through a failure shorter
+ * than {@link READY_EXIT_MS} while `keep` holds (the page still found, no
+ * other hint owed), and goes at once when it does not — and so does
+ * {@link onSince}, what auto-capture counts from: a wobble the cue rides out
+ * pauses the countdown's fire ({@link steady}) but does not restart it. (It
+ * did: on the field run of 2026-10-02 a page at fill 0.84 had its countdown
+ * cancelled twice in 3 s by one-reading stillness wobbles under a cue that
+ * never went off.)
  */
 export class ReadyCue {
   /** When the strict conditions last started holding, or null while they do not. */
@@ -418,6 +936,11 @@ export class ReadyCue {
   private shown = false;
   private failingSince: number | null = null;
 
+  /** The strict conditions hold right now (not merely the cue riding out a wobble). */
+  get steady(): boolean {
+    return this.since !== null;
+  }
+
   update(strict: boolean, keep: boolean, now: number): boolean {
     if (strict) {
       this.since ??= now;
@@ -427,8 +950,8 @@ export class ReadyCue {
       return this.shown;
     }
     this.since = null;
-    this.onSince = null;
     if (!keep) {
+      this.onSince = null;
       this.shown = false;
       this.failingSince = null;
       return false;
@@ -436,9 +959,12 @@ export class ReadyCue {
     if (this.shown) {
       this.failingSince ??= now;
       if (now - this.failingSince >= READY_EXIT_MS) {
+        this.onSince = null;
         this.shown = false;
         this.failingSince = null;
       }
+    } else {
+      this.onSince = null;
     }
     return this.shown;
   }
@@ -490,19 +1016,33 @@ export interface AutoCaptureState {
   countdown: number | null;
   /** Fire now (true once per countdown). */
   fire: boolean;
+  /** When the running countdown started (the ready cue's onset, or the arming after it); null when it is not counting. */
+  start?: number | null;
+  /** When the running countdown ends (or ended); null when it is not counting. */
+  end?: number | null;
 }
 
 /**
- * Opt-in auto-capture: fires when the ready cue has held {@link AUTO_FIRE_MS},
- * once per page. Its memory of the last fire outlives the viewfinder pausing
- * behind the confirm screen — that pause is exactly when it must not forget
- * which page it just took.
+ * Opt-in auto-capture, once per page: a countdown from the page settling
+ * ({@link AUTO_FIRE_MS}, or {@link AUTO_FIRE_FAST_MS} for a page held very
+ * still), and at its end a fire — but only with the ready cue's full
+ * conditions holding and the cue on, on a frame read well into the countdown
+ * ({@link AUTO_CONFIRM_AFTER_MS}), no older than its bound
+ * ({@link autoFrameAgeMax}). The final look runs during the countdown, not
+ * after it: a frame that qualifies has usually landed by the end. Its memory
+ * of the last fire outlives the viewfinder pausing behind the confirm screen
+ * — that pause is exactly when it must not forget which page it just took.
  */
 export class AutoCapture {
   private fired: { quad: NormalizedQuad; at: number } | null = null;
   /** When it was last armed: a ready cue older than that counts from here. */
   private armedAt = Number.NEGATIVE_INFINITY;
-  private movedSinceFire = false;
+  /** The countdown (by its start) that earned the short wait, while its readings agree. */
+  private fastFor: number | null = null;
+  /** The countdown (by its start) whose readings stopped agreeing: the full wait, for good. */
+  private slowFor: number | null = null;
+  /** The first frame that qualified for the final look, in the current motion epoch: the quiet counts from it. */
+  private quietFrom: number | null = null;
   private seenSinceFire = false;
   private goneSince: number | null = null;
 
@@ -512,16 +1052,20 @@ export class AutoCapture {
   }
 
   /**
-   * One moment of a live viewfinder. `readyOnSince` is when the strict ready
-   * conditions came on (null: off — {@link ReadyCue.onSince}); `sheet` the
-   * found sheet in the visible crop (null: none); `moving` the phone moving
-   * (the hold-still threshold crossed); `confirmedAt` the time of the frame
-   * of the newest detection pass that found the page where it was (null:
-   * none) — the countdown completes, but it fires only once a frame sampled
-   * after it completed has been confirmed, the moment that pass lands: the
-   * brackets alone are no proof the page is still in front of the camera, and
-   * a camera whipped off the page between two passes is caught by the next
-   * one (or by the watch, `hooks/useLiveDetect.ts`) rather than photographed.
+   * One moment of a live viewfinder. `readyOnSince` is when the countdown's
+   * conditions came on — the page settled (null: off; the live loop's
+   * settling {@link ReadyCue}, `onSince`); `sheet` the found sheet in the
+   * visible crop (null: none); `moving` the phone moving (the hold-still
+   * threshold crossed — not, on its own, another page); `confirmedAt` the
+   * time of the frame of the newest detection pass that found the page where
+   * it was (null: none). The countdown completes, but it fires only on a
+   * confirmed frame read at least {@link AUTO_CONFIRM_AFTER_MS} into it,
+   * after the minimum dwell and after the last motion (`motionAt`), no older
+   * than `frameAgeMax` now, and with the camera seen quiet for
+   * {@link AUTO_QUIET_MS} since the first such frame: the brackets alone are no proof the page is still in
+   * front of the camera, and a camera whipped off the page between two
+   * passes is caught by the next one (or by the watch,
+   * `hooks/useLiveDetect.ts`) rather than photographed.
    */
   update(input: {
     now: number;
@@ -529,25 +1073,90 @@ export class AutoCapture {
     sheet: NormalizedQuad | null;
     moving: boolean;
     aspect: number;
-    sceneChange?: number | null;
     confirmedAt?: number | null;
+    /** The ready cue's full conditions hold right now ({@link ReadyCue.steady}); false: no fire until they do. */
+    steady?: boolean;
+    /** The ready cue is on ({@link ReadyCue.onSince} set); false: no fire until it is. Absent: as `steady`. */
+    ready?: boolean;
+    /** The newest readings agree tightly ({@link readingsAgree}): this countdown may be the short one. */
+    agree?: boolean;
+    /** The fire's frame-age bound ({@link autoFrameAgeMax}); absent: {@link AUTO_FRAME_AGE_MS}. */
+    frameAgeMax?: number;
+    /** When the page was found (the lock, held since): no fire before {@link AUTO_MIN_DWELL_MS} after it — on a frame read after it, too. Absent: not checked. */
+    lockedSince?: number | null;
+    /**
+     * When motion was last seen (a camera-watch trip, a pass that lost the
+     * page, readings that moved; frame time): only a frame read after it
+     * confirms, and the quiet ({@link AUTO_QUIET_MS}) counts from such a
+     * frame. Null: none since the lock.
+     */
+    motionAt?: number | null;
+    /** The readings since {@link motionAt} alone are settled ({@link settledOn}): fresh stillness, not stillness from before the motion. Absent: not checked. */
+    stillSinceMotion?: boolean;
   }): AutoCaptureState {
     const { now, readyOnSince, sheet } = input;
     if (this.fired !== null) {
       this.watchForAnotherPage(input);
       if (this.fired === null) this.armedAt = now;
     }
-    if (this.fired !== null || readyOnSince === null || sheet === null) return { countdown: null, fire: false };
+    if (this.fired !== null || readyOnSince === null || sheet === null) {
+      this.fastFor = null;
+      this.quietFrom = null;
+      return { countdown: null, fire: false };
+    }
     const start = Math.max(readyOnSince, this.armedAt);
-    const progress = Math.min(1, (now - start) / AUTO_FIRE_MS);
-    if (progress < 1) return { countdown: progress, fire: false };
+    // The short wait is earned by readings that agree tightly, and lost —
+    // for this countdown — the moment they stop agreeing.
+    if (this.fastFor === start && input.agree === false) {
+      this.fastFor = null;
+      this.slowFor = start;
+    } else if (this.fastFor !== start && this.slowFor !== start) this.fastFor = input.agree === true ? start : null;
+    const duration = this.fastFor === start ? AUTO_FIRE_FAST_MS : AUTO_FIRE_MS;
+    const lockedSince = input.lockedSince;
+    const dwellEnd = lockedSince === undefined ? Number.NEGATIVE_INFINITY : lockedSince === null ? Number.POSITIVE_INFINITY : lockedSince + AUTO_MIN_DWELL_MS;
+    const end = Math.max(start + duration, dwellEnd);
+    if (!Number.isFinite(end)) {
+      this.quietFrom = null;
+      return { countdown: 0, fire: false, start, end: null };
+    }
+    // The final look (R3): a frame read well into the countdown, after the
+    // minimum dwell and after the last motion seen; the first such frame
+    // starts the quiet the fire waits out ({@link AUTO_QUIET_MS}).
+    const motionAt = input.motionAt ?? null;
     const confirmedAt = input.confirmedAt ?? null;
-    if (confirmedAt === null || confirmedAt < start + AUTO_FIRE_MS) return { countdown: 1, fire: false };
+    const confirmFrom = Math.max(start + Math.min(AUTO_CONFIRM_AFTER_MS, duration), dwellEnd);
+    const qualifies = (at: number | null): at is number => at !== null && at >= confirmFrom && (motionAt === null || at > motionAt);
+    if (!qualifies(this.quietFrom)) this.quietFrom = null;
+    if (this.quietFrom === null && qualifies(confirmedAt)) this.quietFrom = confirmedAt;
+    const progress = Math.min(1, (now - start) / (end - start));
+    if (progress < 1) return { countdown: progress, fire: false, start, end };
+    if (input.steady === false || (input.ready ?? input.steady) === false) return { countdown: 1, fire: false, start, end };
+    const ageMax = input.frameAgeMax ?? AUTO_FRAME_AGE_MS;
+    if (!qualifies(confirmedAt) || now - confirmedAt > ageMax || input.stillSinceMotion === false) {
+      return { countdown: 1, fire: false, start, end };
+    }
+    if (this.quietFrom === null || now - this.quietFrom < AUTO_QUIET_MS) return { countdown: 1, fire: false, start, end };
     this.fired = { quad: sheet, at: now };
-    this.movedSinceFire = false;
+    this.quietFrom = null;
     this.seenSinceFire = false;
     this.goneSince = null;
-    return { countdown: 1, fire: true };
+    return { countdown: 1, fire: true, start, end };
+  }
+
+  /**
+   * The fire this moment's {@link update} answered was not taken (the live
+   * loop's last look at the camera, or a corner turned uncertain, vetoed it
+   * at its instant): the page is not taken, and the same countdown — done —
+   * fires once the cue, a frame read after the veto and its quiet allow. Without this
+   * a vetoed fire counted as the page's one fire: auto-capture then waited
+   * for "another page", and re-armed only once the phone moved — a fire
+   * seconds later on the same page.
+   */
+  retract(): void {
+    this.fired = null;
+    // Whatever vetoed it, the quiet is owed again from a frame after it
+    // (a camera-watch trip is also a new motion epoch, `motionAt`).
+    this.quietFrom = null;
   }
 
   /**
@@ -558,7 +1167,6 @@ export class AutoCapture {
   took(now: number, sheet: NormalizedQuad | null): void {
     if (sheet === null) return;
     this.fired = { quad: sheet, at: now };
-    this.movedSinceFire = false;
     this.seenSinceFire = false;
     this.goneSince = null;
   }
@@ -580,13 +1188,11 @@ export class AutoCapture {
   /**
    * The viewfinder is back (the confirm screen closed) at `now`: whatever
    * says "another page" is counted from here — the time behind the confirm
-   * screen is not time the page was gone, the phone moving while it was up
-   * is not the phone moving over the page, and the page has to be seen again
+   * screen is not time the page was gone, and the page has to be seen again
    * before its absence means anything.
    */
   resume(now: number): void {
     if (this.fired !== null) this.fired = { ...this.fired, at: now };
-    this.movedSinceFire = false;
     this.seenSinceFire = false;
     this.goneSince = null;
   }
@@ -595,17 +1201,25 @@ export class AutoCapture {
   reset(): void {
     this.fired = null;
     this.armedAt = Number.NEGATIVE_INFINITY;
+    this.fastFor = null;
+    this.slowFor = null;
+    this.quietFrom = null;
     this.goneSince = null;
   }
 
-  private watchForAnotherPage({ now, sheet, moving, aspect, sceneChange }: { now: number; sheet: NormalizedQuad | null; moving: boolean; aspect: number; sceneChange?: number | null }): void {
+  /**
+   * Another page, after a fire: a sheet somewhere else, or the page gone
+   * for {@link REARM_GONE_MS}. The phone moving over the same page — or a
+   * corner's reading jittering, which reads as moving — or the view's light
+   * changing is not another page however long it lasts: until 5b "moved plus
+   * two seconds" and a whole-view luma change re-armed, and a page held
+   * through the confirm screen was taken twice (bench present-auto, 5–7 s
+   * after the first fire). A page swapped in at the same place without
+   * leaving the view is for the shutter (or 5e's page identity).
+   */
+  private watchForAnotherPage({ now, sheet, aspect }: { now: number; sheet: NormalizedQuad | null; aspect: number }): void {
     const fired = this.fired;
     if (fired === null) return;
-    if (sceneChange !== undefined && sceneChange !== null && sceneChange >= REARM_SCENE_CHANGE) {
-      this.fired = null;
-      return;
-    }
-    if (moving) this.movedSinceFire = true;
     if (sheet !== null) {
       this.seenSinceFire = true;
       this.goneSince = null;
@@ -619,6 +1233,5 @@ export class AutoCapture {
       this.goneSince ??= now;
       if (now - this.goneSince >= REARM_GONE_MS) this.fired = null;
     }
-    if (this.fired !== null && this.movedSinceFire && now - fired.at >= REARM_AFTER_MS) this.fired = null;
   }
 }

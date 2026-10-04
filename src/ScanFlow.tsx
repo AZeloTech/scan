@@ -18,7 +18,7 @@
  * keep meaning what it meant before this component was mounted.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import clsx from "clsx";
 
 import type {
@@ -35,6 +35,10 @@ import { ScanRuntimeProvider, type ScanRuntime } from "./hooks/useScanRuntime";
 import { FlowScreens } from "./FlowScreens";
 import { LangProvider } from "./components/I18n";
 import { createExitGate, type ExitGate } from "./lib/exit-gate";
+import { SHELL_ROOT_STYLE } from "./lib/shell-theme";
+import { autoCaptureOffered, pickCaptureLayout } from "./lib/capture-layout";
+import { diagnosticsSinkFor, flowDiagnostic, type DiagnosticsSink } from "./lib/diagnostics-events";
+import type { QualityEvent } from "./lib/scan-store";
 
 const DEFAULT_MAX_PAGES = 20;
 
@@ -50,9 +54,17 @@ export function ScanFlow(props: ScanFlowProps) {
     onCancel,
     onPagesChange,
     onEvent,
+    onDiagnostics,
     className,
-    experimentalAutoCapture = false,
+    // Left `undefined` when omitted: omitted and `false` mean different things
+    // (`autoCaptureOffered`).
+    experimentalAutoCapture,
+    experimentalDiagnostics = false,
+    captureLayout: captureLayoutProp,
+    experimentalCaptureLayout,
   } = props;
+
+  const captureLayout = pickCaptureLayout(captureLayoutProp, experimentalCaptureLayout);
 
   /** The auto-capture choice, for this flow only: off in every new one. */
   const autoCaptureChosen = useRef(false);
@@ -63,11 +75,62 @@ export function ScanFlow(props: ScanFlowProps) {
    * The ref is updated during render rather than in an effect: an event can be
    * emitted from a layout effect deeper in the tree, before ours would have run.
    */
-  const handlers = useRef({ onComplete, onCancel, onPagesChange, onEvent });
-  handlers.current = { onComplete, onCancel, onPagesChange, onEvent };
+  const handlers = useRef({ onComplete, onCancel, onPagesChange, onEvent, onDiagnostics });
+  handlers.current = { onComplete, onCancel, onPagesChange, onEvent, onDiagnostics };
+
+  /**
+   * The diagnostics stream (`onDiagnostics`, experimental): a sink only while
+   * the host passes a callback — without one every call site meets `null`
+   * and builds nothing. Created once per instance and per presence of the
+   * callback, never per render of the host.
+   */
+  const diagnosticsWanted = onDiagnostics !== undefined;
+  const diagnosticsSink = useMemo<DiagnosticsSink | null>(
+    () => diagnosticsSinkFor(diagnosticsWanted ? (event) => handlers.current.onDiagnostics?.(event) : undefined),
+    [diagnosticsWanted]
+  );
+  const sinkRef = useRef(diagnosticsSink);
+  sinkRef.current = diagnosticsSink;
 
   const emit = useCallback((event: ScanEvent) => {
+    // The diagnostics copy is rebuilt from an allowlist *before* the host's
+    // onEvent can touch the object: whatever a host adds to its event stays
+    // its own.
+    const sink = sinkRef.current;
+    const flow = sink === null ? null : flowDiagnostic(event);
     handlers.current.onEvent?.(event);
+    if (flow !== null) sink?.emit({ type: "flow", event: flow });
+  }, []);
+
+  /**
+   * The store's per-page sizes (render, and each page embedded in the PDF)
+   * onto the diagnostics stream. Stable, and a no-op without a sink.
+   */
+  const reportQuality = useCallback((event: QualityEvent) => {
+    const sink = sinkRef.current;
+    if (sink === null) return;
+    if (event.kind === "render") {
+      sink.emit({
+        type: "render",
+        page: event.page,
+        warped: event.warped,
+        final: event.final,
+        flat: event.flat,
+        dewarped: event.dewarped,
+      });
+      return;
+    }
+    sink.emit({
+      type: "build",
+      page: event.page,
+      pages: event.pages,
+      width: event.width,
+      height: event.height,
+      bytes: event.bytes,
+      rung: event.rung,
+      quality: event.quality,
+      resampled: event.resampled,
+    });
   }, []);
 
   /**
@@ -155,20 +218,55 @@ export function ScanFlow(props: ScanFlowProps) {
         images: intake?.images ?? true,
         pdf: intake?.pdf ?? false,
       },
-      autoCapture: { offered: experimentalAutoCapture, chosen: autoCaptureChosen },
+      autoCapture: {
+        offered: autoCaptureOffered(captureLayout, experimentalAutoCapture),
+        chosen: autoCaptureChosen,
+      },
+      captureLayout,
+      diagnostics: experimentalDiagnostics === true,
+      diagnosticsSink,
       emit,
       reportError,
     }),
-    [urls, lang, maxPages, maxBytes, fileNameProp, intake?.camera, intake?.images, intake?.pdf, experimentalAutoCapture, emit]
+    [urls, lang, maxPages, maxBytes, fileNameProp, intake?.camera, intake?.images, intake?.pdf, experimentalAutoCapture, experimentalDiagnostics, diagnosticsSink, captureLayout, emit]
   );
+
+  // The session's facts, once, and the page going out of view and back.
+  useEffect(() => {
+    if (diagnosticsSink === null) return;
+    diagnosticsSink.emit({
+      type: "session-start",
+      layout: captureLayout,
+      autoOffered: autoCaptureOffered(captureLayout, experimentalAutoCapture),
+      lang,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      dpr: window.devicePixelRatio,
+      safeArea: readSafeArea(),
+      vibrate: typeof navigator.vibrate === "function",
+    });
+    const onVisibility = () =>
+      diagnosticsSink.emit({ type: "visibility", state: document.visibilityState === "hidden" ? "hidden" : "visible" });
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+    // Once per sink: the session's opening facts, not a log of prop changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [diagnosticsSink]);
 
   const handleStep = useCallback((step: ScanStep) => emit({ name: "step", step }), [emit]);
 
   return (
-    <div className={clsx("scan-root", className)} data-scan-lang={lang} lang={lang}>
+    <div
+      className={clsx("scan-root", className)}
+      // The camera shell's palette (`bg-shell`, `text-shell-ink`, …) — see
+      // SHELL_ROOT_STYLE. Nothing else sets these variables.
+      style={SHELL_ROOT_STYLE as CSSProperties}
+      data-scan-lang={lang}
+      lang={lang}
+    >
       <LangProvider lang={lang === "en-US" ? "en" : "pt"}>
         <ScanRuntimeProvider value={runtime}>
           <ScanStoreProvider
+            onQuality={reportQuality}
             assets={urls}
             maxPages={maxPages}
             maxBytes={maxBytes ?? null}
@@ -186,4 +284,22 @@ export function ScanFlow(props: ScanFlowProps) {
       </LangProvider>
     </div>
   );
+}
+
+/** The safe-area insets in CSS pixels, read once off a throwaway element. */
+function readSafeArea(): { top: number; right: number; bottom: number; left: number } {
+  const probe = document.createElement("div");
+  probe.style.cssText =
+    "position:fixed;visibility:hidden;pointer-events:none;" +
+    "padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)";
+  document.body.appendChild(probe);
+  const style = getComputedStyle(probe);
+  const inset = {
+    top: parseFloat(style.paddingTop) || 0,
+    right: parseFloat(style.paddingRight) || 0,
+    bottom: parseFloat(style.paddingBottom) || 0,
+    left: parseFloat(style.paddingLeft) || 0,
+  };
+  probe.remove();
+  return inset;
 }

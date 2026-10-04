@@ -22,6 +22,7 @@ import {
   type CameraAccess,
 } from "@/components/PermissionPrimer";
 import { RetakeSheet } from "@/components/RetakeSheet";
+import { LayoutCaptureScreen } from "@/components/capture-layouts/LayoutCaptureScreen";
 import { useCopy } from "@/components/I18n";
 import { LiveRegion, Meta, useCancelOnEscape } from "@/components/ui";
 
@@ -253,8 +254,49 @@ export function EscanearScreen() {
           pageCount,
         );
 
+  // The same stage props under either chrome — only where things sit differs.
+  const stageProps = {
+    onCapture: handleCapture,
+    captureLabel: copy.capture.take(pageCount + 1),
+    pageNumber: pageCount + 1,
+    paused: previewTile !== null || pending !== null,
+    useCamera: runtime.intake.camera && choice !== "gallery",
+    disabled: atCapacity,
+    disabledReason: copy.capture.atCapacity(maxPages),
+    autoCaptureOffered: runtime.autoCapture.offered,
+    autoCaptureOn: runtime.autoCapture.chosen.current,
+    onAutoCaptureChange: (on: boolean) => {
+      runtime.autoCapture.chosen.current = on;
+    },
+    diagnostics: runtime.diagnostics,
+  };
+
+  const layout = runtime.captureLayout;
+
   return (
     <>
+      {layout !== "standard" ? (
+        // A full-bleed layout (`captureLayout`: `rail`, the default, or an
+        // experimental one): the same stage and everything around it here,
+        // under different chrome.
+        <LayoutCaptureScreen
+          layout={layout}
+          announcement={announcement}
+          bits={{
+            pageCount,
+            maxPages,
+            tiles,
+            warnedCount,
+            onClose: leave,
+            onReview: () => go("review"),
+            onShowPages: () => {
+              if (lastTile !== undefined) handleTileTap(lastTile);
+            },
+            onTileTap: handleTileTap,
+          }}
+          {...stageProps}
+        />
+      ) : (
       <AppFrame
         fill
         tone="night"
@@ -284,6 +326,7 @@ export function EscanearScreen() {
             onAutoCaptureChange={(on) => {
               runtime.autoCapture.chosen.current = on;
             }}
+            diagnostics={runtime.diagnostics}
             rightAction={
               <CameraPill
                 // Not filled while a sheet is flagged: carrying on is allowed
@@ -351,6 +394,7 @@ export function EscanearScreen() {
           </CaptureStage>
         </div>
       </AppFrame>
+      )}
 
       {pending !== null && (
         <ConfirmCornersScreen

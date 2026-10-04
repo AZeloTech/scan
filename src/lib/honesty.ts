@@ -13,7 +13,9 @@
  * `dewarped` obeys the same rule from the other direction: it is written from
  * the geometry that produced the pixels, never from the toggle, so a page that
  * asked to be un-curved and fell back to the flat warp says nothing at all
- * about curvature.
+ * about curvature. A page Endireitar turned to level its print says so, by
+ * how much, and whether paper was painted into the corners the turn
+ * uncovered — those pixels are the app's, not the photo's.
  *
  * ## Why it is not translated, and carries no date
  *
@@ -49,6 +51,16 @@ export interface PageTransform {
    * correction it did not receive. Every call site has to answer.
    */
   dewarped: boolean;
+  /**
+   * The print's tilt was straightened by turning the page this many degrees
+   * (the flat geometry only). Absent when the page was not turned.
+   */
+  deskewDeg?: number;
+  /**
+   * Paper was painted into the corners the turn uncovered — pixels the photo
+   * does not have. Only with {@link deskewDeg}.
+   */
+  filled?: boolean;
 }
 
 /**
@@ -69,6 +81,10 @@ const FINISH_WORD: Record<PageFinish, string> = {
 function describe(transform: PageTransform): string {
   const clauses = [FINISH_WORD[transform.finish]];
   if (transform.dewarped) clauses.push("dewarped");
+  if (transform.deskewDeg !== undefined) {
+    clauses.push(`deskewed ${transform.deskewDeg.toFixed(1)}deg`);
+    if (transform.filled === true) clauses.push("corners filled");
+  }
   if (transform.rotation !== 0) clauses.push(`rotated ${transform.rotation}deg`);
   return clauses.join(", ");
 }
@@ -103,7 +119,7 @@ export interface SizeLadderRecord {
   rung: number;
   /** The JPEG quality that rung encodes at, 0–1. */
   quality: number;
-  /** The long-edge cap in pixels that rung resamples to. */
+  /** The long-edge cap in pixels that rung resamples to; infinite = every pixel kept. */
   longEdge: number;
 }
 
@@ -123,7 +139,7 @@ export function honestySubject(
   if (ladder !== null && ladder.rung > 0) {
     parts.push(
       `Size ladder: rung ${ladder.rung}, q${Math.round(ladder.quality * 100)}, ` +
-        `long edge ${ladder.longEdge}px.`,
+        (Number.isFinite(ladder.longEdge) ? `long edge ${ladder.longEdge}px.` : "full resolution."),
     );
   }
   return parts.join(" ");

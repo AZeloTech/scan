@@ -62,23 +62,17 @@ const UNKNOWN_ASPECT = "1 / 1.4142";
 interface PdfPreviewSheetProps {
   /** Ready pages only, in document order. */
   tiles: readonly PageTile[];
-  /** "Confirmar e gerar" — go straight to the build. */
-  onConfirm: () => void;
   /**
-   * What the confirm button says, when it does not go straight to the build.
-   *
-   * Step 2 opens this same sheet, and from there the onward move is step 3, not
-   * the file — a button labelled "Confirmar e gerar" that lands on another
-   * screen is a promise the sheet did not keep.
+   * "Confirmar e gerar" — go straight to the build. Step 2 and step 3 both
+   * open this sheet, and from either one the confirm starts the file.
    */
-  confirmLabel?: string;
+  onConfirm: () => void;
   onClose: () => void;
 }
 
 export function PdfPreviewSheet({
   tiles,
   onConfirm,
-  confirmLabel,
   onClose,
 }: PdfPreviewSheetProps) {
   const copy = useCopy();
@@ -153,7 +147,7 @@ export function PdfPreviewSheet({
               {copy.pdfPreview.back}
             </Button>
             <Button fullWidth onClick={onConfirm}>
-              {confirmLabel ?? copy.pdfPreview.confirm}
+              {copy.pdfPreview.confirm}
             </Button>
           </div>
         }

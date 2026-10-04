@@ -8,12 +8,18 @@
  *                    [--out dir] [--headed]
  *   npm run bench -- --suite session [--session approach-hold,page-swap]
  *                    [--seeds 1] [--stream 720x1280] [--cpu 4] [--lane main|worker]
- *                    [--no-frame-cache]
+ *                    [--no-frame-cache] [--layout rail|standard|classic|…]
+ *                    [--viewport 390x844] [--fit cover|contain|maxcrop]
  *   SCAN_REAL_MEDIA=<dir> npm run bench -- --suite real-stills|real-video
  *                    [--variants …] [--cpu 4] [--skip-replay]
+ *   npm run bench -- --suite straighten [--quick] [--jobs 8] [--engine-root dir]
+ *                    [--deskew auto|off|paper|crop] [--only regex] [--sheets]
+ *   SCAN_REAL_MEDIA=<dir> SCAN_BENCH_LABELS=<labels.json> npm run bench -- --suite straighten-real [same flags]
  *
  * Builds the bench page from the working tree, serves it on 127.0.0.1, drives
  * it in Chromium and writes `report.md`, `results.json` and contact sheets.
+ * The straighten suites (Endireitar) need no page: they run the engine in
+ * Node processes, and a command that runs only them launches no browser.
  * Synthetic suites write into the git-ignored `.bench-out/`; real-media suites
  * only ever into the cache outside the repository (`paths.mjs`).
  *
@@ -34,25 +40,33 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpus } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { buildBenchApp, ensureRuntimeAssets } from "./build-app.mjs";
 import { cpuThrottle, launchChromium } from "./browser.mjs";
 import { isInside, OUT_DIR, realMediaDir, realRunsDir, ROOT } from "./paths.mjs";
 import { prepareRealMedia } from "./real.mjs";
-import { absoluteViolations, checkComparable, compareSummaries, RESULTS_SCHEMA } from "./report.mjs";
+import { absoluteViolations, checkComparable, compareSummaries, paperLockViolations, paperTargetLines, RESULTS_SCHEMA } from "./report.mjs";
 import { startServer } from "./server.mjs";
 import { SUITES } from "./suites/index.mjs";
 import { buildScene, frameSize } from "./emulator/index.js";
+import { DEFAULT_FOLLOW, parseFollow } from "./emulator/session.js";
 import { DEFAULT_STREAM } from "./suites/session.mjs";
+import { DEFAULT_JOBS } from "./straighten/suite.mjs";
 
-const USAGE = `usage: npm run bench -- [--suite detector|session|real-stills|real-video|all|emulator]
+const USAGE = `usage: npm run bench -- [--suite detector|session|real-stills|real-video|all|emulator|straighten|straighten-real]
        [--family F1,F2,…] [--setting name,…] [--seeds N] [--variants ml,classical,production,refined,ml+refine,ml+live]
        [--session approach-hold,…] [--stream WxH] [--skip-replay] [--lane main|worker] [--no-frame-cache]
+       [--layout rail|standard|classic|filmstrip|onehand|collapse] [--viewport WxH] [--fit cover|contain|maxcrop]
+       [--frame-by screen|sensor] [--follow fill|area|off|fill:ENTER:EXIT] [--stream-scale N]
+       [--paper-gate]  (session: the dim-lamp paper sessions are required, 8 seeds or more)
        [--cpu 1|4|6] [--size portrait|landscape|WxH] [--compare results.json]
        [--out dir] [--headed]
-real-stills / real-video need SCAN_REAL_MEDIA=<dir>; their output goes to the cache, never the repo.`;
+       straighten, straighten-real: [--quick] [--jobs N] [--engine-root dir] [--deskew auto|off|paper|crop]
+       [--only regex] [--sheets]
+real-stills / real-video / straighten-real need SCAN_REAL_MEDIA=<dir>; their output goes to the cache, never the repo.`;
 
 const DEFAULT_SEEDS = 40;
 
@@ -65,6 +79,28 @@ const DEFAULT_VARIANTS = ["ml", "classical", "production", "refined", "ml+refine
 
 function log(line) {
   console.log(line);
+}
+
+/**
+ * How the scripted user frames the page (`--frame-by`): `screen` — in what
+ * the layout under test actually shows (its visible region, measured once
+ * per layout × viewport × stream, minus the controls drawn over the top of
+ * it), as a person aims by the screen; `sensor` — in the camera's whole
+ * frame, as every session did before. Default: `screen`, except on
+ * `standard`, whose sessions stay comparable with the earlier phases.
+ */
+function parseFrameBy(value, layout) {
+  if (value === undefined) return layout === "standard" ? "sensor" : "screen";
+  if (value !== "screen" && value !== "sensor") throw new Error(`--frame-by ${value}: expected screen or sensor`);
+  return value;
+}
+
+/** `--stream-scale N`: the fake camera delivers each frame scaled up N× (a 4K stream from 720×1280 frames). */
+function parseStreamScale(value) {
+  if (value === undefined) return 1;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 1 || n > 4) throw new Error(`--stream-scale ${value}: expected 1 to 4`);
+  return n;
 }
 
 function parse() {
@@ -85,6 +121,19 @@ function parse() {
       "skip-replay": { type: "boolean", default: false },
       lane: { type: "string" },
       "no-frame-cache": { type: "boolean", default: false },
+      layout: { type: "string" },
+      viewport: { type: "string" },
+      fit: { type: "string" },
+      "frame-by": { type: "string" },
+      follow: { type: "string" },
+      "stream-scale": { type: "string" },
+      "paper-gate": { type: "boolean", default: false },
+      quick: { type: "boolean", default: false },
+      jobs: { type: "string" },
+      "engine-root": { type: "string" },
+      deskew: { type: "string" },
+      only: { type: "string" },
+      sheets: { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
     strict: true,
@@ -106,6 +155,12 @@ function parse() {
   for (const suite of suites) {
     if (!(suite in SUITES)) throw new Error(`unknown suite "${suite}"\n${USAGE}`);
   }
+  const straightenFlags = ["quick", "jobs", "engine-root", "deskew", "only", "sheets"].filter(
+    (flag) => values[flag] !== undefined && values[flag] !== false,
+  );
+  if (straightenFlags.length > 0 && !suites.every((name) => name.startsWith("straighten"))) {
+    throw new Error(`only the straighten suites take --${straightenFlags.join(", --")}`);
+  }
   return {
     suites,
     all: values.suite === "all",
@@ -124,7 +179,95 @@ function parse() {
     skipReplay: values["skip-replay"],
     lane: parseLane(values.lane),
     frameCache: !values["no-frame-cache"],
+    layout: parseLayout(values.layout),
+    viewport: parseViewport(values.viewport),
+    fit: parseFit(values.fit),
+    frameBy: parseFrameBy(values["frame-by"], values.layout),
+    // How the scripted user answers "Aproxime" (`followHint`): undefined is the app's own rule.
+    follow: values.follow === undefined ? undefined : parseFollow(values.follow),
+    streamScale: parseStreamScale(values["stream-scale"]),
+    paperGate: values["paper-gate"],
+    profile: values.quick ? "quick" : "full",
+    jobs: parseJobs(values.jobs),
+    engineRoot: parseEngineRoot(values["engine-root"]),
+    deskew: values.deskew ?? "auto",
+    only: parseOnly(values.only),
+    sheets: values.sheets,
   };
+}
+
+/**
+ * `--jobs N`: the straighten suites' parallel engine processes (default
+ * {@link DEFAULT_JOBS}). Recorded in the run's config: runtime counts
+ * (timeouts, pages over the device budget) compare only between runs at the
+ * same `--jobs`.
+ */
+function parseJobs(value) {
+  if (value === undefined) return DEFAULT_JOBS;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 64) throw new Error(`--jobs ${value}: expected an integer from 1 to 64`);
+  return n;
+}
+
+/**
+ * `--engine-root dir` (or `ENGINE_ROOT`): the checkout whose Endireitar
+ * engine the straighten suites run — this one by default, or another
+ * worktree to score a prototype with this bench's metrics.
+ */
+function parseEngineRoot(value) {
+  const root = resolve(value ?? process.env.ENGINE_ROOT ?? ROOT);
+  if (!existsSync(join(root, "src/lib/dewarp/index.ts"))) {
+    throw new Error(`--engine-root ${root}: no src/lib/dewarp/index.ts there — not a checkout of this library`);
+  }
+  return root;
+}
+
+/** `--only regex`: narrow a straighten run to the scene ids it matches (a different sample: never compared with a full one). */
+function parseOnly(value) {
+  if (value === undefined) return null;
+  try {
+    new RegExp(value);
+  } catch (error) {
+    throw new Error(`--only ${value}: not a regular expression (${error?.message ?? error})`);
+  }
+  return value;
+}
+
+/**
+ * `--viewport WxH`: the phone's CSS viewport for the session, real-video and
+ * WebKit runs (default 390×844). Tall phones crop a full-bleed layout's video
+ * differently, so a run records it (`config.viewport`, null = the default).
+ */
+function parseViewport(value) {
+  if (value === undefined) return null;
+  const match = /^(\d{3,4})x(\d{3,4})$/.exec(value);
+  if (match === null) throw new Error(`--viewport ${value}: expected WxH in CSS px, e.g. 412x891`);
+  return { width: Number(match[1]), height: Number(match[2]) };
+}
+
+/**
+ * `--fit`: force the capture layout's video fit (a bench-only probe setting,
+ * `probeSetting("fit")`) — to evaluate fit policies on one build. Absent,
+ * the layout's own choice.
+ */
+const FITS = ["cover", "contain", "maxcrop"];
+function parseFit(value) {
+  if (value === undefined) return null;
+  if (!FITS.includes(value)) throw new Error(`--fit ${value}: expected one of ${FITS.join(", ")}`);
+  return value;
+}
+
+/**
+ * `--layout`: the capture layout the session and real-video suites drive
+ * (`captureLayout` on `<ScanFlow>`); absent, the library's default (`rail`).
+ * Checked here because the library itself falls back to the default on a
+ * typo — a bench run must not silently measure another screen.
+ */
+const LAYOUTS = ["rail", "standard", "classic", "filmstrip", "onehand", "collapse"];
+function parseLayout(value) {
+  if (value === undefined) return null;
+  if (!LAYOUTS.includes(value)) throw new Error(`--layout ${value}: expected one of ${LAYOUTS.join(", ")}`);
+  return value;
 }
 
 /** `--lane main|worker`: force the app's detection lane (a bench knob, through the probe). */
@@ -249,31 +392,45 @@ async function main() {
     );
   }
   const git = gitState();
-  log(`bench: building the bench page from the working tree (${git.commit}${git.dirty ? ", dirty" : ""})`);
-  // The session and real-video suites drive the real <ScanFlow>, whose layout
-  // (and so the probe's visible crop) needs the library's stylesheet.
-  ensureRuntimeAssets({ log, styles: true });
-  await buildBenchApp();
-  const server = await startServer({ log });
-  const { browser, executable } = await launchChromium({ headed: options.headed });
-  log(`bench: ${server.url} · chromium ${executable}`);
+  // A command that runs only Node suites (straighten) builds and launches nothing.
+  const needsBrowser = options.suites.some((name) => SUITES[name].runtime !== "node");
+  let server = null;
+  let browser = null;
+  let executable = null;
+  if (needsBrowser) {
+    log(`bench: building the bench page from the working tree (${git.commit}${git.dirty ? ", dirty" : ""})`);
+    // The session and real-video suites drive the real <ScanFlow>, whose layout
+    // (and so the probe's visible crop) needs the library's stylesheet.
+    ensureRuntimeAssets({ log, styles: true });
+    await buildBenchApp();
+    server = await startServer({ log });
+    ({ browser, executable } = await launchChromium({ headed: options.headed }));
+    log(`bench: ${server.url} · chromium ${executable}`);
+  } else {
+    log(`bench: Node suites only (${git.commit}${git.dirty ? ", dirty" : ""}) — no bench page, no browser`);
+  }
   let exitCode = 0;
   try {
-    const page = await browser.newPage();
+    let page = null;
+    let throttle = null;
+    let init = null;
     const pageErrors = [];
-    page.on("pageerror", (error) => pageErrors.push(String(error)));
-    page.on("console", (message) => {
-      if (message.type() === "error") log(`[page] ${message.text().slice(0, 400)}`);
-    });
-    await page.goto(`${server.url}/bench.html`);
-    await page.waitForFunction(() => window.__benchReady === true, null, { timeout: 60_000 });
-    const init = await page.evaluate(() => window.__bench.init({ assetBase: "/assets/" }));
-    if (!init.mlReady) log("bench: WARNING — the ML runtime did not come up; ML rows will be fallbacks");
-    log(`bench: ML ready ${init.mlReady} (warm-up ${init.mlWarmUpMs.toFixed(0)} ms) · WebGL ${init.renderer}`);
-    const throttle = await cpuThrottle(page);
-    const knownFamilies = init.families.map((f) => f.id);
+    if (needsBrowser) {
+      page = await browser.newPage();
+      page.on("pageerror", (error) => pageErrors.push(String(error)));
+      page.on("console", (message) => {
+        if (message.type() === "error") log(`[page] ${message.text().slice(0, 400)}`);
+      });
+      await page.goto(`${server.url}/bench.html`);
+      await page.waitForFunction(() => window.__benchReady === true, null, { timeout: 60_000 });
+      init = await page.evaluate(() => window.__bench.init({ assetBase: "/assets/" }));
+      if (!init.mlReady) log("bench: WARNING — the ML runtime did not come up; ML rows will be fallbacks");
+      log(`bench: ML ready ${init.mlReady} (warm-up ${init.mlWarmUpMs.toFixed(0)} ms) · WebGL ${init.renderer}`);
+      throttle = await cpuThrottle(page);
+    }
+    const knownFamilies = init?.families.map((f) => f.id) ?? [];
     let families = options.families ?? knownFamilies;
-    for (const family of families) {
+    for (const family of init === null ? [] : families) {
       if (!knownFamilies.includes(family)) {
         throw new Error(`unknown family "${family}" (registered: ${knownFamilies.join(", ")})`);
       }
@@ -283,7 +440,7 @@ async function main() {
       families = families.filter((family) => family in seedPlan);
       log(`bench: --setting ${options.settings.join(",")}: ${families.map((f) => `${f} ${seedPlan[f].length} scenes`).join(", ")}`);
     }
-    for (const variant of options.variants) {
+    for (const variant of init === null ? [] : options.variants) {
       if (!(variant in init.variants)) {
         throw new Error(`unknown variant "${variant}" (known: ${Object.keys(init.variants).join(", ")})`);
       }
@@ -304,15 +461,19 @@ async function main() {
         options.out !== null && options.suites.length > 1 ? join(options.out, suiteName) : options.out,
       );
       mkdirSync(outDir, { recursive: true });
-      const environment = {
-        executable,
-        renderer: init.renderer,
-        userAgent: init.userAgent,
-        mlReady: init.mlReady,
-        mlWarmUpMs: init.mlWarmUpMs,
-        variants: init.variants,
-      };
-      const config = suite.synthetic
+      const environment = suite.runtime === "node"
+        ? { runtime: "node", node: process.version, platform: `${process.platform}-${process.arch}`, cpus: cpus().length }
+        : {
+            executable,
+            renderer: init.renderer,
+            userAgent: init.userAgent,
+            mlReady: init.mlReady,
+            mlWarmUpMs: init.mlWarmUpMs,
+            variants: init.variants,
+          };
+      const config = suite.config !== undefined
+        ? suite.config(options)
+        : suite.synthetic
         ? {
             families,
             seeds: suiteName === "session" ? options.sessionSeeds : options.seeds,
@@ -321,9 +482,28 @@ async function main() {
             cpu: options.cpu,
             size: options.size,
             frame: frameSize(options.size),
-            ...(suiteName === "session" ? { sessions: options.sessions, stream: options.stream, lane: options.lane } : {}),
+            ...(suiteName === "session"
+              ? {
+                  sessions: options.sessions,
+                  stream: options.stream,
+                  lane: options.lane,
+                  layout: options.layout ?? "rail",
+                  viewport: options.viewport === null ? null : `${options.viewport.width}x${options.viewport.height}`,
+                  fit: options.fit,
+                  frameBy: options.frameBy,
+                  follow: options.follow === undefined ? DEFAULT_FOLLOW : options.follow,
+                  streamScale: options.streamScale,
+                  ...(options.paperGate ? { paperGate: true } : {}),
+                }
+              : {}),
           }
-        : { variants: options.variants, cpu: options.cpu, media: options.real.media, skipReplay: options.skipReplay };
+        : {
+            variants: options.variants,
+            cpu: options.cpu,
+            media: options.real.media,
+            skipReplay: options.skipReplay,
+            ...(suiteName === "real-video" ? { layout: options.layout ?? "rail" } : {}),
+          };
       const comparing = options.compare !== null && options.compare.results.suite === suiteName;
       // Refuse an incomparable baseline now, not after the run.
       if (comparing) checkComparable(options.compare.results, { schema: RESULTS_SCHEMA, suite: suiteName, synthetic: suite.synthetic, config });
@@ -334,6 +514,7 @@ async function main() {
         outDir,
         log,
         environment,
+        config,
       });
       const results = {
         schema: RESULTS_SCHEMA,
@@ -342,8 +523,8 @@ async function main() {
         createdAt: new Date().toISOString(),
         git,
         config,
-        environment,
-        families: init.families,
+        environment: { ...environment, ...(result.environment ?? {}) },
+        families: init?.families ?? [],
         summary: result.summary,
         sheets: result.sheets,
         scenes: result.scenes,
@@ -385,14 +566,23 @@ async function main() {
         const breaches = absoluteViolations(results);
         if (breaches.length > 0) log(`\nbench: absolute limits not met (fails --compare):\n  ${breaches.join("\n  ")}`);
       }
+      // The dim-lamp paper lock gates fail the run on their own, compared or
+      // not (5d-paper); the 80 % target is reported beside them.
+      const paperBreaches = paperLockViolations(results);
+      if (paperBreaches.length > 0) {
+        log(`\nbench: paper lock gate not met:\n  ${paperBreaches.join("\n  ")}`);
+        exitCode = 1;
+      }
+      const targets = paperTargetLines(results);
+      if (targets.length > 0) log(`\nbench: paper lock target:\n  ${targets.join("\n  ")}`);
     }
     if (pageErrors.length > 0) {
       log(`\nbench: uncaught page errors:\n  ${pageErrors.slice(0, 5).join("\n  ")}`);
       exitCode = exitCode || 1;
     }
   } finally {
-    await browser.close();
-    await server.close();
+    await browser?.close();
+    await server?.close();
   }
   process.exit(exitCode);
 }

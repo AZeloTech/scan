@@ -7,7 +7,7 @@ Nothing here ships — `package.json` publishes `dist/`, `assets/` and
 
 ```sh
 npm run bench -- --suite detector --family F1 --seeds 10   # one family, quick
-npm run bench -- --suite detector --seeds 10               # F1–F7, ~1 min
+npm run bench -- --suite detector --seeds 10               # F1–F8, ~1 min
 npm run bench -- --suite detector                          # every family, 40 seeds, ~4 min
 npm run bench -- --suite detector --cpu 4                  # a mid-range phone's CPU
 npm run bench -- --suite detector --seeds 10 --compare .bench-out/latest-detector/results.json
@@ -16,10 +16,15 @@ npm run bench -- --suite session                           # every session once,
 npm run bench -- --suite session --session page-swap --seeds 3 --cpu 4
 npm run bench -- --suite session --session sustained-hold --seeds 3 --cpu 4   # 75 s, remounts, leaks
 npm run bench -- --suite session --seeds 3 --lane main     # force the main-thread detection lane
+npm run bench -- --suite session --seeds 3 --layout standard   # on the pre-rail capture screen (default: rail)
 npm run bench -- --suite session --session regression --seeds 5   # the adversarial sessions (fast pans, steep tilts…)
 npm run bench -- --suite session --session guidance --seeds 5     # hints, the ready cue, auto-capture (Phase 4)
 npm run bench:webkit                                       # the flow end to end in WebKit, both lanes
 npm run bench -- --suite emulator --seeds 10               # the emulator's own GT check
+npm run bench -- --suite straighten --quick               # Endireitar, 83 scenes, ~1 min (Node, no browser)
+npm run bench -- --suite straighten                        # all 279 scenes, ~4 min at --jobs 8 (12 cores)
+npm run bench -- --suite straighten --compare .bench-out/latest-straighten/results.json
+npm run bench -- --suite straighten --engine-root ../other-worktree --sheets   # score another checkout's engine
 npm run bench:play                                         # the playground, in a Chromium window
 npm run bench:play -- --no-browser                         # …or serve it and open the URL yourself
 node scripts/bench/server.mjs                              # serve the bench pages, print the URL
@@ -28,6 +33,8 @@ node scripts/bench/server.mjs                              # serve the bench pag
 export SCAN_REAL_MEDIA=/path/to/real/photos-and-clips
 npm run bench -- --suite real-stills                       # ~10 s
 npm run bench -- --suite real-video                        # ~2 min, incl. replay through the app
+SCAN_BENCH_LABELS=~/.cache/scan-bench/labels/scan-bench-labels.json \
+  npm run bench -- --suite straighten-real                  # Endireitar on the labelled stills, ~1 min
 npm run bench:label                                        # label pages by hand, print the URL
 node scripts/bench/real.mjs                                # extract clip frames, list what was found
 ```
@@ -307,6 +314,38 @@ what the session suite measures. In order of a pass:
    "reflection" hint's `glare`) and how many edgeless sides have the page's
    own paper running on past them to the frame's edge (`open`: a page cut
    off whose quad the model drew short of the edge).
+   **5d-paper, the margin judged locally.** A page of printed images (an
+   imaging report) passes only on the printed-images rule, whose margin
+   clauses were absolute: the band within 18 levels of its single median,
+   and that median at least 0.9 of the interior's 95th percentile. Under one
+   warm lamp to the side, a hand's shadow on the margin or a leaflet over a
+   corner, both failed pass after pass (the field case: "no page locked"
+   for a minute). Now each margin sample is held against the running median
+   of its own side (±5 of its 40 positions, all three insets) and that local
+   level against the 95th percentile of the interior blocks next to it; a
+   corner the refinement calls inferred or unknown has the region near it
+   (each side's unseen run plus 6 %) left out of the margin and the bright
+   end (`coveredCorners`). With the band no longer turning them away, a
+   page of printed images must also hold ink 0.1 of its interior
+   (`printMinInk`): white lids, boxes and mats with a few solid marks read
+   0.02–0.08 and the black keyboard of `empty-desk-sweep` seed 3 0.07–0.09,
+   every imaging report on the bench 0.1 and up. On the `paper` sessions
+   (cpu 1, 8 seeds) the share of the presented time locked on the page
+   went 4 → 17 % (owner-case), 28 → 66 % (no leaflet), 14 → 21 %
+   (sheet-over reports), 63 → 67 % (text), first lock p50 0–462 ms where
+   the page was found at all, and the passes that read paper 20 → 66 %,
+   32 → 78 %, 31 → 59 %, 84 → 85 %; what is left is mostly the model in the dim — no quad (26–41 %
+   of passes on the reports, 27 % on the text page) or a quad that jumps
+   more than 8 % between passes (up to 20 %), which resets the lock. Page-
+   less readings passing as paper went down, not up (paper-lookalikes 6 →
+   1 of ~350, the dim desk 8 → 10 of ~290 with no lock, against 2 locked
+   before), and on the families' live quads (`ml+live`, 20 seeds) not one
+   verdict changed. The margin no longer keeps a lid or a mat out on its
+   own (a blank lid's border is even and as bright as its middle): the ink
+   rules do (`ink-low`, `solid-ink` on the dim desk's passes). The `pass`
+   diagnostics event and the probe's `paperWhy` name the verdict and the
+   first clause each rule
+   failed (`evidenceDiagnostic`).
 6. **Found**: two readings in a row that say paper, with every visible side
    at least 30 % supported (a quad with a corner pulled onto the text has a
    side with no edge under it at all); let go after two readings that do not
@@ -324,7 +363,23 @@ what the session suite measures. In order of a pass:
    from a black keyboard seen head-on, whose four edges are as strong and
    which, kept "found", was carried into an `empty-desk-sweep` capture). The 80 % bar is what keeps both from
    carrying a quad with a corner pulled onto the table (`steep-tilt` seed 2,
-   whose sides stay at 5–65 %). A pass that finds nothing reads the
+   whose sides stay at 5–65 %). A third (5d-paper), at any tilt: a sheet
+   that read as paper at most 5 s ago, whose quad is within 6 % of the
+   diagonal of where it did, whose four sides are all judged and 80 %
+   supported, none open to the frame's edge, every corner in view and none
+   unknown, does not lose a reading to its surface either. All three are
+   bounded by one hard expiry: 5 s after its last paper reading (frame
+   time) a found sheet is let go at once, whatever held it. Memory is for
+   the overlay and the lock only: auto-capture's countdown and fire need
+   the sheet's own newest reading (accepted or held) to say paper, within
+   1.5 s, and the fire that reading from a frame after the last motion
+   ("auto: paper: newest not paper", "… not read lately", "… since
+   motion"; not the countdown, which a tremor's motion would restart at
+   every trip — cpu-4 `present-auto` steady→fire went to 2.2 s that way),
+   so a lid slid in at the same outline stops it at once
+   (`lib/paper-memory.ts`). A missed pass's
+   reading of the held sheet leaves out the covered-corner region the
+   reading that found it did. A pass that finds nothing reads the
    evidence where the found sheet was drawn: a page slid away — on a white
    table the motion probe barely sees it go — leaves no edges there, and two
    such readings end the hold (on `page-swap` the stale overlay's p95 went
@@ -446,6 +501,8 @@ several seeds.
 
 ~/.cache/scan-bench/frames/<clip>/{replay,sparse}/   real clips' frames (ffmpeg, once)
 ~/.cache/scan-bench/runs/real-{stills,video}-<stamp>/ real reports, results, sheets — never in the repo
+.bench-out/straighten-<stamp>/{report.md,results.json,sheets/*.png}   Endireitar, synthetic
+~/.cache/scan-bench/runs/straighten-real-<stamp>/       Endireitar on real stills — never in the repo
 ~/.cache/scan-bench/labels/scan-bench-labels.json    labels, when next to the media is not allowed
 ```
 
@@ -487,7 +544,10 @@ both follow.
   (plastic, rounded corners, full-bleed colour, a silhouette where a photo
   would be) and a handwritten note (pseudo-cursive strokes and a signature);
   for F7, a lab report ruled to within millimetres of its edges
-  (`edge-ruled`) and a letterhead printed to the edge (`bleed-band`).
+  (`edge-ruled`) and a letterhead printed to the edge (`bleed-band`); for
+  F8, an ultrasound report whose near-black image panels cover most of the
+  page, its white only the margins (`imaging-report`; each panel is one
+  `mark` content box).
   Only the repository's personas are named; numbers stay short and clinical.
 - **Effects** (`effects.js`): a finger or thumb over a corner or an edge —
   a shaded skin capsule with a nail, knuckle creases, a soft shadow, out of
@@ -507,6 +567,7 @@ both follow.
 | F5 occlusion, partial, two docs | not all there, or not alone | `finger`, `partial` (1–2 corners out), `two-docs`, `object-on-page` |
 | F6 hard negatives | no document at all | `empty-desk`, `laptop`, `notebook`, `placemat`, `keyboard`, `clutter` |
 | F7 refine-adversarial | a straight edge where the page's is not, or the page's own edge taken away — built against the edge refinement | outside the page: `mat-edge`, `folder`, `table-edge`, `white-board`, `parallel-object`, `shadow-out`, `neighbour`, `stacked`, `striped-cloth`, `tiles`, `compound` (a white table's or a shadow's edge 3–12 % out while a thumb or glare weakens the page's own); on it: `shadow-in`, `margin-rule`, `bleed-band`, `crease`, `glare-edge`, `blind-shadow`; the edge itself: `white-on-white`, `finger-edge`, `curl`, `dog-ear`, `receipt-tear`; the field cases of the refinement's review: `dark-stock` (navy or black card printed in white, a kraft envelope with a white label, a dark ID card — on a white, grey or wooden table, with a dark object, the table's edge or both past it), `black-table` (a white page on a black table or leather mat whose edge is 3–12 % out, often a white sheet, receipt or card lying across that edge), `form-border` (a printed border 3–8 mm inside the edges, the form's code in the margin outside it), `stack-offset` (sheets under the page offset 1–5 mm along both axes), `screen` (a document on a tablet or a phone: bezel, the viewer's bars), `booklet` (the right-hand page of an open booklet: facing page, gutter shadow, page block, cover), `curled-receipt` (rolled along or across, or one end curling up), `jpeg-strong` (quality 0.2–0.45), `sharpen-halo` (an unsharp mask), `clipped-highlights` (a gain that clips paper and white tables to 255) |
+| F8 occluded corners, overlapping sheets | something lies over the page and a corner the warp needs is under it (5d+) | `owner-case` (the described field case: a white leaflet, curled, over the corner the image shows top-left — 8–15 % of the top edge, 15–25 % of the left — of a stacked imaging report on a brown stitched desk mat on wood, tilt 30–45°, warm light, the hand's shadow low left), `sheet-over` (any corner, 5–35 % along each edge, the sheet's own corner on the page turned up to 25°, flat or curled, contact shadow none → soft; stack or single sheet; mat on wood or any desk; tilt 0–45°), `clipboard` (a board under the page, a metal or black clip over its top edge, mid-edge or slid over a corner), `binder-clip` (over a corner or gripping an edge near one, wire handles out past the page), `staple` (a fanned stapled packet, a staple across a corner — the corner itself seen), `two-sheets` (two printed sheets overlapping: the one asked for under the other, a corner covered 15–60 % along each edge, or on top of it; either way the truth is the sheet on top, framed — the owner's decision of 2026-10-02: auto refuses with "Separe as folhas", a manual capture's confirm screen shows the top sheet) |
 
 F7 is a regression family: its setting is assigned **by seed**, cycling
 through the 32 settings in that order (seed 1 `mat-edge`, seed 33 `mat-edge`
@@ -520,6 +581,63 @@ baseline must have been run with the same `--setting`. Its
 params carry the attacked side (`target`, 0–3 = the page's top, right,
 bottom, left) and, where there is one, how far off it the distractor lies
 (`gapFrac`, fraction of the frame diagonal; negative = inside the page).
+
+F8 cycles its six settings by seed the same way (`--setting owner-case,sheet-over
+--seeds 20` for 20 of each). Its truth is still the page's whole rectangle —
+the covered corner where it really is — and it adds what lies over it: each
+layer laid over the page on purpose carries `occluder` (its kind), so
+`gt.occluders` lists them with their outlines (normalized, lifted where a
+sheet curls), and `gt.pages[i].occluded` names the corners in frame that are
+covered (in frame and not `visible`). The params' `occlusion` says what was
+asked for: the corner, the coverage along each edge meeting there (the
+page's top/bottom edge first), the sheet's turn, its tip, whether it curls,
+its shadow, the stack's thickness in pixels. Wherever the truth has an
+occluder or a covered corner, the detector suite also scores each answer
+for **occlusion** (`suites/detector-occlusion.mjs`, its own section in the
+report, per family and setting, not gated): the **covered corner's error**
+(% of the diagonal), **occluder included** (the quad reaches onto an
+occluder past the page by more than 0.5 % of the page's area — the union of
+page and sheet) and the **mode** — where the covered corner went: the true
+corner (within 1.5 % of the diagonal), the occluder's own corner on the
+page (`occluder-tip`), where its edge crosses the page's (`edge-crossing`),
+out on the occluder, inside the page, elsewhere, or lost. Where the scene has
+a layer under the page that is not it — a clipboard's board, the sheet
+beneath the one asked for in `two-sheets` (`foreign: kind` on the layer,
+`gt.foreign`) — **foreign** is the same inclusion over every layer that is
+not the page, those under it too: a quad that took the board's outline
+for the page's is counted there even though the board covers nothing. The owner's gate
+(2026-10-02) is on the tail: **occl. > 3 %** is the share of covered
+scenes whose covered corner is more than 3 % of the diagonal off (a lost
+page counts), at most 10 %, with p90 ≤ 3 %.
+
+Wherever a variant refined its answer (`refined`, `ml+refine`, `ml+live`),
+every row also carries the answer's **corner provenance**
+(`src/lib/refine.ts`: each corner `seen`, `inferred` or `unknown`, and
+`separate` when another sheet overlaps the page) scored against the truth
+in its own report section, per family, per F8 setting and over F1–F7
+together: **recall** = covered corners flagged (inferred or unknown),
+**precision** = flagged corners that are covered, **false** = seen corners
+flagged (count and rate; the gate is ≤ 1 % over F1–F7), **refused** =
+scenes where auto-capture would hold (a flagged corner or `separate`) —
+how F8's `two-sheets` is scored, with **separate** (the "Separe as
+folhas" flag itself). A covered corner whose edges are hidden for less
+than 2 % of the diagonal from it (a clip's jaw on the very tip; the
+product calls a corner seen when its edges reach within max(14 px, 1 %)
+of it, nearly 2 % on the 640 px live sample) is **tip only**: counted
+apart, judged neither way — and judged after all in **recall / precision
+(all)**, the owner's ≥ 95 % gate on its stated population. An answer the
+refinement never measured (out of time, nothing found to walk: every
+corner's `basis` is `unmeasured`) makes no claim that anything covers a
+corner — the product reads no check from it and holds auto-capture for want
+of one, without a bracket or a hint — so it flags nothing and is counted
+apart as **unmeasured** (it is among the **refused**). Each corner's
+`basis` (what its provenance rests on: `edges`, `rounded`, `on-sheet`,
+`covered`, or short of evidence `short`, `one-edge`, `no-edge`) travels in
+the row's `refine` / `liveRefine`.
+
+F7 cycles 32 settings by seed: a run that is to visit every one of them
+needs `--seeds 32` (or a multiple) — 20 seeds leave twelve settings out,
+`dog-ear` and `stack-offset` among them.
 
 To grow it, register — nothing in the runner changes:
 
@@ -549,7 +667,7 @@ exact ground truth.
 | `page-swap` | a page is slid away and another document put down elsewhere; shutter on the new one |
 | `empty-desk-sweep` | an F6 desk with no page, wandered over for 10 s; shutter anyway |
 | `partial-frame` | 1–2 corners out of frame, shutter there; then backs off, holds, shoots again |
-| `wider-still` | `approach-hold`, but `takePhoto()` returns the whole 4:3 sensor — wider than the 16:9 preview (D-343 RC1) |
+| `wider-still` | `approach-hold`, but `takePhoto()` returns the whole 4:3 sensor — wider than the 16:9 preview (D-343 RC1). The app now asks for the whole sensor itself and cuts the preview's field of view out of it (`stillCropFor`), so this and `approach-hold` take the same path |
 | `wider-still-eis` | the still comes back at the preview's shape but 25 % wider (a stabilization crop): it passes the shape check |
 | `sustained-hold` | **not in a plain run** (name it): framed and held 75 s — 10 s of frames played forward and back — with the shutter at 20, 40 and 60 s; then the page unmounts and remounts the flow three times (warm start-up), unmounts it for good and counts what outlived it |
 | `sustained-90` | **not in a plain run**: 90 s on one page — a hold, a pan off and back, a tilt to 35° and back — the shutter at 20, 40, 60 and 80 s; then three remounts and a final unmount |
@@ -591,12 +709,16 @@ it), `marks.tremor` (no automatic capture may fire inside) and, page-less,
 | `shaky-hold` | framed with a 1.5 % tremor for 4.5 s — "Segure firme" owed, no automatic capture; the hand steadies (0.3 %); shutter at 9 s |
 | `tremor-hold-auto` | `tremor-hold` with auto-capture on: none may fire |
 | `page-swap-auto` | `page-swap` with auto-capture on: one automatic capture per page |
+| `present-auto` | the camera starts over the desk beside the page, swings onto it at 1.5–2.1 s and holds 10.4 s, framing it as people do and following the hints; auto-capture on, no shutter — the fire latency session (5b): each fire's `timeline` (when each ready condition last came true, the cue, the countdown's start and end, the final confirming frame), `presentedAt` / `fromPresentedMs` (from the hold's start, before any approach), `stableAt` and `captureMs` |
 | `empty-desk-auto`, `lookalikes-auto`, `desk-hold-auto` | `empty-desk-sweep`, `paper-lookalikes` and `desk-hold` (an F6 desk with no page held still 9 s — not in any group on its own) with auto-capture on: "Procurando documento" / "Não achei a folha" owed, and every automatic capture is a false fire |
 
 **The `breaker` group** — **not in a plain run**; `--session breaker` runs
 all thirteen (Phase 4's adversarial sessions, kept as a permanent group).
 Every one has auto-capture on (the scripted page mounts `<ScanFlow>` with
-`experimentalAutoCapture` whenever a script says `autoCapture`); besides the
+`experimentalAutoCapture` whenever a script says `autoCapture`, and leaves
+the prop out otherwise — as a host that says nothing does — and switches it
+on through whichever control the layout has: `rail`'s MANUAL · AUTOMÁTICO
+radios or the pressed-state toggle elsewhere); besides the
 guidance marks, each may carry `marks.noFire` — windows where an automatic
 capture would take a bad image (the page cut off, a hot spot on it, still
 moving) — scored as "not owed" fires:
@@ -604,7 +726,7 @@ moving) — scored as "not owed" fires:
 | session | what happens |
 |---|---|
 | `still-lookalikes-auto` | no document: a closed white laptop, a white woven place mat, a white box, a cream book, a white cutting board and a white plastic folder, each held still (0.25 % tremor) 3.6 s — every automatic capture is a false fire |
-| `screen-page-auto` | a phone and then a tablet lying screen up, each showing a page, held still 4.5 s — scored page-less (a screen is not the paper); whether a person means to scan a document on a screen is an owner's call |
+| `screen-page-auto` | a phone and then a tablet lying screen up, each showing a page, held still 4.5 s — scored page-less (a screen is not the paper: owner, 2026-09-28, auto only; the screen veto is 5c). Its locks are counted (`pagelessLocks`, headline `pagelessLockedShare`): the paper evidence has no material check, and a displayed document locks for much of the session; on the bench nothing fires only because the screens are small ("Aproxime") |
 | `half-out-auto` | about half of the page outside the view (two corners gone), still 6.5 s — "Afaste um pouco" owed, no automatic capture; backs off and holds |
 | `overlap-auto` | a second page laid over the first (offset 15–50 %), both in view, still 9 s; the top page is the scan — a capture of the bottom page or of both is wrong |
 | `slow-drift-auto` | the camera panning steadily across the page for 6 s at 0.8–3.2 % of the diagonal a second — `noFire` while it moves |
@@ -612,7 +734,39 @@ moving) — scored as "not owed" fires:
 | `dim-page-auto`, `dim-desk-auto` | a page (exposure ×0.12–0.26), and an F6 desk with none (×0.15–0.3, page-less), held still 9 s |
 | `glare-sweep-auto` | a lamp's hot spot on the page from the start, sliding off it by 7.5 s — `noFire` while it is on the page |
 | `hover-far`, `hover-edge`, `hover-light` | the page's size, its corner margin and the exposure swinging across the too-far, cut-off and low-light thresholds — the hint's churn |
+| `covered-corner-auto` | 5d+ phase B: the field case (F8 `owner-case`: a white leaflet over the top-left corner of a stacked imaging report on a leather mat, tilted 30–45°): comes in over 1.5 s, holds with a tremor, drifts 4 % aside and back; the covered corner can only be estimated, so no automatic capture is owed at all (`marks.covered`); the shutter at 8 s works. Its report section, **Covered corners**: automatic captures the app had itself called uncertain (`auto-fire` probe; must be 0) and fires on a covered page (must be 0), the time some corner was unknown / inferred / two sheets on the overlay, and "Canto coberto" shown while a corner was unknown (right) or not (wrong) |
 | `whip-off-auto` | six times: held on the page 0.9–1.9 s (the countdown under way), then whipped off to bare desk in 200 ms and kept off 1.5 s — a capture off the page, or on the way, is a false fire |
+
+**The `paper` group** — **not in a plain run**; `--session paper` runs all
+five (5d-paper: the paper gate in dim, uneven light, from the field
+description of 2026-10-02). One warm lamp: exposure ×0.15–0.4, sensor gain
+2–5 (its noise with it), 2700–3200 K with 30–55 % of the cast left by the
+white balance, a one-sided gradient of 0.5–0.9 across the page, and on two
+seeds in three a hand's or phone's shadow over one margin; the lamp is drawn
+by seed alone, so `dim-owner-case` and `dim-owner-bare` light the same report
+alike. Each page session comes in over 1.5 s, holds with a 0.4 % tremor,
+drifts 4 % aside at 4.5 s and back by 5.9 s, holds; auto-capture off, the
+shutter at 9 s. Scored by `scorePaperLock` over `marks.paperLock` (report
+section **Paper lock**): the share of the whole presented window the loop
+held a found sheet **drawn on the presented page** (every visible corner
+within 8 % of the diagonal — the app's own "another page" line; within the
+3 % wrong-crop line shown in brackets; time no sample covers is not
+locked), a lock drawn anywhere else (**wrong**), the first lock, locks lost
+while steady, and every pass of the window: no quad, turned away, read,
+paper, kept. A run with a session under its floor or a first lock p50 over
+1.5 s (`PAPER_LOCK_GATES`, `report.mjs`; cpu 1 and cpu 4 each have their
+own) fails, compared or not; fewer than 8 seeds is reported only, unless
+`--paper-gate` (`npm run bench:paper`) requires all four sessions and
+their seeds. The spec's 80 % target is printed against every run and not
+gated: no session meets it yet (5d-detector).
+
+| session | what happens |
+|---|---|
+| `dim-owner-case` | F8 `owner-case`: a stacked imaging report on a leather mat, a white leaflet over its top-left corner, tilted 30–45° |
+| `dim-owner-bare` | the same report, mat, tilt and lamp with the leaflet taken away |
+| `dim-sheet-over` | F8 `sheet-over` seeds whose page is an imaging report (any corner covered 5–35 %, any desk, tilt 0–45°) |
+| `dim-text-page` | an F1/F2 text page |
+| `dim-lamp-desk-auto` | an F6 desk (laptop lid, keyboard, place mat, notebook, clutter) under the same lamp, auto on: every lock is a false lock, every automatic capture a false fire |
 
 The report's **Guidance** table gives, per session: each hint window's share
 with the owed hint / another hint (wrong) / none, and the time from the
@@ -622,8 +776,16 @@ share of the default sessions' framed holds with a hint up; the ready cue's
 precision (cue-on time with the overlay on the page, within 2 % of the
 diagonal) and recall (over `marks.ready`) and its time over a frame with no
 page; automatic captures, false fires, fires in a tremor window, pages that
-got one, repeat fires, fires where none is owed (a `noFire` window, or a
-hint window other than "searching") and their latency from stable; failed/severe of
+got one, repeat fires (every shutter call past the first on a page, whatever
+its image), fires where none is owed (a `noFire` window, or a
+hint window other than "searching") and their latency from stable; then the
+fires judged **at the shutter call** rather than by the image they got
+(`shutterTruth`): unsafe = in a no-fire or tremor window, on a page moving
+more than 1.5 % of the diagonal or not wholly in view from the call through
+the 150 ms a phone takes to expose its still (ground truth), or with the
+corners unverified (no `auto-fire` probe of its own, or one without
+corners — an unmeasured corner is as forbidden as an uncertain one);
+failed/severe of
 automatic against manual captures in the same sessions; and whether the
 viewfinder's box ever moved (the scripted page samples it every 100 ms and
 on every hint change). One hint replaced by another is one change, not two
@@ -749,6 +911,16 @@ the app made (through the global `createImageBitmap`) that were neither
 closed nor transferred to a worker — open, or collected by the GC while still
 open (the one that holds a camera frame until a collection happens to run).
 
+**The capture layout.** The session and real-video suites (and
+`bench:webkit`) drive the library's default capture screen, `rail`, unless
+`--layout` names another (`standard`, `classic`, `filmstrip`, `onehand`,
+`collapse`); the run records it in `config.layout`. It is not part of the
+sample, so `--compare` across layouts is allowed — that is how a layout
+switch is checked for regressions. `rail` is full-bleed: on a viewport
+taller than the stream the video is cropped at its sides, so the probe's
+visible crop (and every overlay/guidance number measured against it) is not
+the `standard` card's.
+
 **Lanes and a slow phone's worker.** `--lane main|worker` forces the app's
 detection lane through the probe (a bench-only setting the page hangs on its
 listener, `probeSetting` in `src/lib/probe.ts`, compiled out of the library).
@@ -759,6 +931,145 @@ on a slow phone's core, honoured only by the bench's own build of the worker
 (`build-app.mjs` builds `src/lib/detect.worker.ts` with the probe on and the
 server serves it ahead of `assets/`). Without it the worker lane would look
 better under `--cpu 4` than it is.
+
+### The visible region (Phase 5a)
+
+A full-bleed layout does not show the whole frame: its fit crops or
+letterboxes the video, and its chrome covers part of it. `page-session.js`
+measures the part the person can see on its own — the `<video>`'s content
+box under its computed `object-fit` / `object-position`, clipped by every
+clipping ancestor and the visual viewport, minus the opaque bands the layout
+declares (`[data-scan-occluder]`) — at every viewfinder box sample, and the
+report's **Visible region** table judges the page against it. Each sample
+also carries `blocks`: every element drawn over the picture whose painted
+background is at least half opaque (a glass button, the hint pill, a HUD),
+found from the page's own computed styles — not from anything the app
+declares — so a control the app forgot to declare still hides the corner
+under it. The table: framed holds that reached the ready cue — counted only
+from a cue **onset of that hold's own page** (after the previous hold
+ended) with all four corners visible and uncovered at the onset, so a cue
+lingering from the sheet before does not make the next hold "ready"; the
+share of hold time the whole page was visible; "Afaste um pouco" shown while
+it was **clearly** visible (every corner ≥ 3 % of the region inside it — the
+app's own exit threshold; a tighter page counts neither way) or while it was
+not; the ready cue judged at every displayed instant (every 50 ms while the
+overlay keeps reporting; a silence over 300 ms is no viewfinder), a
+violation being a corner outside the region, a corner under a control
+(`blocked`), or no page at all (`pageless`), and the same at the cue's
+onsets; automatic captures whose page
+has a corner outside the photo, and how many of those the app flagged for
+the confirm screen (`attention`); and the region's share of the viewport
+(the camera the person perceives).
+
+`--viewport WxH` sets the phone's CSS viewport (default 390×844; the owner's
+phones are 412×891 and 440×956), `--stream` the camera's shape (`720x1280`
+9:16, `960x1280` 3:4, `1280x720` 16:9), and `--fit cover|contain|maxcrop`
+forces the layout's fit for an evaluation (`probeSetting("fit")`; absent,
+the layout's own). `--session default` names a plain run's sessions (to
+combine with a group: `--session default,guidance`).
+
+    npm run bench -- --suite session --layout rail --viewport 412x891 --stream 960x1280 --seeds 5
+    npm run bench -- --suite session --session approach-hold,wider-still --layout rail --viewport 440x956 --fit contain
+
+**The scripted user frames the page by the screen** (`--frame-by screen`,
+the default on every layout but `standard`). Before the sessions are built
+the runner opens the flow once on a page-less desk (`view-probe`) at the run's
+layout, viewport and stream, measures the visible region there (the same
+measurement the scorer uses) and trims off the opaque controls drawn over
+its top and bottom (the top row, the hint pill); every pose that frames a
+page — the families' cameras, `withMargin`, `partialCamera`, the placements —
+then fits the page in that part of the frame, centred in it, and a coverage
+("25–60 % of the frame") is a share of it. So on a full-bleed layout whose
+cover crop hides the frame's sides, a held page sits where a person holding
+the phone would put it — on the screen — and a cut-off one is cut off on the
+screen. `--frame-by sensor` frames in the whole frame, as every run before
+did (and `standard` keeps doing by default, so its numbers stay comparable).
+The view is logged and is part of the frame-cache key.
+
+**The scripted user holds the page as people do, and follows "Aproxime"**
+(`followHint`, `emulator/session.js`). In every framed hold the page is held
+at the size people hold it at unprompted — 55–72 % of the visible region's
+reach (`NATURAL_FILL`, from the owner's field run), seeded per hold. A hold
+whose page the app would call too far gets an approach, as a person answers
+the hint: 0.7–1.2 s after the hold starts they come in over 0.7–1.2 s,
+re-centring the page on screen, to a little past the line the hint clears
+at (×1.02–1.08), or as close as their tremor leaves the corners clear of
+the edge — and hold there; the ready window and the `stable` mark start at
+the arrival (`marks.follow` records each approach). `--follow` names the
+rule followed: `fill` (default: the app's own, `FILL_ENTER` / `FILL_EXIT`,
+mirrored as `FOLLOW_RULES` and held to the source by `session.test.mjs`),
+`area` (the rule before it: `--follow area` against a build of that time
+measures "before" with the same people), `fill:ENTER:EXIT` (a candidate) or
+`off` (the script as written). `hover-far` swings across whichever line is
+followed. The report's framing numbers (`scoreFraming`) give, per hold, the
+page's fill when presented and at the ready cue, the time from presenting
+to the cue, "Aproxime" shown and shown over a page plainly big enough, the
+hint's changes, and for every capture the page's size in the Galaxy S25
+Ultra's still (its 4080×3060 photo cut to the preview's field of view) and
+the dpi that is for A4.
+
+**Imperfect people** (`--follow fill@0.08`, or `fill:E:X@0.08`): on each
+approach the person re-centres the page on a point off the middle of what
+they see by up to that share of it on each axis (seeded per hold) — the
+field's off-centre framing, which made "Aproxime" and "Afaste" take turns
+under the 78/83 rule.
+
+**The framing rules on their own** (`npm run bench:framing`,
+`framing-sim.mjs`): a closed loop in plain Node — no rendering, no
+detector — of simulated people (off-centre ≤ `--off`, turned ≤ `--turn`°,
+A4 / Letter / ID card, presenting at 55–72 % fill, answering whatever hint
+shows after a reaction time, the picture scaling about the camera's optical
+centre as they come closer) against the app's own `rawHint`, `HintDebounce`
+and `ReadyCue`, on the rail layout's visible regions for the field phone
+(384×726) and 412×891 / 440×956 with and without insets. Per cell: ready
+share, median / p90 time to the cue, share within 2.5 s, hint changes per
+second and per hold, "Afaste" shown under the exit line, closer↔back flips,
+"Centralize" shown, fill at the cue and the page's pixels in the S25's still.
+`--guidance <file>` runs another copy of `guidance.ts` (a "before"),
+`--rules fillEnter=…,fillExit=…,roomEnter=…,roomExit=…,fillFloor=…` another
+set of lines, `--period` the loop's cadence, `--json` the rows.
+
+`--stream-scale N` delivers every frame scaled up N× (`--stream 720x1280
+--stream-scale 3` is a 2160×3840 stream, what a 4K phone camera negotiates):
+the scene and its truth are the same; only the pixels the app grabs and
+resizes grow. Chromium's worker pump only.
+
+A still-pipeline fault can be scripted through a prepare's `still`
+(scratch drivers; not a CLI flag): `still.disrupt` (`{ freeze: true }`, or
+`{ size, gain }`, for `ms` or the still's latency) makes the preview freeze,
+change size or jump in exposure while a photo is taken, as Android does.
+The scorer's `captureFreeze` reports, for every capture, how far the overlay
+moved between the tap (or auto fire) and the confirm screen.
+
+## Resolution (`npm run bench:quality`)
+
+Does the PDF keep every pixel the camera gave the page? `quality.mjs` drives
+the real `<ScanFlow>` (`app/page-quality.js`) on a fake phone camera — a drawn
+page on a dark desk, a 2160×3840 stream that is the centre 9:16 crop of the
+sensor, and an `ImageCapture` whose largest photo is the whole sensor —
+through shutter → confirm → step 2 → "Gerar PDF", and reads the PDF back with
+pdf-lib. Cases: `s25` (a 4000×3000 still), `50mp` (8160×6120), `safari` (no
+`ImageCapture`), `timeout` (`takePhoto` never answers), `closest` (a driver
+that answers 1704×3648 whatever is asked — the Galaxy S25 Ultra's field
+still). It fails unless: the still is asked for at the sensor's full size and
+becomes the page at its full resolution (or, without one, the stream's native
+frame does, with the reason reported); the PDF's image is the final JPEG's
+own pixels, embedded as-is (`/DCTDecode`, one PDF unit per pixel, rung 0);
+and it is the drawn page at the full resolution of its source (±3 %). Then
+girar + cantos + acabamento through the real store and render pipeline: every
+render from the canonical, at the canonical's size — no generational shrink.
+Then the size ladder: the `s25` page again under a host's `maxBytes` (by
+default 97, 80 and 60 % of its own PDF; `--budget x0.5,300000`, or
+`--no-ladder`): each must fit, a quality rung must embed every pixel of the
+final, and a budget the as-reviewed PDF meets must not step down.
+The live stream's cap is off as shipped (`lib/stream-cap.ts`): `cap` proves
+two pages stay on the native stream (`stream-cap` says `disabled`, no size is
+ever asked for); `cap-fov`, `cap-fail` and `cap-stuck` force it on (bench
+build only, `globalThis.__scanBenchStreamCap`) — `cap-fov` with a capped mode
+that sees a 1.1× tighter field of view (the S25 Ultra's is 1.256), checking
+that the live loop finds the page on as many samples, reaches the ready cue
+as soon, reads the fill 1.1× larger and that the still registers at 1.1.
+`--case s25,50mp`, `--no-edits`, `--headed`. Output: `.bench-out/quality-*/`.
 
 ## WebKit (`npm run bench:webkit`)
 
@@ -820,7 +1131,7 @@ these settings change.
 
 **Stills are decoded the way the app decodes a photo**: `__bench.load` fetches
 the bytes, `createImageBitmap(…, { imageOrientation: "from-image" })`, then the
-library's own `bitmapToCanvas` (the still path's 3000 px cap).
+library's own `bitmapToCanvas` (the still path's draw, at full resolution).
 
 **real-stills** runs every variant on every still. GT-free: how often each
 variant finds a page, the share of the photo its quad claims, and how often ML
@@ -967,6 +1278,200 @@ receives a `structuredClone` of each event: nothing it keeps or mutates can
 reach a quad the scanner is using. Nothing is buffered or sent; events are
 numbers and normalized corners, never pixels.
 
+## Endireitar: the straighten suites (`--suite straighten`, `--suite straighten-real`)
+
+The detector suites ask "would the crop have been right?"; these ask the same
+of the **Endireitar** tap: *is the page the user now sees straighter than the
+flat page of the outline they confirmed, and did anything get worse?*
+
+**What runs.** The real engine — the checkout's `src/lib/dewarp/*.ts` and the
+dewarp wasm named by its own `wasm-manifest.json` — driven the way
+`dewarp-stage.ts` drives it: a 896 px baseline, the padded crop, the output
+size, the engine's A/B verdict and its guards (`straighten/engine-host.mjs`).
+The baseline's corners go onto the 896 px copy per axis, by the engine's own
+`quadOnScaledCopy` (pixel centre to pixel centre) when the engine exports it
+and linearly, as older app code did, when it does not; the copy is handed to
+the engine as `baselineSource`, which older engines ignore. The app's worker is replaced by an in-thread stand-in that makes exactly the
+worker's calls. When the engine root has a text-deskew module
+(`src/lib/deskew.ts`), the step runs first (`straighten/deskew-step.mjs`,
+`--deskew auto|off|paper|crop`; `auto` = `paper` when the module exists). A
+module that exports `planStraighten` (the app's own step) is driven the way
+`dewarp-stage.ts` drives it: one 896 px copy, B₀ of the confirmed outline, the
+rotation estimated and judged against B₀, and the engine run — on the
+confirmed outline, with B₀ as its A/B baseline — only when the step asks for
+it (no rotation, or a level page that still shows a curl). The page the user
+sees is the engine's surface (never rotated) when it accepts, else the flat
+page of the rotated outline with its wedges painted. A page the step levelled
+with no curl is recorded as engine outcome `#050 curl-absent`, with no engine
+time. `SCAN_STRAIGHTEN_CURL_GATE=always|never` forces the engine on or off on
+every rotated page — a diagnostic for choosing the curl gate from two runs,
+never the app's behaviour. An older module (`planDeskew`, the F5 prototype's)
+is driven the way that prototype drove it: the rotated outline replaces the
+confirmed one and the engine always runs.
+
+**Why Node, not the bench page.** The engine has no DOM in its path, a page
+takes seconds of single-threaded wasm, and a run is 279 of them: the suite
+shards its scenes over `--jobs` Node processes (`straighten/worker.mjs`,
+default 8), which one Chromium page cannot do, and it can load the engine from
+**any** checkout (`--engine-root dir`, or `ENGINE_ROOT`) so a prototype
+worktree is scored with this bench's metrics. A command that runs only
+straighten suites builds no bench page and launches no browser.
+
+**Scenes.** `straighten/scenes.mjs` renders a photo and its confirmed outline
+from a physical chain with the truth known exactly: print tilted θ on the
+sheet, a cylinder curl seen by a pinhole camera, the sheet turned φ in the
+frame, sensor noise, uneven light and a camera blur. The full profile is 279
+scenes — tilt × layout (paragraphs, block, two columns, form) × outline
+(correct, full-frame, jittered), in-frame rotation, curl × tilt × outline,
+rotation × curl — of which 255 should act (|θ| ≥ 0.5° or any curl). `--quick`
+is an 83-scene screen of the same (every layout, family and outline mode).
+`--only regex` narrows either by scene id. `straighten-real` puts the same θ
+into every labelled real still (`straighten/real-scenes.mjs`): the print
+rotated inside a right outline (`interior`, the common case), the whole photo
+rotated with its outline (`rot-quad`, nothing to do) or without it
+(`rot-origquad`), plus the still itself — 16 scenes a still, 7 in `--quick`.
+
+**Verdicts** (`straighten/score.mjs`, unit-tested in `straighten-*.test.mjs`).
+Every finished page is judged against **the original flat page of the
+confirmed outline** — never against itself, and never against a rotated
+outline. A should-act page lands in exactly one of five classes, all over the
+same denominator:
+
+| class | the page the user sees |
+|---|---|
+| `noop` | the flat page: nothing acted |
+| `harm` | acted and got worse: \|tilt\| up by > 0.3°, bow up by > max(0.15 %, 25 %) (engine surfaces only — a rotation cannot bend lines), print lost, table brought into a straight page or around print shrunk into it, or the page's aspect off the flat page's by > 1 % (stretched) |
+| `unverified` | acted, no harm found, but a check it needed could not be measured (a NaN tilt or bow, too little print) — **never** a success |
+| `complete` | no harm, \|tilt\| ≤ 0.35°, bow ≤ 60 % of the flat page's |
+| `partial` | acted, measured, no harm, not complete |
+
+A page with nothing to do is `left-alone`, `harm`, `unverified` or `acted-ok`.
+**Print lost** is judged on absolute ink (the ink over the whole page area,
+< 92 % of the flat page's), on the ink in each border band and on the ink's
+bounding box (print pushed into a border the flat page's print kept clear
+of) — not on ink density over the visible sheet, which a kept wedge of table
+fools one way and a sheet that grew the other. Print that lost ink but shrank
+with its bounding box alike on both axes, touching no new border, was scaled
+down, not cut: it is reported as shrunk, not as print lost (a page shrunk into
+a frame of table is still harm, as background brought in). Table newly in the border of a *tilted* page is the price of turning its
+print — by the deskew or by the engine levelling the lines it models, which
+uncovers the same corners — unless the print shrank with it (`shrunk`): a
+page scaled into a frame of table is harm whatever its tilt. A shrink too
+mild to lose 8 % of the ink is not detected; that is this check's blind spot.
+**Painted** pages carry fill
+without the photo's grain; a **seam** is a fill that steps more than 6 grey
+levels against the paper beside it; both are net of what the flat page
+itself shows, and **dark wedges** count table newly in the border band. The
+seam looks for paper up to two blocks (about 2 % of the long edge) from each
+painted block, so on a sheet lit steeply toward its edge it also counts the
+light's own gradient; each deskewed record therefore carries `fillStep`, the
+fill against the real paper right across the fill's edge (p10/p50/p90, grey
+levels, + = fill brighter).
+Counts sit beside every rate in the report.
+
+**What the card says.** The report also tallies the sentence the page view
+would show after the tap (`straightenOutcome` in `scan-store.ts`, rebuilt from
+each record by `cardOf` in `straighten/score.mjs`: tilt, curl, both,
+tilt-only, nothing, or the decline's bucket) against each page's verdict.
+`nothing` ("already level and flat") comes from the deskew's own measurement
+of a page it found level (`deskew.level`), and only when that measurement
+looked for a bow on enough lines (`level.flat`, `measuredFlat`); on a
+should-act page it is a false claim, and every such page is listed by name.
+`both` needs the engine's surface measured level (`deskew.engineLevel`,
+`measuredLevel`): otherwise the card is `curl`. `tilt-retry` is a turned page
+whose curve could not be checked (the engine failed rather than declined). `none` is a page the engine
+changed although the deskew measured it level and flat: the app shows no
+card there rather than claim a curl.
+
+**Provenance and runtime.** `config.engine` records the engine root, its HEAD
+and — when it has uncommitted changes — a sha256 over its diff and untracked
+files, so "the same dirty worktree" is provably the same code or not. The
+engine's hard timeout is the app's own, capped at 30 s: a slower page is the
+timeout the app would show, counted as such. Timeouts and pages over the 12 s
+device budget (engine + deskew) depend on load, so they only compare between
+runs at the same `--jobs`.
+
+**`--compare`.** Only runs over the same scenes (profile, `--only`, scene
+hash, rendering), `--jobs` and timeout compare; the engine root and deskew
+mode are what is being compared. The gated headlines (larger is worse) are
+`unfixedRate` (1 − complete), `noopRate`, `harmCount`, `flatHarms`,
+`unverifiedCount`, `curlUnfixedRate`, `residTiltP90`, `seamCount`, `timeouts`
+and `overBudget`, per group (`ALL`, each family, `tilt/correct`; per variant
+for real media). On top, **every scene** that was a complete fix and no longer
+is (a lost fix), and every scene harmed now that was not (a new harm), fails
+the run by name, whatever the totals say. A scene that crashed is an absolute
+failure.
+
+**Sheets.** `--sheets` writes a before/after PNG (flat page | page the user
+sees) for each flagged scene — harms, unverified pages, seams, and with
+`--compare` lost fixes and newly acted pages — into the run's `sheets/`
+(for `straighten-real`, in the cache: real pixels never enter the repository).
+
+**Curl on real stills is not graded.** Their truth has no curl (`"unknown"`):
+a real page is `complete` on its tilt and on no harm alone, and a still's own
+base and `rot-quad` variants are "nothing to do" only in the tilt the suite
+added, not in whatever skew or curl the photo itself has. The real report
+says so above its headline.
+
+**Baseline** (engine 1e0548d, no deskew step, full profile, `--jobs 8`): of
+255 should-act synthetic pages 49 complete (19.2 %), 7 partial, 198 no-op
+(77.6 %), 1 harm, 0 unverified; 3 harms over all 279 pages (a bowed
+full-frame form and two pages shrunk into a frame of table at 10° in-frame
+rotation); tilt-only pages 36/204 complete (tilted print in a correct outline
+9/64); curl 13/51; residual tilt p50/p90 3.0°/10.0°; 6 pages over the 12 s
+budget, no timeouts. Real stills (3 labelled): 4/30 complete, 26 no-op, no
+harm.
+
+**The deskew step** (engine d24bdb2 plus `src/lib/deskew.ts`, full profile,
+`--jobs 8`, against the same engine without it): complete 81 → 225 of 255
+(tilt-only 56 → 200 of 204, tilted print in a correct outline 64/64), harms
+3 → 1 (the bowed full-frame form, untouched by the step), curl 25/51
+unchanged, residual tilt p90 10° → 0°, seams 0, 1 page over the 12 s budget
+(6 before: the engine now runs on 78 of 279 pages). The one lost fix,
+`tilt/form/jitter/t2`, is a jittered outline whose leftover perspective the
+engine used to straighten; the step levels it to 0.41° and, finding no curl,
+does not ask the engine. The step itself costs 297/464 ms (p50/p90) in
+Node at `--jobs 8`. Real stills: 7 → 21 of 30 complete, no harm, no lost fix; 12–14
+pages flag a seam while the fill's own step across its edge stays within
+±3 grey levels at p90 on all but two.
+
+The sideways refusal then compared raw projection energy, and a dense form
+(still 145830) read as on its side at every tilt from 2° to 8°: 12 of the
+real pages' abstains. Compared by peak sharpness instead, real stills go to
+23 of 30 complete, 3 partial, 4 no-op, no harm, no lost fix; the synthetic
+run is unchanged scene for scene (its 9 sideways abstains become
+low-confidence ones).
+
+The two real pages whose fill stepped far from the paper beside it
+(145810 `interior` at 6° and 8°, `fillStep` p90 146 and 173 grey levels)
+were one case: a wedge kept because the frame already showed the table
+there, running past the photo, where everything was painted paper — a paper
+patch inside a strip of table. Past the photo, such a wedge now keeps
+scanic's clamp (the photo's edge, which is that table), and a wedge with
+nothing inside the photo to judge follows the border it lies beyond. Every
+deskewed real page's `fillStep` p90 is now within 2 grey levels; the
+synthetic fill is unchanged pixel for pixel (no synthetic scene has such a
+wedge). `seamCount` on the real stills stays at 18: on these photos the
+flat page's own paper blocks within two blocks of each other already differ
+by 18–22 grey levels at p90 (43–58 at p99), against the 6 the seam flag
+allows, so there it counts the light more than the fill.
+
+**After the review fixes** (engine 7b48f49, bench 1d41453, full profile,
+`--jobs 8`, verdicts of both runs by this scorer): against the step-0
+baseline, complete 49 → 225 of 255 (tilt-only 36 → 200 of 204, tilted print
+in a correct outline 64/64 at every tilt from 0.5° to 15°), curl 13 → 25 of
+51, no-op 198 → 20, harms 3 → 1 (the bowed full-frame form), unverified 0,
+residual tilt p90 10° → 0°, 1 page over the 12 s budget (6 before), deskew
+323/418 ms p50/p90 in Node. Scene for scene against 0c95359 nothing changed
+class: the turned pages now keep the flat page's size (their aspect drifted
+by up to a few percent before, unscored), three `both` cards whose engine
+surface kept 0.5–1.6° of tilt now read `curl`, and one seam flag flips at
+its own threshold (tilt/twocol/jitter/t5: 3 blocks at 6.0 grey levels
+against 5.8 before; the fill's step across its edge is −1/0/+1 at
+p10/p50/p90 in both). Real stills: 4 → 23 of 30 complete (interior 2 → 12
+of 15), no harm, no lost fix, identical classes to 0c95359; the seam count
+stays at 18 for the reason above.
+
 ## Status
 
 Phase 3 (the live loop) added the sustained session, remounts and leak
@@ -993,7 +1498,7 @@ fire and no fire in a tremor window either, latency p50 2.3 s (the ready cue
 waits for five readings of a still page).
 
 Implemented: probe, server, bench page, the `detector`, `session`,
-`real-stills`, `real-video` and `emulator` suites, metrics, report,
+`real-stills`, `real-video`, `emulator`, `straighten` and `straighten-real` suites, metrics, report,
 `--compare`, families F1–F7, the session emulator and fake camera, real-media
 extraction, the labelling page (`bench:label`) and the playground
 (`bench:play`); Phase 2's edge refinement with its `refined` / `ml+refine`

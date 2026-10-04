@@ -45,7 +45,7 @@ export function RetakeSheet({ tile, onClose }: RetakeSheetProps) {
   const copy = useCopy();
   const { lang } = useLang();
   const store = useStore();
-  const { intake } = useScanRuntime();
+  const { intake, diagnosticsSink } = useScanRuntime();
   const [fresh, setFresh] = React.useState<Capture | null>(null);
   /** Bumped per photo, so a second retake repaints instead of reusing the first. */
   const [freshKey, setFreshKey] = React.useState(0);
@@ -69,8 +69,9 @@ export function RetakeSheet({ tile, onClose }: RetakeSheetProps) {
       gate: fresh.gate,
       path: fresh.path,
     });
+    diagnosticsSink?.emit({ type: "page", action: "retaken", page: tile.humanNumber });
     onClose();
-  }, [choice, fresh, onClose, store, tile.pageId]);
+  }, [choice, diagnosticsSink, fresh, onClose, store, tile.humanNumber, tile.pageId]);
 
   return (
     <div

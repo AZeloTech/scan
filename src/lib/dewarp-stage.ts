@@ -28,11 +28,21 @@
  *    compares its candidate against a flat rendering of the same quad, and that
  *    rendering must come from the implementation that ships — scanic — or the
  *    A/B is measuring two different flatteners. It is rendered small because
- *    `measureSurface` downsamples to 448 px anyway.
+ *    `measureSurface` downsamples to 448 px anyway — and the small copy it is
+ *    warped from is handed over as well, so the candidate goes through the
+ *    same resampling rather than looking sharper than any flat page can.
  *  * **A device that cannot do this in time stops being asked.** The engine
  *    measures its own gate and refuses to judge it; the judgement is here, and
  *    it latches for the session ({@link dewarpAvailable}) — the same
  *    fail-closed-and-silent shape `lib/flatten.ts` uses for the ML detector.
+ *  * **The print's tilt comes first, and usually alone.** Before the engine,
+ *    the text deskew (`lib/deskew.ts`) measures the print on the small flat
+ *    page and — when a rotation levels it and its judge agrees against that
+ *    same flat page — the rotation is composed with the confirmed outline on
+ *    the flat path. The engine is asked only when the level page still shows
+ *    a curl (and on the confirmed outline, as always: see `deskew.ts` for
+ *    why); the rotation is the page's answer whenever the engine declines.
+ *    The deskew's time counts in the same device budget as the engine's.
  */
 
 import {
@@ -64,8 +74,9 @@ import { resolveGeometryMode } from "@/lib/dewarp/engine-mode";
 // person diagnosing a device must not download the maths to read one.
 import { dewarpReasonCode } from "@/lib/dewarp/types";
 import { warpToCanvas } from "@/lib/flatten";
+import type { DeskewPlan } from "@/lib/deskew";
 import { decodeCanonical, releaseCanvas } from "@/lib/image";
-import { denormalizeQuad, type NormalizedQuad } from "@/lib/quad";
+import { denormalizeQuad, normalizeQuad, type NormalizedQuad } from "@/lib/quad";
 import type { AssetUrls } from "@/lib/runtime-config";
 
 /**
@@ -90,7 +101,12 @@ const BASELINE_SOURCE_LONG_EDGE = 896;
 export type DewarpStageReason =
   | DewarpFallbackReason
   | "source-unavailable"
-  | "baseline-unavailable";
+  | "baseline-unavailable"
+  /**
+   * Not a failure: the deskew levelled the print and the level page showed no
+   * curl, so the engine was not asked. The page is the deskewed flat page.
+   */
+  | "curl-absent";
 
 export interface DewarpStageRequest {
   /** The page's one immutable source. */
@@ -120,6 +136,28 @@ export interface DewarpStageRequest {
   assets: AssetUrls;
   onPhase?: (progress: DewarpProgress) => void;
   signal?: AbortSignal;
+  /** Run the text deskew before the engine. Default on: the tap asks for it. */
+  deskew?: boolean;
+  /**
+   * The deskew already planned for exactly these pixels and this outline (the
+   * store's cache): used as is, never re-estimated. Null: planned, and no
+   * rotation. Absent: plan it here.
+   */
+  knownDeskew?: AppliedDeskew | null;
+}
+
+/**
+ * A text rotation the step decided on for one page and one outline.
+ *
+ * Its own transform, not a new outline: the page's corners stay what the user
+ * confirmed, and `corners` is only the render-time composition of those
+ * corners with the rotation (normalized to the canonical, for scanic) — valid
+ * for exactly the corners and pixels it was planned on.
+ */
+export interface AppliedDeskew {
+  plan: DeskewPlan;
+  /** The confirmed outline composed with the rotation, normalized to the canonical. */
+  corners: NormalizedQuad;
 }
 
 /**
@@ -137,6 +175,28 @@ export interface DewarpStageResult {
   reason: DewarpStageReason | null;
   /** The map behind `canvas`, to resample. Null whenever `canvas` is null. */
   replay: DewarpReplay | null;
+  /**
+   * The deskew's answer for the flat path: the rotation the page gets when
+   * `canvas` is null (an engine surface never carries one). Null: planned, no
+   * rotation. Absent: the run stopped before it could plan (the caller plans
+   * on its own, see {@link planDeskewStage}).
+   */
+  deskew?: AppliedDeskew | null;
+  /**
+   * The deskew planned no rotation because the print was already level, and
+   * the level page showed no curl either — measured on this run's own B₀, so
+   * absent whenever the deskew came from `knownDeskew`. The engine still
+   * runs; this only lets the page view say "already level and flat" rather
+   * than guess at why the engine declined.
+   */
+  alreadyStraight?: true;
+  /**
+   * The deskew was attempted and could not finish (its code would not load,
+   * a readback or a render failed): `deskew` is absent — there is no answer
+   * for these pixels, and none may be remembered as one. The next render
+   * plans again.
+   */
+  deskewFailed?: true;
 }
 
 /**
@@ -382,20 +442,78 @@ function loadEngine(): Promise<DewarpEngineModule> {
 }
 
 /**
- * The flat rendering of the same quad, small — the engine's A/B baseline.
+ * The small copy of the canonical every A/B baseline is warped from, and its
+ * pixels.
  *
- * Null when scanic could not extract at all, which is also how the caller's own
- * warp would end: the page is about to go in flat either way, and there is
- * nothing for the curved geometry to be compared against.
+ * The copy goes to the engine too, so its candidate is sampled from the very
+ * pixels the baseline's warp saw (whatever filter this browser's `drawImage`
+ * used) at the very size it produced: a page that is geometrically the same
+ * must measure the same, and a candidate sampled once from the full canonical
+ * is sharper than any flat rendering — thinner strokes that read as lost ink.
+ * The deskew renders its rotated page from the same copy, so the two small
+ * pages it compares differ by the rotation alone. `pixels` is `"canonical"`
+ * when the canonical already fit (it *is* the copy), and null when the copy
+ * could not be read back: the A/B then falls back to sampling the canonical,
+ * which costs fairness, not the attempt.
  */
-async function homographyBaseline(
+interface SmallCopy {
+  canvas: HTMLCanvasElement;
+  pixels: RgbaImage | "canonical" | null;
+}
+
+function smallCopyOf(source: HTMLCanvasElement): SmallCopy {
+  const canvas = scaleSurface(source, BASELINE_SOURCE_LONG_EDGE, htmlSurface);
+  if (canvas === source) return { canvas, pixels: "canonical" };
+  let pixels: RgbaImage | null = null;
+  try {
+    pixels =
+      surfaceContext(canvas, { willReadFrequently: true })?.getImageData(
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+      ) ?? null;
+  } catch {
+    pixels = null;
+  }
+  return { canvas, pixels };
+}
+
+/** `scaleSurface` hands the source straight back when it already fits. */
+function releaseSmallCopy(copy: SmallCopy | null, source: HTMLCanvasElement | null): void {
+  if (copy !== null && copy.canvas !== source) releaseSurface(copy.canvas);
+}
+
+/** The engine's own pixel-centre rule for the copy (the engine and the deskew module both carry it). */
+interface CopyMapper {
+  copyScale: DewarpEngineModule["copyScale"];
+  quadOnScaledCopy: DewarpEngineModule["quadOnScaledCopy"];
+}
+
+/**
+ * The flat rendering of `quad`, small — the engine's A/B baseline, and the
+ * deskew's B₀ and B′ — warped by scanic (the flattener that ships, or the A/B
+ * would be measuring two different flatteners) from the small copy.
+ *
+ * The quad goes onto the copy by the engine's own pixel-centre rule
+ * (`quadOnScaledCopy`), per axis — the rule its candidate samples the copy by,
+ * so the two sides of the A/B look at the same place. Null when scanic could
+ * not extract at all, which is also how the caller's own warp would end.
+ */
+async function warpSmall(
+  copy: SmallCopy,
   source: HTMLCanvasElement,
-  corners: NormalizedQuad,
+  quad: DewarpQuad,
+  mapper: CopyMapper,
   assets: AssetUrls,
 ): Promise<RgbaImage | null> {
-  const small = scaleSurface(source, BASELINE_SOURCE_LONG_EDGE, htmlSurface);
+  const small = copy.canvas;
   let flat: HTMLCanvasElement | null = null;
   try {
+    const onCopy =
+      small === source ? quad : mapper.quadOnScaledCopy(quad, mapper.copyScale(source, small));
+    const corners = normalizeQuad(onCopy, small.width, small.height);
+    if (corners === null) return null;
     flat = await warpToCanvas(small, corners, assets);
     if (flat === null) return null;
     const context = surfaceContext(flat, { willReadFrequently: true });
@@ -404,9 +522,180 @@ async function homographyBaseline(
   } catch {
     return null;
   } finally {
-    // `scaleSurface` hands the source straight back when it already fits.
-    if (small !== source) releaseSurface(small);
     releaseCanvas(flat);
+  }
+}
+
+/**
+ * The small page of another outline at a given size — B′ at B₀'s own size, so
+ * the two differ by the rotation alone. scanic sizes its page from the
+ * outline's sides, which on a perspective outline are not B₀'s, so this is
+ * the deskew module's port of scanic's warp with the size given, on the very
+ * copy B₀ was warped from, its corners put there by the same rule. Null when
+ * the copy cannot be read or the warp fails.
+ */
+function warpSmallAt(
+  copy: SmallCopy,
+  source: HTMLCanvasElement,
+  quad: DewarpQuad,
+  deskew: DeskewModule,
+  size: { width: number; height: number },
+): RgbaImage | null {
+  try {
+    const small = copy.canvas;
+    const pixels =
+      copy.pixels !== null && copy.pixels !== "canonical"
+        ? copy.pixels
+        : (surfaceContext(small, { willReadFrequently: true })?.getImageData(0, 0, small.width, small.height) ??
+          null);
+    if (pixels === null) return null;
+    const onCopy = small === source ? quad : deskew.quadOnScaledCopy(quad, deskew.copyScale(source, small));
+    return deskew.warpQuadAt(pixels, onCopy, size.width, size.height);
+  } catch {
+    return null;
+  }
+}
+
+type DeskewModule = typeof import("@/lib/deskew");
+
+let deskewPromise: Promise<DeskewModule> | null = null;
+
+/** The deskew maths, lazily — same reasoning and memo rule as {@link loadEngine}. */
+function loadDeskew(): Promise<DeskewModule> {
+  if (deskewPromise === null) {
+    const attempt = import("@/lib/deskew");
+    attempt.catch(() => {
+      if (deskewPromise === attempt) deskewPromise = null;
+    });
+    deskewPromise = attempt;
+  }
+  return deskewPromise;
+}
+
+/**
+ * The deskew step on the small flat page B₀ of the confirmed outline: the
+ * rotation, judged against B₀ on B′ (the small page of the rotated outline,
+ * warped from the same copy at B₀'s size). Never throws: any failure is "no
+ * rotation" for this run, flagged `failed` so no caller remembers it as the
+ * page's answer, and the engine then runs on the confirmed outline as it
+ * always has.
+ */
+async function planDeskewFor(
+  copy: SmallCopy,
+  source: HTMLCanvasElement,
+  baseline: RgbaImage,
+  quad: DewarpQuad,
+): Promise<DeskewAnswer> {
+  const failed: DeskewAnswer = { deskew: null, alreadyStraight: false, failed: true };
+  try {
+    const deskew = await loadDeskew();
+    const width = source.width;
+    const height = source.height;
+    const size = { width: baseline.width, height: baseline.height };
+    const result = await deskew.planStraighten({
+      flat: baseline,
+      quad,
+      canonicalWidth: width,
+      canonicalHeight: height,
+      renderSmall: async (rotated) => warpSmallAt(copy, source, rotated, deskew, size),
+    });
+    if (result.failed === true) return failed;
+    if (result.plan === null) {
+      // Already level (no rotation needed) and no curl on the level page —
+      // measured, with lines enough to have looked for a bow.
+      const alreadyStraight = result.level !== null && deskew.measuredFlat(result.level);
+      return { deskew: null, alreadyStraight, failed: false };
+    }
+    const corners = normalizeQuad(result.plan.quad, width, height);
+    if (corners === null) return { deskew: null, alreadyStraight: false, failed: false };
+    return { deskew: { plan: result.plan, corners }, alreadyStraight: false, failed: false };
+  } catch {
+    return failed;
+  }
+}
+
+/** {@link planDeskewFor}'s answer: the rotation, and whether none was needed at all. */
+interface DeskewAnswer {
+  deskew: AppliedDeskew | null;
+  /** See {@link DewarpStageResult.alreadyStraight}. */
+  alreadyStraight: boolean;
+  /** See {@link DewarpStageResult.deskewFailed}: `deskew` is then no answer at all. */
+  failed: boolean;
+}
+
+/**
+ * The deskew on its own, for a page whose curved chain never got as far as
+ * planning it — a device the latch has closed, an engine chunk that would not
+ * load. Decodes the canonical, renders the same small page B₀, plans. The
+ * engine is not asked, whatever the curl evidence says: it is not available.
+ * `"failed"`: the step could not finish (never "no rotation": see
+ * {@link DewarpStageResult.deskewFailed}).
+ */
+export async function planDeskewStage(
+  canonical: Blob,
+  corners: NormalizedQuad,
+  assets: AssetUrls,
+): Promise<AppliedDeskew | null | "failed"> {
+  let source: HTMLCanvasElement | null = null;
+  let copy: SmallCopy | null = null;
+  try {
+    const deskew = await loadDeskew();
+    source = await decodeCanonical(canonical);
+    copy = smallCopyOf(source);
+    const quad = denormalizeQuad(corners, source.width, source.height);
+    const baseline = await warpSmall(copy, source, quad, deskew, assets);
+    if (baseline === null) return "failed";
+    const answer = await planDeskewFor(copy, source, baseline, quad);
+    return answer.failed ? "failed" : answer.deskew;
+  } catch {
+    return "failed";
+  } finally {
+    releaseSmallCopy(copy, source);
+    releaseCanvas(source);
+  }
+}
+
+/**
+ * The page the user sees for a rotation, at full resolution: the decoded
+ * canonical warped through the rotated outline at the *confirmed* outline's
+ * size — so the page keeps its proportions (scanic would size it from the
+ * rotated outline's own sides) — and its wedges painted with the paper beside
+ * them, in one pass over pixels this reads once. Null when it cannot be made
+ * (the caller then renders the confirmed outline plainly, and says so);
+ * `filled` is whether anything was painted, for the page's record.
+ */
+export async function renderDeskewedPage(
+  decoded: HTMLCanvasElement,
+  confirmed: NormalizedQuad,
+  applied: AppliedDeskew,
+): Promise<{ canvas: HTMLCanvasElement; filled: boolean } | null> {
+  let canvas: HTMLCanvasElement | null = null;
+  try {
+    const deskew = await loadDeskew();
+    const context = surfaceContext(decoded, { willReadFrequently: true });
+    if (context === null) return null;
+    const width = decoded.width;
+    const height = decoded.height;
+    let pixels: RgbaImage | null = context.getImageData(0, 0, width, height);
+    const { image, filled } = deskew.renderDeskewed(
+      pixels,
+      denormalizeQuad(confirmed, width, height),
+      { ...applied.plan, quad: denormalizeQuad(applied.corners, width, height) },
+    );
+    // The source's copy is dead weight from here: the page is in `image`.
+    pixels = null;
+    canvas = htmlSurface(image.width, image.height);
+    const target = surfaceContext(canvas);
+    if (target === null) throw new Error("no 2-D context for the deskewed page");
+    target.putImageData(
+      new ImageData(new Uint8ClampedArray(image.data.buffer as ArrayBuffer), image.width, image.height),
+      0,
+      0,
+    );
+    return { canvas, filled };
+  } catch {
+    releaseCanvas(canvas);
+    return null;
   }
 }
 
@@ -546,9 +835,32 @@ export async function runDewarpStage(
   }
 
   let canonical: RgbaImage | null = null;
+  let copy: SmallCopy | null = null;
+  // Planned once B₀ exists; every answer below carries it, so a decline still
+  // hands the flat path the rotation.
+  let deskew: AppliedDeskew | null | undefined;
+  // Level and flat already, as this run measured it (never for a known deskew).
+  let alreadyStraight = false;
+  // The step was attempted and could not finish: `deskew` stays unset.
+  let deskewFailed = false;
+  // What the device spent on the deskew: counted in the same wait budget.
+  let deskewMs = 0;
+  // The deskew's answer, for every return once it may have been planned.
+  const planned = (): Pick<DewarpStageResult, "deskew" | "alreadyStraight" | "deskewFailed"> => ({
+    ...(deskew === undefined ? {} : { deskew }),
+    ...(alreadyStraight ? { alreadyStraight: true as const } : {}),
+    ...(deskewFailed ? { deskewFailed: true as const } : {}),
+  });
   try {
-    const baseline = await homographyBaseline(source, request.corners, request.assets);
-    if (baseline === null) {
+    const width = source.width;
+    const height = source.height;
+    // scanic's corners and the engine's quad are the same four points in the
+    // same pixels; the engine declares its own type only so it can be run
+    // without the DOM.
+    const confirmed: DewarpQuad = denormalizeQuad(request.corners, width, height);
+    copy = smallCopyOf(source);
+    const flat = await warpSmall(copy, source, confirmed, engine, request.assets);
+    if (flat === null) {
       note({
         pageId,
         engineMode: mode,
@@ -559,13 +871,44 @@ export async function runDewarpStage(
       return { canvas: null, reason: "baseline-unavailable", replay: null };
     }
 
-    const width = source.width;
-    const height = source.height;
-    // scanic's corners and the engine's quad are the same four points in the
-    // same pixels; the engine declares its own type only so it can be run
-    // without the DOM.
-    const quad: DewarpQuad = denormalizeQuad(request.corners, width, height);
+    // The text deskew, first: the rotation is judged against B₀ here. The
+    // engine, when it runs at all, runs on the confirmed outline against B₀
+    // exactly as before; the rotation is the flat path's.
+    if (request.deskew !== false) {
+      const deskewStarted = Date.now();
+      if (request.knownDeskew !== undefined) {
+        deskew = request.knownDeskew;
+      } else {
+        const answer = await planDeskewFor(copy, source, flat, confirmed);
+        if (answer.failed) {
+          deskewFailed = true;
+        } else {
+          deskew = answer.deskew;
+          alreadyStraight = answer.alreadyStraight;
+        }
+      }
+      deskewMs = Date.now() - deskewStarted;
+      if (deskew && !deskew.plan.curl.evidence) {
+        // Level and straight: the rotation is the whole correction, and the
+        // engine is not asked.
+        if (deskewMs > engine.DEVICE_GATE_BUDGET_MS) strikeBudget(mode, pageId, deskewMs, engine);
+        note({
+          pageId,
+          engineMode: mode,
+          event: "fallback",
+          reason: "curl-absent",
+          durationMs: Date.now() - startedAt,
+          extra: { deskewDeg: deskew.plan.deg, deskewMs },
+        });
+        return { canvas: null, reason: "curl-absent", replay: null, deskew };
+      }
+    }
+
+    const quad = confirmed;
     const output = engine.outputDimsFromQuad(quad);
+    const baselineSource = copy.pixels;
+    releaseSmallCopy(copy, source);
+    copy = null;
     const context = surfaceContext(source, { willReadFrequently: true });
     if (context === null) {
       note({
@@ -576,7 +919,7 @@ export async function runDewarpStage(
         durationMs: Date.now() - startedAt,
         extra: { stage: "canonical-readout" },
       });
-      return { canvas: null, reason: "source-unavailable", replay: null };
+      return { canvas: null, reason: "source-unavailable", replay: null, ...planned() };
     }
     canonical = context.getImageData(0, 0, width, height);
     // The pixels are read out; the decode's own backing store is dead weight
@@ -615,7 +958,12 @@ export async function runDewarpStage(
         outputHeight: output.height,
       },
       canonical,
-      baseline,
+      baseline: flat,
+      // The canonical itself when it already fit the baseline's source size;
+      // none when the copy could not be read (the engine's legacy A/B).
+      ...(baselineSource === null
+        ? {}
+        : { baselineSource: baselineSource === "canonical" ? canonical : baselineSource }),
       ...(request.onPhase === undefined ? {} : { onPhase: request.onPhase }),
       ...(request.signal === undefined ? {} : { signal: request.signal }),
     });
@@ -623,23 +971,10 @@ export async function runDewarpStage(
     // full-resolution buffers never overlap for longer than the handoff.
     canonical = null;
 
-    if (!withinDeviceBudget(run.deviceGate, engine.DEVICE_GATE_BUDGET_MS)) {
-      budgetStrikes += 1;
-      note({
-        pageId,
-        engineMode: mode,
-        event: "budget-strike",
-        reason: "budget",
-        durationMs: run.deviceGate.totalMs,
-        extra: {
-          strikes: budgetStrikes,
-          budgetMs: engine.DEVICE_GATE_BUDGET_MS,
-          downloadMs: run.deviceGate.downloadMs,
-          initMs: run.deviceGate.initMs,
-          firstInferenceMs: run.deviceGate.firstInferenceMs,
-        },
-      });
-      if (budgetStrikes >= STRIKES_TO_LATCH) latchSession(mode, "budget", pageId);
+    // The person waited for the deskew and the engine together: one budget.
+    const gate: DeviceGate = { ...run.deviceGate, totalMs: run.deviceGate.totalMs + deskewMs };
+    if (!withinDeviceBudget(gate, engine.DEVICE_GATE_BUDGET_MS)) {
+      strikeBudget(mode, pageId, gate.totalMs, engine, run.deviceGate, deskewMs);
     }
 
     const surface = run.surface;
@@ -654,6 +989,10 @@ export async function runDewarpStage(
     // *failure* value rather than the known *success* one for exactly that
     // reason: a literal `!== "uvdoc"` here would silently treat every
     // successful classical dewarp as a fallback the instant the flag flips.
+    const extra = {
+      gateTotalMs: gate.totalMs,
+      ...(deskew ? { deskewDeg: deskew.plan.deg, deskewMs } : {}),
+    };
     if (run.outcome.geometryMode === "homography" || surface === undefined) {
       const reason = run.outcome.fallbackReason ?? "render-failed";
       note({
@@ -662,21 +1001,35 @@ export async function runDewarpStage(
         event: "fallback",
         reason,
         durationMs: Date.now() - startedAt,
-        extra: { gateTotalMs: run.deviceGate.totalMs },
+        extra,
       });
-      return { canvas: null, reason, replay: null };
+      return { canvas: null, reason, replay: null, ...planned() };
+    }
+    // The engine's surface is on the confirmed outline and carries no
+    // rotation: it levels the lines it models, but only on average. The tilt
+    // the deskew found is claimed as levelled only when the surface is
+    // measured level; otherwise the page is the engine's, and so is its
+    // record — no rotation is reported for it.
+    if (deskew) {
+      try {
+        if (!(await loadDeskew()).measuredLevel(surface)) deskew = undefined;
+      } catch {
+        // Unmeasured is not level: the surface stands, the tilt is not claimed.
+        deskew = undefined;
+      }
     }
     note({
       pageId,
       engineMode: mode,
       event: "corrected",
       durationMs: Date.now() - startedAt,
-      extra: { gateTotalMs: run.deviceGate.totalMs },
+      extra: { ...extra, ...(extra.deskewDeg !== undefined && !deskew ? { deskewLevelled: false } : {}) },
     });
     return {
       canvas: toCanvas(surface),
       reason: null,
       replay: run.geometry ?? null,
+      ...planned(),
     };
   } catch (error) {
     // A refused allocation on the way in or out. The page is not lost — it is
@@ -689,9 +1042,42 @@ export async function runDewarpStage(
       durationMs: Date.now() - startedAt,
       ...errorFields(error),
     });
-    return { canvas: null, reason: "render-failed", replay: null };
+    return { canvas: null, reason: "render-failed", replay: null, ...planned() };
   } finally {
     // Idempotent: zeroing an already-zeroed surface costs nothing.
+    releaseSmallCopy(copy, source);
     releaseCanvas(source);
   }
+}
+
+/** One miss of the wait budget (deskew and engine together); two latch. */
+function strikeBudget(
+  mode: DewarpEngineMode,
+  pageId: string,
+  totalMs: number,
+  engine: DewarpEngineModule,
+  engineGate?: DeviceGate,
+  deskewMs = 0,
+): void {
+  budgetStrikes += 1;
+  note({
+    pageId,
+    engineMode: mode,
+    event: "budget-strike",
+    reason: "budget",
+    durationMs: totalMs,
+    extra: {
+      strikes: budgetStrikes,
+      budgetMs: engine.DEVICE_GATE_BUDGET_MS,
+      deskewMs,
+      ...(engineGate === undefined
+        ? {}
+        : {
+            downloadMs: engineGate.downloadMs,
+            initMs: engineGate.initMs,
+            firstInferenceMs: engineGate.firstInferenceMs,
+          }),
+    },
+  });
+  if (budgetStrikes >= STRIKES_TO_LATCH) latchSession(mode, "budget", pageId);
 }

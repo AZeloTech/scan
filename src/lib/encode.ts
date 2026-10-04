@@ -11,9 +11,10 @@
  * kind, so a lane cannot quietly ship a different generation from the other.
  *
  * The quality ladder is the fidelity contract. A page reaches the PDF through
- * exactly **two** encodes: the canonical (q92, the app's own first generation
- * of the camera frame) and the final (q85, what the review screen shows and
- * what `embedJpg` copies into the file). The thumbnail is a third encode but
+ * exactly **two** encodes: the canonical (q95, the app's own first generation
+ * of the camera frame, at the camera's full resolution) and the final (q92,
+ * what the review screen shows and what `embedJpg` copies into the file,
+ * byte for byte). The thumbnail is a third encode but
  * feeds nothing — it is a picture of a picture, never an input.
  *
  * Every encode is counted by role ({@link encodeCounts}), because "how many
@@ -44,14 +45,37 @@ export type EncodeRole = "canonical" | "final" | "thumb";
 /**
  * Canonical sits above the final on purpose: it is the source every later
  * render decodes, so its own generation loss is paid once and inherited by
- * everything. q85 there would show as generational mush on exactly the fine
- * print the document exists to preserve.
+ * everything.
+ *
+ * Measured on a synthetic 2250×4000 phone photo of a printed page (text from
+ * 14 to 64 px, a colour stamp, σ≈3 sensor noise), Chromium's encoder, PSNR of
+ * what reaches the PDF against the camera's own pixels:
+ *
+ * | canonical → final | canonical | final (in the PDF) | PSNR |
+ * |---|---|---|---|
+ * | q0.92 → q0.85 (before) | 2.78 MB | 2.34 MB | 33.6 dB |
+ * | q0.95 → q0.92          | 3.77 MB | 3.22 MB | 36.5 dB |
+ * | q0.95 → q0.95 (now)    | 3.77 MB | 3.76 MB | 39.8 dB |
+ * | single q1.0 (ceiling)  | —       | 8.58 MB | 52.7 dB |
+ *
+ * q0.95/q0.92 bought ~3 dB (half the squared error) for ~38 % more bytes per
+ * page over the old chain; the final at q0.95 buys ~3 dB more for ~17 %
+ * more (the owner's call, once the page fills more of the frame and the
+ * pixels are worth keeping); q1.0 costs 2.7× the bytes for noise the camera
+ * made. The canonical is never shipped (the store holds it, the PDF gets the
+ * final), so its extra megabyte is memory, not file size. A host that sets
+ * `maxBytes` gets q0.92 back first (`SIZE_LADDER`, `lib/pdf.ts`).
  */
 const JPEG_QUALITY: Record<EncodeRole, number> = {
-  canonical: 0.92,
-  final: 0.85,
+  canonical: 0.95,
+  final: 0.95,
   thumb: 0.8,
 };
+
+/** The quality a role is encoded at — for the diagnostics stream. */
+export function encodeQuality(role: EncodeRole): number {
+  return JPEG_QUALITY[role];
+}
 
 const encodes: Record<EncodeRole, number> = {
   canonical: 0,
@@ -107,7 +131,7 @@ function encodeHtml(canvas: HTMLCanvasElement, quality: number): Promise<Blob> {
  * the reason the worker lane is allowed to exist at all.
  *
  * `quality` overrides the role's table entry, and exists for exactly one
- * caller: the size ladder in `lib/pdf.ts`, which walks a page down q85 → q75 →
+ * caller: the size ladder in `lib/pdf.ts`, which walks a page down q92 → q75 →
  * q65 to fit a host's `maxBytes`. It still counts as a `final`, because that is
  * what it produces — a generation of the page that really ships — and the
  * ledger's claim is about delivered generations, not about which table row

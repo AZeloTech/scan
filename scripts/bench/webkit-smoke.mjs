@@ -25,7 +25,11 @@
  * Writes `.bench-out/webkit-smoke-<stamp>/results.json`. Linux WebKit is not
  * iOS Safari: this proves the paths run, not how a phone feels.
  *
- *   npm run bench:webkit [-- --session tremor-hold --seed 1 --out dir]
+ * The capture screen is the library's default layout (`rail`, whose
+ * MANUAL · AUTOMÁTICO rail is the auto-capture switch) unless `--layout`
+ * names another (`standard` for the screen that shipped before it).
+ *
+ *   npm run bench:webkit [-- --session tremor-hold --seed 1 --layout standard --out dir]
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -35,7 +39,7 @@ import { buildBenchApp, ensureRuntimeAssets } from "./build-app.mjs";
 import { launchChromium } from "./browser.mjs";
 import { OUT_DIR } from "./paths.mjs";
 import { startServer } from "./server.mjs";
-import { frameCacheKey, openSessionPage, PHONE } from "./suites/session.mjs";
+import { frameCacheKey, measureFramingView, openSessionPage, PHONE } from "./suites/session.mjs";
 import { scoreSession } from "./session-score.mjs";
 
 const STREAM = "720x1280";
@@ -55,11 +59,12 @@ function parse() {
     options: {
       session: { type: "string", default: "too-far" },
       seed: { type: "string", default: "1" },
+      layout: { type: "string" },
       out: { type: "string" },
     },
     strict: true,
   });
-  return { session: values.session, seed: Number(values.seed), out: values.out ?? null };
+  return { session: values.session, seed: Number(values.seed), layout: values.layout ?? null, out: values.out ?? null };
 }
 
 /** What a run must show to pass, as `[name, ok, detail]`. */
@@ -99,16 +104,19 @@ async function main() {
   ensureRuntimeAssets({ styles: true });
   await buildBenchApp();
   const server = await startServer();
-  const results = { createdAt: new Date().toISOString(), session: options.session, seed: options.seed, runs: [] };
+  const results = { createdAt: new Date().toISOString(), session: options.session, seed: options.seed, layout: options.layout ?? "rail", runs: [] };
   let failed = false;
   try {
     // 1. Chromium renders the session's frames into the frame cache.
+    // The page is framed by what the layout shows (`--frame-by screen`,
+    // as the session suite does), measured on the same viewport and stream.
     const { browser: chromium } = await launchChromium();
-    const key = frameCacheKey(options.session, options.seed, STREAM, chromium.version());
+    const view = await measureFramingView(chromium, server.url, { layout: options.layout, viewport: IPHONE.viewport, stream: STREAM });
+    const key = frameCacheKey(options.session, options.seed, STREAM, chromium.version(), view);
     const renderer = await openSessionPage(chromium, server.url);
     const prepared = await renderer.page.evaluate(
-      ([name, seed, size, cache]) => window.__session.prepare(name, seed, { size, cache }),
-      [options.session, options.seed, STREAM, key],
+      ([name, seed, size, cache, v]) => window.__session.prepare(name, seed, { size, cache, view: v }),
+      [options.session, options.seed, STREAM, key, view],
     );
     console.log(`frames: ${prepared.prepare.frames} (${prepared.prepare.cached ? "cached" : "rendered"})`);
     await renderer.context.close();
@@ -123,12 +131,12 @@ async function main() {
       const page = await context.newPage();
       const errors = [];
       page.on("pageerror", (error) => errors.push(String(error)));
-      await page.goto(`${server.url}/page-session.html`);
+      await page.goto(`${server.url}/page-session.html${options.layout === null ? "" : `?layout=${encodeURIComponent(options.layout)}`}`);
       await page.waitForFunction(() => window.__sessionReady === true, null, { timeout: 60_000 });
       const ready = await page.evaluate(
-        ([name, seed, size, cache, settings]) =>
-          window.__session.prepare(name, seed, { size, cache, stills: false, knobs: settings }).then((p) => ({ script: p.script, cached: p.prepare.cached })),
-        [options.session, options.seed, STREAM, key, knobs],
+        ([name, seed, size, cache, settings, v]) =>
+          window.__session.prepare(name, seed, { size, cache, stills: false, knobs: settings, view: v }).then((p) => ({ script: p.script, cached: p.prepare.cached })),
+        [options.session, options.seed, STREAM, key, knobs, view],
       );
       const features = await page.evaluate(() => ({
         worker: typeof Worker === "function",

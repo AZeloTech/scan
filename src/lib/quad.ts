@@ -4,7 +4,7 @@
  * Quad geometry, in ONE coordinate system.
  *
  * The live detector works on a ~640 px sample, the overlay is painted over a
- * CSS box that `object-cover` has cropped, and the warp happens on a ≤3000 px
+ * CSS box that `object-cover` has cropped, and the warp happens on a full-resolution
  * capture. Three different pixel grids for the same four corners — so nothing
  * outside this module ever carries corners in pixels for longer than one call:
  * everything in between speaks {@link NormalizedQuad}, fractions of the frame.
@@ -215,12 +215,15 @@ export function cornerBracketPath(
   quad: NormalizedQuad,
   fraction: number,
   cap: BracketCap,
+  /** Which corners (TL, TR, BR, BL) get a bracket; all when absent. */
+  include?: readonly boolean[],
 ): string {
   const corners = cornerList(quad);
   const share = Math.max(0, Math.min(0.5, fraction));
   const capLength = Math.max(0, cap.length);
   const segments: string[] = [];
   for (let index = 0; index < corners.length; index += 1) {
+    if (include !== undefined && include[index] === false) continue;
     const corner = corners[index];
     const neighbours = [
       corners[(index + corners.length - 1) % corners.length],
