@@ -53,8 +53,11 @@
 import { bakeRotation, htmlSurface, scaleSurface } from "@/lib/canvas-surface";
 import {
   dewarpAvailable,
+  planDeskewStage,
+  renderDeskewedPage,
   replayDewarpStage,
   runDewarpStage,
+  type AppliedDeskew,
   type DewarpReplay,
   type DewarpStageReason,
 } from "@/lib/dewarp-stage";
@@ -112,6 +115,18 @@ export interface DewarpAsk {
    * waiting. Null/absent asks fresh, exactly as before this field existed.
    */
   replay?: DewarpReplay | null;
+  /**
+   * The text deskew this page's pixels and outline already got (the store's
+   * cache): applied as is, never re-estimated. Null: planned, no rotation.
+   * Absent: plan it.
+   */
+  deskew?: AppliedDeskew | null;
+  /**
+   * A decline that is final for these pixels, this outline and that deskew
+   * (the store's cache): the engine is not asked again, and the page is the
+   * flat one — deskewed when `deskew` says so.
+   */
+  declined?: DewarpStageReason | null;
   onPhase?: (progress: DewarpProgress) => void;
   signal?: AbortSignal;
 }
@@ -172,6 +187,31 @@ export interface RenderedPage {
    * already carries inside this module.
    */
   dewarpReplay?: DewarpReplay | null;
+  /**
+   * The text deskew's answer for this render, on either geometry — for the
+   * store's cache and the page view. An `AppliedDeskew`: the print was tilted
+   * and these pixels are level — by that rotation on the flat path, by the
+   * engine's own levelling on dewarped pixels (its surface is on the
+   * confirmed outline and never carries the rotation). Null: it was planned
+   * and there is none. Absent: never planned (no request, or the request was
+   * cancelled).
+   */
+  deskew?: AppliedDeskew | null;
+  /**
+   * Set when the tap's deskew found the print already level and the page flat
+   * (`DewarpStageResult.alreadyStraight`), whatever the engine then did:
+   * there was nothing to straighten. Measured by this render only.
+   */
+  alreadyStraight?: true;
+  /**
+   * The tap's deskew could not finish in this render — its planning failed,
+   * or the rotated page could not be made — so these pixels carry no
+   * rotation and `deskew` is absent. Never remembered as "no rotation": the
+   * next render asks again, and the page view says a retry may help.
+   */
+  deskewFailed?: true;
+  /** The rotated page's wedges were painted with invented paper (for the PDF's record). */
+  deskewFilled?: true;
   rotation: PageRotation;
 }
 
@@ -283,6 +323,19 @@ function asImagePrepError(error: unknown): ImagePrepError {
 export interface DewarpMemo {
   accepted: DewarpReplay | null;
   declined: DewarpStageReason | null;
+  /**
+   * The deskew's answer for this render. Undefined: not planned yet; null:
+   * planned, no rotation. Remembered like the rest, so a retry inside the
+   * render never re-estimates — and never lands on a different rotation.
+   */
+  deskew?: AppliedDeskew | null;
+  /** The stage found the print level and the page flat (see {@link RenderedPage.alreadyStraight}). */
+  alreadyStraight?: boolean;
+  /**
+   * The deskew was attempted in this render and could not finish (see
+   * {@link RenderedPage.deskewFailed}): not planned again within the render.
+   */
+  deskewFailed?: boolean;
 }
 
 /** A fresh memo. One per logical render. */
@@ -296,6 +349,9 @@ export interface DewarpLane<Surface> {
     canvas: Surface | null;
     reason: DewarpStageReason | null;
     replay: DewarpReplay | null;
+    deskew?: AppliedDeskew | null;
+    alreadyStraight?: true;
+    deskewFailed?: true;
   }>;
   resample(accepted: DewarpReplay): Promise<Surface | null>;
 }
@@ -322,6 +378,9 @@ export async function curvedSurface<Surface>(
   if (memo.declined !== null) return { canvas: null, reason: memo.declined };
 
   const attempt = await lane.infer();
+  if (attempt.deskew !== undefined) memo.deskew = attempt.deskew;
+  if (attempt.alreadyStraight === true) memo.alreadyStraight = true;
+  if (attempt.deskewFailed === true) memo.deskewFailed = true;
   if (attempt.canvas === null) {
     memo.declined = attempt.reason ?? "render-failed";
     return { canvas: null, reason: memo.declined };
@@ -360,7 +419,22 @@ function requireAssets(request: { assets?: AssetUrls }): AssetUrls {
 }
 
 export function dewarpMemoFor(request: RenderRequest): DewarpMemo {
-  return { accepted: request.dewarp?.replay ?? null, declined: null };
+  const ask = request.dewarp ?? null;
+  const replay = ask?.replay ?? null;
+  // A map carries the deskew it was accepted with, so a resample still knows
+  // whether the print it levelled was tilted.
+  if (replay !== null) {
+    return {
+      accepted: replay,
+      declined: null,
+      ...(ask?.deskew === undefined ? {} : { deskew: ask.deskew }),
+    };
+  }
+  return {
+    accepted: null,
+    declined: ask?.declined ?? null,
+    ...(ask?.deskew === undefined ? {} : { deskew: ask.deskew }),
+  };
 }
 
 /** The page's pixels before the tail, and which geometry made them. */
@@ -372,6 +446,14 @@ interface Geometry {
   dewarpFallbackReason?: DewarpStageReason;
   /** The map behind `dewarped: true` pixels. Absent/null otherwise. */
   dewarpReplay?: DewarpReplay | null;
+  /** The deskew's answer for this render (see {@link RenderedPage.deskew}). */
+  deskew?: AppliedDeskew | null;
+  /** See {@link RenderedPage.alreadyStraight}. */
+  alreadyStraight?: true;
+  /** See {@link RenderedPage.deskewFailed}. */
+  deskewFailed?: true;
+  /** See {@link RenderedPage.deskewFilled}. */
+  deskewFilled?: true;
 }
 
 /**
@@ -392,6 +474,7 @@ async function geometry(
   const { canonical, corners } = request;
   const ask = request.dewarp ?? null;
   let dewarpFallbackReason: DewarpStageReason | undefined;
+  let deskew: AppliedDeskew | null = null;
   // `identity` is the ladder's second attempt, which has already given up on
   // the crop; there is no quad left to predict a surface for.
   if (ask !== null && corners !== null && !identity) {
@@ -407,15 +490,21 @@ async function geometry(
             ...(ask.engineMode === undefined ? {} : { engineMode: ask.engineMode }),
             ...(ask.onPhase === undefined ? {} : { onPhase: ask.onPhase }),
             ...(ask.signal === undefined ? {} : { signal: ask.signal }),
+            ...(memo.deskew === undefined ? {} : { knownDeskew: memo.deskew }),
           }),
         resample: (accepted) => replayDewarpStage(canonical, accepted),
       });
       if (curved.canvas !== null) {
+        // The engine's surface is on the confirmed outline and carries no
+        // rotation: the classical engine levels the lines it models itself.
+        // A tilt the deskew measured is still reported, as one it levelled.
         return {
           canvas: curved.canvas,
           warped: true,
           dewarped: true,
           dewarpReplay: memo.accepted,
+          ...(memo.deskew === undefined ? {} : { deskew: memo.deskew }),
+          ...(memo.deskew === null && memo.alreadyStraight === true ? { alreadyStraight: true as const } : {}),
         };
       }
       // Stopped because this render has already been replaced: the flat path
@@ -427,14 +516,59 @@ async function geometry(
     } else {
       dewarpFallbackReason = "unsupported";
     }
+    // The tap fixes the print's tilt whatever the engine said — and the same
+    // rotation every time: the one planned for these pixels and this outline.
+    // A run that stopped before planning (a closed latch, an engine chunk
+    // that would not load) plans here, on its own. A cancel is the user
+    // taking the tap back: no rotation either.
+    if (dewarpFallbackReason !== "cancelled") {
+      if (memo.deskew === undefined && memo.deskewFailed !== true) {
+        const planned = await planDeskewStage(canonical, corners, requireAssets(request));
+        if (planned === "failed") memo.deskewFailed = true;
+        else memo.deskew = planned;
+      }
+      deskew = memo.deskew ?? null;
+    }
   }
 
   const decoded = await atStageAsync("decode", () => decodeCanonical(canonical));
-  const flat = {
+  const flat: Omit<Geometry, "canvas" | "warped"> = {
     dewarped: false,
     ...(dewarpFallbackReason === undefined ? {} : { dewarpFallbackReason }),
+    // Planned and none: said, so the store can remember it.
+    ...(ask !== null && dewarpFallbackReason !== "cancelled" && memo.deskew === null ? { deskew: null } : {}),
+    ...(ask !== null &&
+    dewarpFallbackReason !== "cancelled" &&
+    memo.deskew === null &&
+    memo.alreadyStraight === true
+      ? { alreadyStraight: true as const }
+      : {}),
+    // Attempted and unfinished: said, so the store never remembers it as none.
+    ...(ask !== null && dewarpFallbackReason !== "cancelled" && memo.deskew === undefined && memo.deskewFailed === true
+      ? { deskewFailed: true as const }
+      : {}),
   };
   if (corners === null || identity) return { canvas: decoded, warped: false, ...flat };
+  let record = flat;
+  if (deskew !== null) {
+    // The rotation composed with the confirmed outline: one warp, one
+    // resample, at the confirmed outline's size, wedges painted.
+    const straightened = await renderDeskewedPage(decoded, corners, deskew);
+    if (straightened !== null) {
+      releaseCanvas(decoded);
+      return {
+        canvas: straightened.canvas,
+        warped: true,
+        ...flat,
+        deskew,
+        ...(straightened.filled ? { deskewFilled: true as const } : {}),
+      };
+    }
+    // The rotated page could not be made: the confirmed outline, plainly —
+    // and the record says the straightening did not happen and may be tried
+    // again, rather than claiming a rotation these pixels lack.
+    record = { ...flat, deskewFailed: true };
+  }
   let warped: HTMLCanvasElement | null;
   try {
     warped = await warpToCanvas(decoded, corners, requireAssets(request));
@@ -444,9 +578,9 @@ async function geometry(
     releaseCanvas(decoded);
     throw labelled("warp", error);
   }
-  if (warped === null) return { canvas: decoded, warped: false, ...flat };
+  if (warped === null) return { canvas: decoded, warped: false, ...record };
   releaseCanvas(decoded);
-  return { canvas: warped, warped: true, ...flat };
+  return { canvas: warped, warped: true, ...record };
 }
 
 async function renderOnce(
@@ -456,8 +590,17 @@ async function renderOnce(
   remote: boolean,
   memo: DewarpMemo,
 ): Promise<RenderedPage> {
-  const { canvas: source, warped, dewarped, dewarpFallbackReason, dewarpReplay } =
-    await geometry(request, identity, memo);
+  const {
+    canvas: source,
+    warped,
+    dewarped,
+    dewarpFallbackReason,
+    dewarpReplay,
+    deskew,
+    alreadyStraight,
+    deskewFailed,
+    deskewFilled,
+  } = await geometry(request, identity, memo);
   const job: PixelJob = {
     finish,
     rotation: request.rotation,
@@ -491,6 +634,10 @@ async function renderOnce(
     dewarped,
     ...(dewarpFallbackReason === undefined ? {} : { dewarpFallbackReason }),
     ...(dewarpReplay === undefined ? {} : { dewarpReplay }),
+    ...(deskew === undefined ? {} : { deskew }),
+    ...(alreadyStraight === undefined ? {} : { alreadyStraight }),
+    ...(deskewFailed === undefined ? {} : { deskewFailed }),
+    ...(deskewFilled === undefined ? {} : { deskewFilled }),
     rotation: request.rotation,
   };
 }

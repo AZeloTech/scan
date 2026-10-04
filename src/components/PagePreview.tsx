@@ -38,7 +38,12 @@ import {
   type PendingRemoval,
 } from "@/lib/page-undo";
 import type { PageTile } from "@/lib/page-tiles";
-import { displayRotation, effectiveFinish } from "@/lib/scan-store";
+import {
+  comparableRendering,
+  displayRotation,
+  effectiveFinish,
+  straightenOutcomeRetryable,
+} from "@/lib/scan-store";
 import { useCopy } from "@/components/I18n";
 import { Meta } from "@/components/ui";
 import {
@@ -262,16 +267,14 @@ export function PagePreview({
   // saw. It is rendered on demand at display scale and never encoded — a JPEG
   // here would be a lossy generation spent on a comparison.
   //
-  // Hidden on a page whose curvature was corrected, for the reason the flip
-  // exists at all: the comparison is rendered through the homography, so on a
-  // dewarped page the two sides would differ in geometry as well as in finish —
-  // two documents either side of the flip, which is what this rules out.
+  // Hidden on a page whose curvature was corrected or whose text was
+  // straightened, for the reason the flip exists at all: the comparison is
+  // rendered through the homography of the confirmed outline, unrotated, so
+  // on either page the two sides would differ in geometry as well as in
+  // finish — two documents either side of the flip, which is what this rules
+  // out (`comparableRendering`).
   const rendered = page.rendered;
-  const canCompare =
-    !failed &&
-    rendered !== null &&
-    rendered.finish !== "original" &&
-    !rendered.dewarped;
+  const canCompare = !failed && comparableRendering(rendered);
   const [comparing, setComparing] = React.useState(false);
 
   // A new revision is a new page as far as the comparison is concerned — and so
@@ -392,7 +395,7 @@ export function PagePreview({
 
   // ── the status line, composed here and never stored ───────────────────────
   const outcome = dewarp.outcome;
-  const retryableOutcome = outcome === "download" || outcome === "transient";
+  const retryableOutcome = straightenOutcomeRetryable(outcome);
   const status: {
     tone: "ok" | "warn" | "busy" | "plain";
     text: string;

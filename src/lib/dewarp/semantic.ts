@@ -25,8 +25,9 @@
  * be tested without ever rendering anything.
  */
 
-import { downscale } from "./sampler.ts";
-import type { RgbaImage } from "./types.ts";
+import type { CoarseGrid } from "./grid.ts";
+import { copyScale, downscale, fitLongEdge, renderThroughGrid } from "./sampler.ts";
+import type { CropBox, RgbaImage } from "./types.ts";
 
 /**
  * Long edge of the comparison rendering.
@@ -73,14 +74,59 @@ export const BORDER_REPEAT_DEPTH = 4;
 export const BORDER_REPEAT_TOLERANCE = 0.02;
 
 /**
- * A strip has to have something on it before repeating it means anything.
+ * …and at most this share of their non-blank pixels may have changed between
+ * them (see {@link BORDER_REPEAT_CHANGE_CONTRAST} for what "changed" means).
+ *
+ * Both have to hold. The mean alone is dominated by the blank pixels of a
+ * mostly blank border strip, so a strip whose every glyph pixel differs from
+ * the next one still read as a copy; the share alone reads a smooth shadow or
+ * vignette — every pixel a little darker than its neighbour — as one.
+ */
+export const BORDER_REPEAT_CHANGED_FRACTION = 0.1;
+
+/**
+ * A pixel changed between two strips if it moved by more than
+ * {@link BLANK_TOLERANCE} *and* by more than this share of its own distance
+ * from the background (the larger of its two readings).
+ *
+ * Relative to the pixel's own contrast, because compression noise scales with
+ * it: a smeared strip of crisp print, JPEG-compressed, rings at every glyph
+ * edge and rings differently on each row of an 8×8 block, so its copies move
+ * by more than a fixed tolerance at the edges while staying copies of the
+ * print.
+ * Ink that is there in one strip and gone from the next moves by all of its
+ * contrast, and a half-covered edge pixel by half of it — both still count.
+ */
+export const BORDER_REPEAT_CHANGE_CONTRAST = 0.35;
+
+/**
+ * A strip has to have something on it before repeating it means anything:
+ * at least this share of its pixels must be {@link BORDER_CONTENT_CONTRAST}
+ * or more away from the background.
  *
  * Every page has blank margins, and a blank row is trivially identical to the
  * next blank row — without this floor the repeat score would fire on healthy
  * scans. The failure it is actually looking for is a strip *with content*
  * smeared inward, which is what edge-clamped sampling produces.
+ *
+ * A share, not a spread: one dark pixel (a corner of background, a speck)
+ * lifts a strip's standard deviation over any small floor without being
+ * content, while a band of background framed in along the edge is all content
+ * and has no spread at all.
  */
-export const BORDER_CONTENT_STDEV = 0.02;
+export const BORDER_CONTENT_FRACTION = 0.02;
+
+/**
+ * How far from the background a pixel must be to count as content on a
+ * border strip: twice {@link BLANK_TOLERANCE}.
+ *
+ * Not merely off-white. Anything crossing an edge — a pale rule, the soft
+ * edge of a shadow — is the same in every row, so a mark just past the blank
+ * tolerance repeats like a smear without being print that a smear could lose.
+ * Twice the tolerance clears such a mark and still counts faint print (40
+ * grey levels on 210 paper is 0.157) that {@link INK_MARGIN} would not.
+ */
+export const BORDER_CONTENT_CONTRAST = 0.12;
 
 /** Ink is this far below the page background — deliberately gentle. */
 export const INK_MARGIN = 0.18;
@@ -112,40 +158,46 @@ function backgroundLevel(gray: GrayImage): number {
   return 1;
 }
 
-function meanRowDifference(
-  gray: GrayImage,
-  rowA: number,
-  rowB: number,
-): number {
-  let total = 0;
-  const offsetA = rowA * gray.width;
-  const offsetB = rowB * gray.width;
-  for (let column = 0; column < gray.width; column += 1) {
-    total += Math.abs(gray.data[offsetA + column] - gray.data[offsetB + column]);
+/** Share of a strip's pixels that are content (see {@link BORDER_CONTENT_CONTRAST}). */
+function stripContent(values: number[], background: number): number {
+  let content = 0;
+  for (const value of values) {
+    if (Math.abs(value - background) > BORDER_CONTENT_CONTRAST) content += 1;
   }
-  return total / Math.max(1, gray.width);
+  return content / Math.max(1, values.length);
 }
 
-function meanColumnDifference(
-  gray: GrayImage,
-  columnA: number,
-  columnB: number,
-): number {
+/**
+ * Whether one strip is a copy of another: close on average *and* close where
+ * there is something to compare (see {@link BORDER_REPEAT_CHANGED_FRACTION}).
+ * Two blank strips are copies — {@link sideRepeat} never asks about those.
+ */
+function stripsMatch(a: number[], b: number[], background: number): boolean {
   let total = 0;
-  for (let row = 0; row < gray.height; row += 1) {
-    total += Math.abs(
-      gray.data[row * gray.width + columnA] - gray.data[row * gray.width + columnB],
+  let content = 0;
+  let changed = 0;
+  for (let index = 0; index < a.length; index += 1) {
+    const difference = Math.abs(a[index] - b[index]);
+    total += difference;
+    if (
+      Math.abs(a[index] - background) <= BLANK_TOLERANCE &&
+      Math.abs(b[index] - background) <= BLANK_TOLERANCE
+    ) {
+      continue;
+    }
+    content += 1;
+    const contrast = Math.max(
+      Math.abs(a[index] - background),
+      Math.abs(b[index] - background),
     );
+    if (difference > Math.max(BLANK_TOLERANCE, BORDER_REPEAT_CHANGE_CONTRAST * contrast)) {
+      changed += 1;
+    }
   }
-  return total / Math.max(1, gray.height);
-}
-
-function stripDeviation(values: number[]): number {
-  const mean = values.reduce((total, value) => total + value, 0) / Math.max(1, values.length);
-  const variance =
-    values.reduce((total, value) => total + (value - mean) * (value - mean), 0) /
-    Math.max(1, values.length);
-  return Math.sqrt(variance);
+  return (
+    total / Math.max(1, a.length) <= BORDER_REPEAT_TOLERANCE &&
+    changed <= BORDER_REPEAT_CHANGED_FRACTION * content
+  );
 }
 
 function rowValues(gray: GrayImage, row: number): number[] {
@@ -173,14 +225,18 @@ function columnValues(gray: GrayImage, column: number): number[] {
  * outermost strip scores zero: a blank margin repeating itself is a page, not
  * a smear.
  */
-function sideRepeat(outermost: number[], differences: number[]): number {
-  if (stripDeviation(outermost) < BORDER_CONTENT_STDEV) return 0;
+function sideRepeat(
+  outermost: number[],
+  matches: boolean[],
+  background: number,
+): number {
+  if (stripContent(outermost, background) < BORDER_CONTENT_FRACTION) return 0;
   let same = 0;
-  for (const difference of differences) {
-    if (difference > BORDER_REPEAT_TOLERANCE) break;
+  for (const match of matches) {
+    if (!match) break;
     same += 1;
   }
-  return same / Math.max(1, differences.length);
+  return same / Math.max(1, matches.length);
 }
 
 export function occupancyStats(gray: GrayImage): OccupancyStats {
@@ -219,22 +275,21 @@ export function occupancyStats(gray: GrayImage): OccupancyStats {
   );
   const sides: number[] = [];
   if (depth > 0) {
-    const top: number[] = [];
-    const bottom: number[] = [];
-    const left: number[] = [];
-    const right: number[] = [];
-    for (let step = 1; step <= depth; step += 1) {
-      top.push(meanRowDifference(gray, 0, step));
-      bottom.push(meanRowDifference(gray, gray.height - 1, gray.height - 1 - step));
-      left.push(meanColumnDifference(gray, 0, step));
-      right.push(meanColumnDifference(gray, gray.width - 1, gray.width - 1 - step));
+    // Each side's strips, counted inward from its outermost one.
+    const stripsInward: Array<(step: number) => number[]> = [
+      (step) => rowValues(gray, step),
+      (step) => rowValues(gray, gray.height - 1 - step),
+      (step) => columnValues(gray, step),
+      (step) => columnValues(gray, gray.width - 1 - step),
+    ];
+    for (const strip of stripsInward) {
+      const outermost = strip(0);
+      const matches: boolean[] = [];
+      for (let step = 1; step <= depth; step += 1) {
+        matches.push(stripsMatch(outermost, strip(step), background));
+      }
+      sides.push(sideRepeat(outermost, matches, background));
     }
-    sides.push(
-      sideRepeat(rowValues(gray, 0), top),
-      sideRepeat(rowValues(gray, gray.height - 1), bottom),
-      sideRepeat(columnValues(gray, 0), left),
-      sideRepeat(columnValues(gray, gray.width - 1), right),
-    );
   }
 
   return {
@@ -497,6 +552,95 @@ export interface SemanticMeasurement {
 export function measureSurface(image: RgbaImage): SemanticMeasurement {
   const gray = toGray(downscale(image, SEMANTIC_LONG_EDGE));
   return { occupancy: occupancyStats(gray), straightness: lineStraightness(gray) };
+}
+
+/* ── The candidate rendering ───────────────────────────────────────────── */
+
+export interface SemanticCandidateRequest {
+  /** The full-resolution canonical the grid is expressed against. */
+  canonical: RgbaImage;
+  /** The caller's flat rendering — its size is the size the candidate takes. */
+  baseline: RgbaImage;
+  /**
+   * The scaled copy of the canonical the caller warped `baseline` from.
+   *
+   * With it, the candidate goes through exactly the baseline's chain — the
+   * same source pixels, one bilinear warp at the same output size, then the
+   * same {@link measureSurface} downscale — so a geometrically identical page
+   * measures identically. Without it (a caller that never had a small copy)
+   * the candidate is sampled once from the canonical at the comparison size,
+   * which is sharper than any flat rendering and reads as *lost ink*: every
+   * resample the baseline went through thickens its strokes, and the ink
+   * clause is an absolute delta of two percent.
+   */
+  baselineSource?: RgbaImage;
+  grid: CoarseGrid;
+  crop: CropBox;
+  /** The page's full output size — only used without a `baselineSource`. */
+  outputWidth: number;
+  outputHeight: number;
+  shouldCancel?: () => boolean;
+}
+
+/**
+ * Whether `copy` can stand in for `canonical` as the candidate's source: a
+ * real image, and a *reduction* of the canonical — anything else is not the
+ * copy the baseline was warped from, and the candidate falls back to the
+ * canonical rather than being sampled through a scale it cannot mean.
+ */
+function isScaledCopy(copy: RgbaImage, canonical: RgbaImage): boolean {
+  return (
+    copy.width >= 1 &&
+    copy.height >= 1 &&
+    copy.width <= canonical.width &&
+    copy.height <= canonical.height &&
+    copy.data.length >= copy.width * copy.height * 4
+  );
+}
+
+/**
+ * Render the dewarped page for the A/B, through the baseline's own pipeline.
+ *
+ * With a usable `baselineSource`, the candidate is sampled from it at the
+ * baseline's own size, positions mapped pixel-centre to pixel-centre
+ * (`sampler.ts :: toScaledCopy`). Without one — an older caller, or a copy that
+ * is not a reduction of the canonical — it is the single sample from the
+ * canonical at the comparison size, as before.
+ *
+ * Null when `shouldCancel` says so between bands.
+ */
+export function renderSemanticCandidate(
+  request: SemanticCandidateRequest,
+): RgbaImage | null {
+  const { canonical, baseline, baselineSource, grid, crop } = request;
+  const cancel =
+    request.shouldCancel === undefined ? {} : { shouldCancel: request.shouldCancel };
+  if (baselineSource === undefined || !isScaledCopy(baselineSource, canonical)) {
+    const preview = fitLongEdge(
+      request.outputWidth,
+      request.outputHeight,
+      SEMANTIC_LONG_EDGE,
+    );
+    return renderThroughGrid({
+      source: canonical,
+      grid,
+      crop,
+      width: preview.width,
+      height: preview.height,
+      ...cancel,
+    });
+  }
+  const scale = copyScale(canonical, baselineSource);
+  return renderThroughGrid({
+    source: baselineSource,
+    grid,
+    crop,
+    width: baseline.width,
+    height: baseline.height,
+    // The canonical itself (it already fit) is sampled as it is.
+    ...(scale.x === 1 && scale.y === 1 ? {} : { sourceScale: scale }),
+    ...cancel,
+  });
 }
 
 /** Extra blank border the dewarp may introduce before it counts as lost page. */

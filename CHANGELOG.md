@@ -167,6 +167,79 @@ freezes at 1.0.
   of view (`npm run bench:quality -- --case cap-fov` forces the cap on in
   the bench and checks found share, ready cue and fill against the native
   page). `stream-cap` now reports `disabled`.
+- **Endireitar records, shows and claims only what it did to a page.** A
+  straighten that could not finish (its code would not download, a readback
+  ran out of memory) used to be remembered as "no rotation" for that photo, so
+  the tilt was never fixed again until the corners changed, and the card
+  offered "tocar de novo dá a mesma resposta". It is now forgotten, the card
+  says a retry may help, and the next tap plans again. A turned page came out
+  a few percent stretched on a perspective outline (the flattener sized it
+  from the turned outline's own sides): it is now rendered at the confirmed
+  outline's size, in one resample, and keeps its proportions. The PDF's
+  `/Subject` now says a page was turned to level its print and by how much
+  (`deskewed 3.5deg`), and whether paper was painted into the corners the
+  turn uncovered (`corners filled`). "Sem melhorias" is no longer offered on a
+  turned page, whose comparison would have shown a different geometry. The
+  "both" card ("endireitamos o texto torto e tiramos a curva") needs the
+  engine's page measured level: 3 synthetic pages that kept 0.5–1.6° of tilt
+  now say only that the curve was taken out. "A folha, plana" needs a bow
+  looked for on at least three lines. A turned page whose curve check failed
+  (a timeout, a download) says so and how to try the curve again, in the warn
+  tone, instead of "a curva ficou como estava". The deskew's own check now
+  refuses a turn whose result it cannot measure, and one that pushes a rule or
+  a printed border out of the frame, not only glyphs. The card no longer
+  pulses again when you swipe back to a page. On the synthetic bench every
+  verdict is unchanged (225 of 255 fixed, no harm) and on the real stills too
+  (23 of 30); one synthetic seam flag flips at its threshold (6.0 grey
+  levels, the fill's step across its edge still within ±1).
+- **Endireitar says what it corrected, and answers a second tap.** After a
+  tap the card now names what happened: the tilted text was straightened,
+  the curve was taken out, both, or the text was straightened and the curve
+  left as it was. Before, a page whose tilt was fixed while the engine left
+  the curl alone said nothing about either. When the deskew measures the print
+  level and the level page flat, and the engine then declines, the card says
+  there was nothing to straighten. Any other decline is a limit of the
+  correction, and its sentence now says so ("não deu para endireitar esta
+  página com segurança", "está além do que o Endireitar consegue corrigir")
+  instead of "Conferimos: esta página fica melhor como está". That old
+  sentence was shown over pages the engine simply could not handle. When the
+  engine changes a page the deskew measured level and flat, the card claims
+  no curl. The support code stays beside every decline, including the curl's
+  code under a fixed tilt. Tapping Endireitar again over an answer that
+  cannot change for this photo used to do nothing at all. Now the card comes
+  forward, is announced again, and says that adjusting the corners or
+  retaking the photo is what would change it. The help text and the "about"
+  sheet now mention tilted text. On both benches every page's pixels and
+  verdict are unchanged. The synthetic bench shows "nothing to straighten" on
+  8 pages and the real stills on 10, all of them pages with nothing to do.
+- **Endireitar stops reading a sharper page as lost text.** Its before/after
+  check compared the flat page (the photo shrunk to 896 px, warped, shrunk
+  again) with a straightened page sampled once from the full photo. The
+  straightened page's thinner strokes counted as lost ink, so curled pages
+  that the correction had fixed were kept flat with "Conferimos: esta página
+  fica melhor como está." The straightened page is now judged from the same
+  small copy, at the same size, with the page's corners placed on that copy by
+  pixel centre and per axis, as the browser's own downscale places them. On
+  the synthetic bench, curled pages fixed go from 13 to 25 of 51 and all fixes
+  from 49 to 73 of 255. On the labelled real stills they go from 4 to 7 of 30.
+  There is one new harm, a 0.3° tilt increase on a page that was already
+  nearly level. Three tilted pages that were fixed before are now kept flat.
+  On a tilted flat page the check finds only 2 or 3 text lines, and a shift of
+  a quarter of a pixel can decide which.
+- **Endireitar stops reading a tilted page edge as smeared print.** Its check
+  for rows or columns copied inward at the page edge (what a correction that
+  runs off the photo leaves) called two strips copies when they were close on
+  average. On a mostly blank edge strip a few dark pixels of background or
+  glyph could all change and still pass, so small tilts were kept flat. Two
+  strips are now copies only when at most a tenth of their marked pixels
+  changed, measured against each pixel's own contrast so JPEG noise on a real
+  smear does not hide it. A strip also needs 2 % of its pixels clearly off the
+  paper, so a band of background pulled in along an edge now counts, and a
+  pale mark crossing the edge does not. On the synthetic bench, fixes go from
+  73 to 81 of 255 and partial fixes from 17 to 27. Two pages that had the
+  table pulled in along an edge are now kept flat. One form tilted 4° is now
+  accepted with its edges bent; the old check only turned it down by chance.
+  The labelled real stills do not change.
 - **The rail's camera fills the whole screen again.** A Phase 5a build
   letterboxed it (`contain`, sized to the screen above the controls); with a
   browser's bars, a gesture bar or larger text a 9:16 stream then shrank on
@@ -264,6 +337,33 @@ freezes at 1.0.
   description. "Endireitar" keeps its icon and word when on.
 
 ### Added
+- **Endireitar straightens tilted print.** A tap on Endireitar now first
+  measures the tilt of the print on the flat page and turns the page level
+  when the print sits crooked inside a right outline — a photocopy fed
+  askew, an outline confirmed a few degrees off. The page's corners stay as
+  the user confirmed them; the rotation is applied with them in the same
+  single warp. It is refused, and the page left as it was, unless the text
+  is plainly in lines at one angle: a page lying on its side, a level heading
+  over a skewed body, handwriting across level rules, a graphic or too little
+  text all keep their tilt. A page counts as on its side only when its print
+  lines up more sharply a quarter turn away, not merely more strongly: a dense
+  form's columns line glyphs up vertically too. The turned page is then checked against the flat
+  page it came from — more level, lines no less straight, no print pushed
+  out of the frame — or the turn is dropped. The corners the turn uncovers
+  are filled with the paper right beside them, shading included. Where the
+  turn reaches past the photo, the photo's edge is not smeared into the page,
+  except along an edge where the frame already showed the table: there the
+  table carries on past the photo instead of a patch of paper landing in it. The
+  curved-page engine runs only when the level page still shows a curl, on
+  the confirmed outline as before, and the turn is what the page keeps when
+  the engine declines. On the synthetic bench, pages fixed go from 81 to 225
+  of 255 (tilt-only pages 56 → 200 of 204) with no new harm; the engine runs
+  on 78 of 279 pages instead of all of them. On the labelled real stills,
+  fixes go from 7 to 23 of 30. The switch stays on over a page whose tilt
+  was fixed, whatever the engine said about the curl, and a timeout on the
+  curl no longer takes the turn away on the next edit. A corner edit
+  discards a stored turn or curvature map, which used to be reused on the new
+  corners.
 - **`onDiagnostics` (experimental): a field-test event stream.** Versioned,
   typed events (`ScanDiagnosticsEvent`) for the session, camera, lane, live
   loop (sampled at most twice in any second), visible region, hints, ready cue,

@@ -5,8 +5,12 @@
  * the repo's git-ignored `.bench-out/`, real ones only into the cache outside
  * the repository. A suite that is not built yet says so instead of pretending.
  * Real suites (`synthetic: false`) need `SCAN_REAL_MEDIA`.
- * `--suite all` runs every suite marked `inAll`; the emulator's self-check is
- * run by name.
+ * `--suite all` runs every suite marked `inAll`; the emulator's self-check and
+ * the Endireitar (straighten) suites are run by name.
+ *
+ * `runtime: "node"` marks a suite that needs no bench page: the runner builds
+ * and launches nothing for it, asks its `config(options)` for the run's
+ * config and hands that to `run`.
  */
 
 import { runDetectorSuite } from "./detector.mjs";
@@ -14,6 +18,8 @@ import { runEmulatorSuite } from "./emulator.mjs";
 import { runRealStillsSuite } from "./real-stills.mjs";
 import { runRealVideoSuite } from "./real-video.mjs";
 import { runSessionSuite } from "./session.mjs";
+import { runStraightenRealSuite, straightenRealSuiteConfig } from "./straighten-real.mjs";
+import { runStraightenSuite, straightenSuiteConfig } from "./straighten.mjs";
 
 export const SUITES = {
   detector: { synthetic: true, run: runDetectorSuite, implemented: true, inAll: true },
@@ -22,4 +28,7 @@ export const SUITES = {
   "real-stills": { synthetic: false, run: runRealStillsSuite, implemented: true, inAll: true },
   "real-video": { synthetic: false, run: runRealVideoSuite, implemented: true, inAll: true },
   emulator: { synthetic: true, run: runEmulatorSuite, implemented: true, inAll: false },
+  // Endireitar (dewarp + text deskew) on the page the user would see; Node only.
+  straighten: { synthetic: true, runtime: "node", config: straightenSuiteConfig, run: runStraightenSuite, implemented: true, inAll: false },
+  "straighten-real": { synthetic: false, runtime: "node", config: straightenRealSuiteConfig, run: runStraightenRealSuite, implemented: true, inAll: false },
 };

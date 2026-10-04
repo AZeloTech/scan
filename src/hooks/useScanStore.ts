@@ -4,6 +4,7 @@ import * as React from "react";
 import {
   createScanStore,
   type DewarpActivity,
+  type DewarpRetap,
   type PdfBuild,
   type ScanSession,
   type ScanState,
@@ -237,6 +238,11 @@ export function useDocumentName(): string | null {
  */
 export function useDewarpActivity(): DewarpActivity | null {
   return useStoreState((state) => state.dewarpActivity);
+}
+
+/** The last tap on Endireitar the store answered with the verdict already on screen. */
+export function useDewarpRetap(): DewarpRetap | null {
+  return useStoreState((state) => state.dewarpRetap);
 }
 
 /**
