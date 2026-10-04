@@ -33,6 +33,8 @@ import { ScanStoreProvider } from "./hooks/useScanStore";
 import { FlowNavigationProvider } from "./hooks/useFlowNavigation";
 import { ScanRuntimeProvider, type ScanRuntime } from "./hooks/useScanRuntime";
 import { FlowScreens } from "./FlowScreens";
+import { PhotoImportProvider } from "./hooks/usePhotoImport";
+import { isDesktopSurface } from "./lib/environment";
 import { LangProvider } from "./components/I18n";
 import { createExitGate, type ExitGate } from "./lib/exit-gate";
 import { SHELL_ROOT_STYLE } from "./lib/shell-theme";
@@ -50,6 +52,7 @@ export function ScanFlow(props: ScanFlowProps) {
     maxBytes,
     defaultFileName: fileNameProp,
     intake,
+    initialImages,
     onComplete,
     onCancel,
     onPagesChange,
@@ -65,6 +68,25 @@ export function ScanFlow(props: ScanFlowProps) {
   } = props;
 
   const captureLayout = pickCaptureLayout(captureLayoutProp, experimentalCaptureLayout);
+
+  /**
+   * The host's photos, copied once on mount (`initialImages` is read once:
+   * a host re-rendering with a new array must not re-import, or reset, the
+   * document somebody is already working on).
+   */
+  const [seed] = useState<readonly File[]>(() => Array.from(initialImages ?? []));
+
+  /**
+   * The surface is decided once, at mount, and never re-read.
+   *
+   * It answers "is there a camera worth pointing at paper", which does not
+   * change while somebody is scanning — but a window that crosses a breakpoint
+   * mid-flow would otherwise swap the whole interface out from under them and
+   * lose the screen they were on. Decided here rather than in `FlowScreens`
+   * because the phone's first step depends on it: a flow seeded with photos
+   * opens on the review list, not the viewfinder.
+   */
+  const [desktop] = useState(() => intake?.camera === false || isDesktopSurface());
 
   /** The auto-capture choice, for this flow only: off in every new one. */
   const autoCaptureChosen = useRef(false);
@@ -276,8 +298,16 @@ export function ScanFlow(props: ScanFlowProps) {
               onExit={(reason) => cancel(reason, pageCountRef.current)}
               onStep={handleStep}
               isFinished={isFinished}
+              initialStep={!desktop && seed.length > 0 ? "review" : "capture"}
             >
-              <FlowScreens onComplete={complete} onPagesChange={handlePagesChange} />
+              <PhotoImportProvider>
+                <FlowScreens
+                  desktop={desktop}
+                  initialImages={seed}
+                  onComplete={complete}
+                  onPagesChange={handlePagesChange}
+                />
+              </PhotoImportProvider>
             </FlowNavigationProvider>
           </ScanStoreProvider>
         </ScanRuntimeProvider>

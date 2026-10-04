@@ -259,7 +259,9 @@ test("one refused file costs one row, never the batch", async () => {
   );
   assert.deepEqual(
     state.settled.map((row) => `${row.key}:${row.error ?? "ok"}`),
-    ["a:ok", "b:unsupported", "c:ok"],
+    // A HEIC the browser could not decode is named as such: the format is
+    // the reason, and the row's sentence says what to do instead.
+    ["a:ok", "b:heic", "c:ok"],
   );
   assert.equal(state.added, 2);
   // A refusal is not the document filling up.

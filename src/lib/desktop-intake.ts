@@ -21,7 +21,7 @@
  * costs them nothing they can perceive.
  */
 
-import { captureFromFile, type Capture } from "@/lib/capture-intake";
+import { captureFromFile, type Capture, type CapturePath } from "@/lib/capture-intake";
 import { ACCEPTED_UPLOAD_TYPES, isAcceptedImageType } from "@/lib/image";
 import { ImagePrepError } from "@/lib/image-error";
 import { importPdf, isPdfFile, type PdfPageSink } from "@/lib/pdf-import";
@@ -254,6 +254,12 @@ export interface IntakeSink {
   cancelled: () => boolean;
 }
 
+/** A HEIC/HEIF photo, by MIME type or — since several browsers report `""` — by extension. */
+export function isHeicFile(file: File): boolean {
+  if (/^image\/hei[cf](-sequence)?$/i.test(file.type)) return true;
+  return /\.hei[cf]$/i.test(file.name);
+}
+
 /**
  * A file whose type the app does not claim to read, handed to the decoder
  * anyway.
@@ -298,9 +304,12 @@ export interface IntakeDecoders {
  * image path runs corner detection, the PDF path loads the pdf.js runtime, and
  * neither can be resolved until a host has told us where its copy lives.
  */
-export function browserDecoders(assets: AssetUrls): IntakeDecoders {
+export function browserDecoders(
+  assets: AssetUrls,
+  path: CapturePath = "desktop",
+): IntakeDecoders {
   return {
-    image: (file) => captureFromFile(bestEffort(file), assets, "desktop"),
+    image: (file) => captureFromFile(bestEffort(file), assets, path),
     pdf: (file, sink) => importPdf(file, sink, assets),
   };
 }
@@ -356,6 +365,12 @@ export async function runIntake(
       }
     } catch (thrown) {
       error = thrown instanceof ImagePrepError ? thrown.code : "generic";
+      // A HEIC this browser could not decode reads as "unsupported" or "prep"
+      // from the decoder, and both sentences send the person to the wrong
+      // place. The format is the reason, and the camera is the way out.
+      if ((error === "unsupported" || error === "prep") && isHeicFile(item.file)) {
+        error = "heic";
+      }
     }
     if (sink.cancelled()) return;
     sink.onSettled(item.key, pageIds, error);

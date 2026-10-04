@@ -9,6 +9,8 @@
  */
 
 export { ScanFlow } from "./ScanFlow";
+export { preloadScanAssets } from "./preload";
+export type { PreloadScanAssetsOptions } from "./preload";
 
 export type {
   ScanFlowProps,

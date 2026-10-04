@@ -239,6 +239,8 @@ export interface CaptureChromeParts {
    */
   gallery: {
     busy: boolean;
+    /** The picker may take several photos at once (see `CaptureStage`'s `onFiles`). */
+    multiple: boolean;
     onChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   } | null;
   shutter: {
@@ -325,6 +327,13 @@ interface CaptureStageProps {
    * no network, no images.
    */
   diagnostics?: boolean;
+  /**
+   * Several photos picked at once from "Já tenho a foto". Present: the gallery
+   * picker allows multiple selection, and a pick of two or more is handed over
+   * here whole instead of going through the confirm screen one by one (a pick
+   * of one still does). Absent — the retake sheet — the picker takes one.
+   */
+  onFiles?: (files: File[]) => void;
 }
 
 export function CaptureStage({
@@ -344,6 +353,7 @@ export function CaptureStage({
   onAutoCaptureChange,
   chrome,
   diagnostics = false,
+  onFiles,
 }: CaptureStageProps) {
   const copy = useCopy();
   // The asset base the host gave the flow. Every loader below is handed it
@@ -1263,9 +1273,14 @@ export function CaptureStage({
 
   const handleFile = React.useCallback(
     async (event: React.ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
+      const picked = Array.from(event.target.files ?? []);
       // Let the same file be picked twice in a row.
       event.target.value = "";
+      if (picked.length > 1 && onFiles !== undefined) {
+        onFiles(picked);
+        return;
+      }
+      const file = picked[0];
       if (file === undefined) return;
       busyRef.current = true;
       setBusy(true);
@@ -1287,8 +1302,20 @@ export function CaptureStage({
         setBusy(false);
       }
     },
-    [copy, onCapture, pageNumber, path, reportPrepFailure, urls],
+    [copy, onCapture, onFiles, pageNumber, path, reportPrepFailure, urls],
   );
+
+  /**
+   * Where "Já tenho a foto" is offered. Live, as always — and on the fallback
+   * surface of a phone as well: that surface opens the device's own camera app
+   * (`capture="environment"`), which on most phones skips the photo library
+   * entirely, so without this a person whose browser cannot open the camera
+   * here (an in-app browser, a refused permission) could only shoot, never
+   * pick the photo they already took. On a computer the fallback surface *is*
+   * the file chooser, so a second one would only repeat it.
+   */
+  const galleryOffered =
+    !disabled && intakeImages && (mode === "live" || (mode === "fallback" && !pickerOnly));
 
   /**
    * The fallback surface goes through `prepareCapture` + the full detect the
@@ -1860,9 +1887,10 @@ export function CaptureStage({
           hasQuad: detect.hasQuad,
           notice: stageNotice,
           gallery:
-            mode === "live" && !disabled && intakeImages
+            galleryOffered
               ? {
                   busy,
+                  multiple: onFiles !== undefined,
                   onChange: (event) => {
                     void handleFile(event);
                   },
@@ -1892,7 +1920,7 @@ export function CaptureStage({
           the screen wants on the right — three real targets rather than two
           captions around a button (see `CameraActionBar`). */}
       <CameraActionBar>
-        {mode === "live" && !disabled && intakeImages ? (
+        {galleryOffered ? (
           <CameraPill
             icon={<ImageIcon size={16} />}
             label={copy.capture.gallery}
@@ -1902,6 +1930,7 @@ export function CaptureStage({
               <input
                 type="file"
                 accept={ACCEPT_ATTRIBUTE}
+                multiple={onFiles !== undefined}
                 disabled={busy}
                 className="scan-sr-only"
                 onChange={(event) => {

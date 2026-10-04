@@ -72,6 +72,13 @@ asset pipeline. Copy them into a folder you serve unhashed and pass its URL as
 `assetBaseUrl`. Re-run the command when you upgrade the package; a `prebuild`
 script or a `RUN` line in your Dockerfile is the usual home for it.
 
+**Install from the registry or from a packed tarball, not from git.** `dist/`
+and most of `assets/` are build output and are not committed, and there is no
+`prepare` script to build them on install, so a `github:` dependency installs a
+package whose entry points do not exist. To try an unpublished commit, run
+`npm ci && npm run build && npm pack` in a checkout and install the `.tgz`. The
+tarball carries no source maps (the code is shipped unminified).
+
 The folder is about 9 MB on disk, but a session downloads only what it uses:
 ~3.4 MB of model and runtime on the first capture, and pdf.js (5 MB) only if you
 turn `intake.pdf` on.
@@ -154,10 +161,11 @@ Full types ship with the package (`ScanFlowProps`). In short:
 | `maxBytes` | a hard budget. Quality steps down a fixed ladder to fit, and refuses rather than exceed it. Pass the same limit your upload path enforces. |
 | `defaultFileName` | the finished file's name, used **verbatim**. When you pass it, the flow shows no way to name the document (no marking chips, no text field) and the PDF's `/Title` is this name without `.pdf`. Without it the flow composes `<yyyymmdd>-<hhmm>_<marking>.pdf` from the scan's start and a marking — "exame" unless the person picks another ("receita"…, or a short slugged text) on the screen a failed build falls back to, or on the desktop flow's step 3, and `/Title` is that file name without `.pdf` — typed text never reaches the metadata as typed. Keep personal data out of it; pass it if your application must not receive anything a person typed. |
 | `intake` | which sources are offered: `camera`, `images`, `pdf`. pdf.js loads only if you enable it, and the file-picker copy only mentions PDFs when it is on. |
+| `initialImages` | photos you already hold (`readonly File[]`), turned into the first pages. **Read once, on mount** — later changes are ignored; remount with a new `key` for a new document. See [Starting from photos](#starting-from-photos). |
 | `onComplete` | fires once, with the exact `File`, its page count and its byte size. Final. |
 | `onCancel` | a request to close, with `"user"` (never final — see above) or `"error"` (final). |
 | `onPagesChange` | how many pages are held, so you can ask before discarding. |
-| `onEvent` | step, capture, quality, size and error events. Numbers and enums only — never image data, never a file name. Safe to forward straight to analytics. |
+| `onEvent` | step, capture (`source: "file"` for every page read from a file — `initialImages`, a multi-pick, the desktop picker), quality, size and error events. Numbers and enums only — never image data, never a file name. Safe to forward straight to analytics. |
 | `className` | applied to the library's root element, for layout only. |
 | `captureLayout` | default `"rail"`. The capture screen (step 1). `"rail"`: the camera full-bleed, the hint under the top row, a MANUAL · AUTOMÁTICO (BETA) mode rail over the shutter (see `experimentalAutoCapture`), the newest page and the onward button either side of the shutter, and "Já tenho a foto" (when `intake.images` is on) as a small text button under it. `"standard"`: the screen that shipped before — header, viewfinder card, thumbnail rail, control row with the gallery pill — kept for hosts that want it (`"default"` is its deprecated old name and still works). **Experimental** alternatives, which may change or go away in any release and have no in-camera gallery pick: `"classic"` (translucent bottom bar), `"filmstrip"` (camera on top, the pages as a numbered strip under it), `"onehand"` (no bars, controls down the right edge, the hint hung on the page's corner), `"collapse"` (classic while searching, folding into one capsule while the page is ready). Every layout is the same capture stage — same detection, hints, ready cue on the brackets, torch, notices, page limit, confirm-corners screen after every photo, retake and corner editor, camera-refused file surface, and a shutter that works in every state. Unknown values fall back to `"rail"`. `experimentalCaptureLayout` is the deprecated old name of this prop (read only when `captureLayout` is absent). |
 | `experimentalDiagnostics` | **experimental**, default `false`. A small HUD over the viewfinder for testing on a real phone: detection lane (and why, if not the worker), detection time and its median, the loop's cadence, frame age, stream and photo size, the part of the frame the person can see and the layout's fit, torch and vibration support, the ready cue and auto-capture's state and fires, and — while the cue is off or auto-capture has not fired — `why:` the first thing holding it back (no page, a hint, a pass that missed, the camera moved, no fresh pass, too few readings, stillness or drift, the countdown). Numbers only: it stores nothing, sends nothing and reads no pixels. Its glass is 40 % dark, so the picture — and a page corner — stays visible through it. Leave it off in production. |
@@ -241,6 +249,67 @@ yours to set:
 The capture screen ignores all of it and stays dark on purpose: a viewfinder on
 a light shell reads badly, and the corner brackets need the contrast.
 
+### Starting from photos
+
+```tsx
+<ScanFlow
+  assetBaseUrl="/scan-assets"
+  initialImages={photos}            // File[] from your own picker or drop zone
+  intake={{ camera: true, images: true, pdf: false }}
+  onComplete={({ file }) => attach(file)}
+  onCancel={close}
+/>
+```
+
+Each photo goes through exactly what a pick from the file chooser goes
+through — the quality gate, corner detection, the `maxPages` cap and the
+per-file refusals — in the array's order, one at a time (one full-resolution
+decode in memory at once). HEIC/HEIF is best effort: Safari decodes it, most
+other browsers do not, and such a file is refused with its own message ("take
+the photo with the camera"). A PDF in the array is refused unless `intake.pdf`
+is on and the desktop surface is showing.
+
+- **Phone surface:** the flow opens on the review step instead of the
+  viewfinder, with a "Processando N fotos…" line and a progress bar while the
+  photos are read; pages appear in the list as they land. Every page opens in
+  the page editor (corners, turn, finish, straighten) as usual, and "mais uma
+  página" photographs more when `intake.camera` is on. When the photos outnumber
+  the room left, the screen says so before reading them ("Só as primeiras 20
+  entram; o resto pode ir num segundo documento.").
+- **Desktop surface:** the photos fill step 1's list (with its per-file
+  progress and refusals) and the flow moves on to step 2 («Conferir») once they
+  are read — unless one was refused or left out by the cap, in which case it
+  stays on step 1, where the reason is written next to the file.
+- **None could be opened:** an `error` event with `images_unreadable`. On the
+  phone it is recoverable — the flow stays on the review step, says why, and its
+  primary button becomes "Fotografar página 1". On the desktop it is final and
+  `onCancel("error")` follows.
+
+The same intake serves the phone's own multi-select: "Já tenho a foto" and the
+permission screen's gallery button accept several photos at once. One photo
+still goes through the confirm-corners screen; two or more go straight to the
+review step, the same way as above. When the browser cannot open the camera
+here (an in-app browser, an insecure page, a refused permission), the capture
+screen's fallback surface opens the device's own camera app, and "Já tenho a
+foto" stays beside it for photos already taken.
+
+### Warming up before the sheet opens
+
+```ts
+import { preloadScanAssets } from "@azelotech/scan";
+
+const release = preloadScanAssets({ assetBaseUrl: "/scan-assets" });
+// …the person taps "scan"; <ScanFlow> mounts onto a warm detector.
+// If they close without scanning:
+release();
+```
+
+Starts the detection worker and, through it, the corner model's download and
+compile (~3.4 MB), the same work `<ScanFlow>` starts when its viewfinder mounts.
+The warm worker is kept while anything holds it and for about a minute after
+the last release. Importing it does nothing; it fetches only this library's own
+files.
+
 ### Proving your wiring works
 
 Asset paths are the one thing a build cannot verify, because the files are
@@ -259,6 +328,14 @@ It loads the model, runs one inference, starts the detection worker once
 host checklist) and builds a PDF from a drawn placeholder. Run it once behind a feature flag after wiring `assetBaseUrl` for
 the first time, and get a plain answer instead of a mystery 404 in somebody's
 console three weeks later.
+
+### History, scrolling and the page around it
+
+The library never touches `window.history` (no `pushState`, no `popstate`
+listener, no hash) and sets nothing on `<html>` or `<body>`: its stylesheet is
+scoped to `.scan-root`, and the only `overscroll-behavior` it sets is on its own
+scrolling panes and overlays. The back button, a history entry for the open
+sheet and pull-to-refresh are the host's to manage.
 
 ## Host checklist
 

@@ -356,6 +356,23 @@ export interface AppCopy {
     announceBlocked: (n: number) => string;
     announceWorking: string;
     announceReady: (n: number) => string;
+    /**
+     * Several photos read in one go (`initialImages`, or a multi-pick from the
+     * gallery): the line above the list while they are read, and what became
+     * of them once they have been.
+     */
+    importing: {
+      /** "Processando 4 fotos…" — the line's title while the run is on. */
+      working: (total: number) => string;
+      /** The mono counter beside it. */
+      progress: (done: number, total: number) => string;
+      /** The cap is shorter than the pile: said before the first photo is read. */
+      overflow: (fits: number) => string;
+      /** Some photos could not be opened; the reasons follow, one per line. */
+      refusedTitle: (n: number) => string;
+      /** Not one of them could be opened. */
+      noneTitle: string;
+    };
   };
 
   gerar: {
@@ -1142,6 +1159,16 @@ const PT: AppCopy = {
     announceBlocked: (n) =>
       `${n} ${n === 1 ? "página com problema" : "páginas com problema"}. Resolva antes de gerar o PDF.`,
     announceWorking: "Ainda estamos preparando suas páginas.",
+    importing: {
+      working: (n) => `Processando ${n} ${n === 1 ? "foto" : "fotos"}…`,
+      progress: (done, total) => `${done} de ${total}`,
+      overflow: (fits) =>
+        fits === 1
+          ? "Só a primeira entra; o resto pode ir num segundo documento."
+          : `Só as primeiras ${fits} entram; o resto pode ir num segundo documento.`,
+      refusedTitle: (n) => (n === 1 ? "1 foto não entrou" : `${n} fotos não entraram`),
+      noneTitle: "Nenhuma das fotos pôde ser aberta",
+    },
     announceReady: (n) =>
       `${n} ${n === 1 ? "página pronta" : "páginas prontas"}.`,
   },
@@ -1616,6 +1643,7 @@ const PT: AppCopy = {
       "Esse tipo de foto a gente ainda não consegue ler. Tire a foto de novo pela câmera, por favor.",
     camera_waking: "A câmera ainda está acordando. Tente de novo em um instante.",
     generic: "Não conseguimos preparar esta página. Quer tentar de novo?",
+    heic: "Este formato de foto (HEIC) não abre aqui — tire a foto pela câmera.",
   },
 
   buildErrors: {
@@ -1833,6 +1861,16 @@ const EN: AppCopy = {
     announceBlocked: (n) =>
       `${n} ${n === 1 ? "page has a problem" : "pages have problems"}. Resolve them before creating the PDF.`,
     announceWorking: "We are still preparing your pages.",
+    importing: {
+      working: (n) => `Processing ${n} ${n === 1 ? "photo" : "photos"}…`,
+      progress: (done, total) => `${done} of ${total}`,
+      overflow: (fits) =>
+        fits === 1
+          ? "Only the first one fits; the rest can go in a second document."
+          : `Only the first ${fits} fit; the rest can go in a second document.`,
+      refusedTitle: (n) => (n === 1 ? "1 photo was left out" : `${n} photos were left out`),
+      noneTitle: "None of the photos could be opened",
+    },
     announceReady: (n) => `${n} ${n === 1 ? "page" : "pages"} ready.`,
   },
 
@@ -2294,6 +2332,7 @@ const EN: AppCopy = {
       "We cannot read that kind of photo yet. Please take the photo again with the camera.",
     camera_waking: "The camera is still waking up. Try again in a moment.",
     generic: "We could not prepare this page. Shall we try again?",
+    heic: "This photo format (HEIC) does not open here — take the photo with the camera.",
   },
 
   buildErrors: {

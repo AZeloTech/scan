@@ -103,8 +103,11 @@ export type PageStatus = "processing" | "ready" | "failed";
  *
  * `generic` is anything that is not one of the image pipeline's own named
  * failures — a decode that threw for a reason we have no better word for.
+ * `heic` is a file intake's refusal of a HEIC/HEIF photo this browser could
+ * not decode — named apart from `unsupported` because the way out is
+ * specific: take the photo with the camera instead.
  */
-export type PageErrorCode = ImagePrepCode | "generic";
+export type PageErrorCode = ImagePrepCode | "generic" | "heic";
 
 /** Why a build stopped, as a code the screens translate. */
 export type BuildErrorCode =

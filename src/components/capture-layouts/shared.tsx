@@ -426,6 +426,7 @@ export function GalleryLink({ parts, className }: { parts: CaptureChromeParts; c
         type="file"
         accept={ACCEPT_ATTRIBUTE}
         aria-label={copy.capture.galleryAria}
+        multiple={gallery.multiple}
         disabled={gallery.busy}
         className="scan-sr-only"
         onChange={gallery.onChange}

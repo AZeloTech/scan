@@ -52,6 +52,8 @@ export interface LayoutCaptureScreenProps {
   autoCaptureOn: boolean;
   onAutoCaptureChange: (on: boolean) => void;
   diagnostics: boolean;
+  /** Several photos picked at once (see `CaptureStage`'s `onFiles`). */
+  onFiles?: (files: File[]) => void;
 }
 
 export function LayoutCaptureScreen({ layout, bits, announcement, ...stage }: LayoutCaptureScreenProps) {

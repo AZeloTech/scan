@@ -85,7 +85,74 @@ function serve(root) {
   });
 }
 
-async function drive(name, port) {
+/**
+ * Several photos at once on a phone, through both doors: the host's
+ * `initialImages` (`?seed=3`, client-rendered consumers only) and a multi-pick
+ * from "Já tenho a foto". Both must land on the review step with every page,
+ * and the seeded one must come out as one PDF of that many pages.
+ */
+async function drivePhotoIntake(browser, origin, { seeded }) {
+  const problems = [];
+  const phone = await browser.newContext({
+    permissions: ["camera"],
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 2,
+    isMobile: true,
+    hasTouch: true,
+  });
+  const page = await phone.newPage();
+  page.on("pageerror", (error) => problems.push(`uncaught page error: ${String(error)}`));
+  const reviewTitle = "Confira suas páginas";
+
+  if (seeded) {
+    await page.goto(`${origin}/?seed=3`, { waitUntil: "networkidle" });
+    try {
+      await page.waitForFunction(() => window.__scanSmoke?.uiPages === 3, null, { timeout: 60_000 });
+      await page.getByText(reviewTitle).waitFor({ timeout: 10_000 });
+      const button = page.getByRole("button", { name: "Gerar PDF" });
+      await button.waitFor({ timeout: 10_000 });
+      await page.waitForFunction(
+        () => {
+          const found = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Gerar PDF");
+          return found !== undefined && !found.disabled;
+        },
+        null,
+        { timeout: 60_000 }
+      );
+      await button.click();
+      await page.waitForFunction(() => window.__scanSmoke?.uiComplete !== undefined, null, { timeout: 120_000 });
+      const result = await page.evaluate(() => window.__scanSmoke);
+      if (result.uiComplete.pageCount !== 3) problems.push(`seeded PDF has ${result.uiComplete.pageCount} pages, not 3`);
+      const captures = (result.events ?? []).filter((event) => event === "capture").length;
+      if (captures !== 3) problems.push(`seeded flow emitted ${captures} capture events, not 3`);
+    } catch (error) {
+      problems.push(`initialImages did not reach a 3-page PDF: ${String(error).split("\n")[0]}`);
+    }
+  }
+
+  await page.goto(origin, { waitUntil: "networkidle" });
+  try {
+    await page.waitForSelector("[data-scan-layout]", { timeout: 30_000 });
+    const input = page.locator('input[type="file"][multiple]').first();
+    await input.waitFor({ state: "attached", timeout: 30_000 });
+    await input.evaluate(async (element) => {
+      const files = await window.__scanSyntheticPhotos(2);
+      const transfer = new DataTransfer();
+      for (const file of files) transfer.items.add(file);
+      element.files = transfer.files;
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await page.waitForFunction(() => window.__scanSmoke?.uiPages === 2, null, { timeout: 60_000 });
+    await page.getByText(reviewTitle).waitFor({ timeout: 10_000 });
+  } catch (error) {
+    problems.push(`a multi-pick did not land 2 pages on review: ${String(error).split("\n")[0]}`);
+  }
+
+  await phone.close();
+  return problems;
+}
+
+async function drive(name, port, options = {}) {
   const { chromium } = await import("@playwright/test");
   /**
    * CI runs `npx playwright install chromium` and gets the build this
@@ -164,9 +231,11 @@ async function drive(name, port) {
     .catch(() => null);
   await phone.close();
 
+  const photoProblems = await drivePhotoIntake(browser, origin, { seeded: options.seeded === true });
+
   await browser.close();
 
-  const failures = [];
+  const failures = [...photoProblems];
   if (report.error) failures.push(`the page reported: ${report.error}`);
   if (!report.mlReady) failures.push("the ML detector never became ready");
   // Live detection runs off the main thread when the host serves the worker
@@ -200,14 +269,15 @@ async function drive(name, port) {
   }
   console.log(
     `${name}: ok — ML ready, PDF built (${report.pdfBytes} bytes, ${report.pages} page(s)), default layout ${layout}, ` +
-      `no off-origin requests, no 404s`
+      `no off-origin requests, no 404s, ` +
+      `photo intake ok (${options.seeded === true ? "initialImages + " : ""}multi-pick)`
   );
   return true;
 }
 
 const consumers = [
-  { name: "vite", dir: join(HERE, "vite"), out: "dist", build: ["npm", ["run", "build"]] },
-  { name: "next", dir: join(HERE, "next"), out: "out", build: ["npm", ["run", "build"]] },
+  { name: "vite", dir: join(HERE, "vite"), out: "dist", build: ["npm", ["run", "build"]], seeded: true },
+  { name: "next", dir: join(HERE, "next"), out: "out", build: ["npm", ["run", "build"]], seeded: false },
 ];
 
 let allPassed = true;
@@ -222,7 +292,7 @@ for (const consumer of consumers) {
   await run(consumer.build[0], consumer.build[1], consumer.dir);
   const server = await serve(join(consumer.dir, consumer.out));
   try {
-    const passed = await drive(consumer.name, server.port);
+    const passed = await drive(consumer.name, server.port, { seeded: consumer.seeded });
     allPassed &&= passed;
   } finally {
     await server.close();

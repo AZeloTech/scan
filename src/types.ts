@@ -32,7 +32,15 @@ export type ScanErrorCode =
   /** The browser ran out of memory. Older phones, many pages. */
   | "out_of_memory"
   /** PDF assembly failed, including "the size budget cannot be met". */
-  | "build_failed";
+  | "build_failed"
+  /**
+   * None of the `initialImages` could be opened (an unreadable or unsupported
+   * file, a HEIC the browser cannot decode). Recoverable on the phone surface,
+   * where the flow stays open on the review step and offers the camera; final
+   * on the desktop surface, where there is nothing else to fall back to and an
+   * `onCancel("error")` follows.
+   */
+  | "images_unreadable";
 
 /**
  * Everything that happens inside, as it happens.
@@ -141,6 +149,39 @@ export interface ScanFlowProps {
 
   /** Which sources are offered. Defaults: camera on, images on, pdf off. */
   intake?: ScanIntake;
+
+  /**
+   * Photos the host already holds, turned into the document's first pages.
+   *
+   * **Read once, on mount**: a later change to this array is ignored, exactly
+   * like the other options that shape a session. Pass a new `key` to start a
+   * new document.
+   *
+   * Each file goes through the same intake as a pick from the file chooser:
+   * the quality gate, corner detection, the `maxPages` cap and the per-file
+   * refusals (an unreadable file is skipped with its own message; HEIC is
+   * best effort — Safari decodes it, most other browsers do not). Pages keep
+   * the array's order. Files past `maxPages` are left out, and the flow says
+   * so on screen before it starts. A PDF in the array is refused unless
+   * `intake.pdf` is on and the desktop surface is showing.
+   *
+   * Where the flow opens instead of its first screen:
+   *
+   *  - phone surface — the review step, with a "processing N photos" line while
+   *    the files are read; every page can be opened, corrected and reordered
+   *    from there, and more pages can be photographed when `intake.camera` is
+   *    on;
+   *  - desktop surface — step 2 («Conferir») once the files are read, or step 1
+   *    when one of them was refused, so the reason stays on screen.
+   *
+   * When none of them can be opened, an `error` event with `images_unreadable`
+   * is emitted: on the phone the flow stays open on the review step and points
+   * to the camera; on the desktop `onCancel("error")` follows.
+   *
+   * Nothing about the files leaves the library: events carry page numbers,
+   * never names or bytes. An empty array behaves as if the prop were absent.
+   */
+  initialImages?: readonly File[];
 
   /**
    * Fires at most once per mounted instance, after the PDF exists. Final: after

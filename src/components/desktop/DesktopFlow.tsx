@@ -19,6 +19,7 @@ import { useScanRuntime } from "@/hooks/useScanRuntime";
 import { useGeneratePdf } from "@/hooks/useGeneratePdf";
 import { useCancelOnEscape } from "@/components/ui";
 import type { PageTile } from "@/lib/page-tiles";
+import type { ScanEvent } from "@/types";
 import { useCopy } from "@/components/I18n";
 import { DesktopPicker, type DesktopPickerHandle } from "@/components/desktop/DesktopPicker";
 import { EscolherStep } from "@/components/desktop/EscolherStep";
@@ -50,7 +51,12 @@ import { GerarStep } from "@/components/desktop/GerarStep";
  * a 1120 px workspace where the page is big enough to judge. Nothing in the
  * phone flow is touched from this tree.
  */
-export function DesktopFlow() {
+export interface DesktopFlowProps {
+  /** The host's photos (`initialImages`), read once. Possibly empty. */
+  initialFiles?: readonly File[];
+}
+
+export function DesktopFlow({ initialFiles = NO_FILES }: DesktopFlowProps = {}) {
   const copy = useCopy();
   const store = useStore();
   const runtime = useScanRuntime();
@@ -73,7 +79,52 @@ export function DesktopFlow() {
     runtime.urls,
     runtime.maxPages,
     runtime.intake.pdf,
+    runtime.emit,
   );
+
+  /**
+   * The host's photos, read into the document once — into the store that is
+   * actually committed (StrictMode rehearses the mount with one it disposes).
+   * They go through step 1's own pile, so the rows, the "Abrindo 3 de 8…" line,
+   * the per-file refusals and the page cap are exactly a pick's.
+   */
+  const seededFor = React.useRef<string | null>(null);
+  const [seedPending, setSeedPending] = React.useState(initialFiles.length > 0);
+  const acceptFiles = intake.accept;
+  const clearFiles = intake.clear;
+  React.useEffect(() => {
+    if (initialFiles.length === 0) return;
+    if (store.disposed || seededFor.current === store.id) return;
+    // A seed already went into a store that was then disposed (the rehearsal):
+    // abandon its run and its rows before seeding the real one.
+    if (seededFor.current !== null) clearFiles();
+    seededFor.current = store.id;
+    acceptFiles(initialFiles);
+  }, [acceptFiles, clearFiles, initialFiles, store]);
+
+  /**
+   * Once the seed has been read: straight on to «Conferir» when every photo
+   * became a page — that is what the host handed them over for. When one was
+   * refused, or the cap left some out, step 1 stays, because that is where the
+   * reason is written next to the file's name. When none could be opened there
+   * is nothing to check and no camera to fall back to here, so the session
+   * ends and the host is told why.
+   */
+  const seedSettled =
+    seedPending &&
+    intake.files.length > 0 &&
+    !intake.busy &&
+    intake.done === intake.files.length;
+  React.useEffect(() => {
+    if (!seedSettled) return;
+    setSeedPending(false);
+    const refused = intake.files.some((file) => file.state === "refused");
+    if (tiles.length === 0) {
+      runtime.reportError("images_unreadable", false);
+      return;
+    }
+    if (!refused && !intake.atCapacity) setStep("conferir");
+  }, [seedSettled, intake.files, intake.atCapacity, tiles.length, runtime]);
 
   /** Which page the workspace is looking at. Null until step 2 first opens. */
   const [cursor, setCursor] = React.useState<string | null>(null);
@@ -208,6 +259,8 @@ export function DesktopFlow() {
 
 export type Step = "escolher" | "conferir" | "gerar";
 
+const NO_FILES: readonly File[] = [];
+
 /**
  * What the file dialog offers, which is also what it must NOT offer.
  *
@@ -338,6 +391,7 @@ function useIntake(
   assets: AssetUrls,
   maxPages: number,
   allowPdf: boolean,
+  emit: (event: ScanEvent) => void,
 ): IntakeState {
   const [files, setFiles] = React.useState<readonly ChosenFile[]>([]);
   const [source, setSource] = React.useState<string | null>(null);
@@ -407,6 +461,7 @@ function useIntake(
                 // The store refuses past its cap silently, so the page that
                 // "arrived" has to be proven to exist before it is claimed.
                 if (pages.length <= before) return null;
+                emit({ name: "capture", page: pages.length, source: "file" });
                 return pages[pages.length - 1]?.id ?? null;
               },
               onStart: (key) => patch(key, { state: "opening" }),
@@ -435,7 +490,7 @@ function useIntake(
           if (pendingRef.current === 0) setBusy(false);
         });
     },
-    [allowPdf, assets, maxPages, patch, store],
+    [allowPdf, assets, emit, maxPages, patch, store],
   );
 
   const clear = React.useCallback(() => {

@@ -118,6 +118,7 @@ const ERROR_CODES: readonly ScanErrorCode[] = [
   "model_init",
   "out_of_memory",
   "build_failed",
+  "images_unreadable",
 ];
 const oneOf = <T extends string>(values: readonly T[], value: unknown): T | null =>
   typeof value === "string" && (values as readonly string[]).includes(value) ? (value as T) : null;
