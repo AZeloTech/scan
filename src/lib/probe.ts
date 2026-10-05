@@ -340,7 +340,12 @@ export interface RefineProbe {
   /** Each corner's provenance, TL, TR, BR, BL (`lib/refine.ts`). */
   corners: CornerReport[];
   occlusion: OcclusionReport;
+  /** The run that answered (the retry's, when there was one). */
   ms: number;
+  /** The first run gave up for time and a second, larger budget ran (`lib/refine-retry.ts`). Absent in older builds. */
+  retried?: boolean;
+  /** Both runs and the yield between them. Absent in older builds. */
+  totalMs?: number;
   /** The image the corners are fractions of. */
   width: number;
   height: number;
@@ -374,6 +379,10 @@ export interface ConfirmOpenProbe {
   height: number;
   /** The flag the screen opened with (`Capture.attention`), or null. */
   attention?: "no-page" | "corner-outside" | "moved" | "unverified" | "low-resolution" | null;
+  /** How the handles were marked at open (`lib/confirm-seed.ts`). Absent in older builds. */
+  mark?: "clear" | "estimated" | "unmeasured";
+  /** What the seed's refinement did (`lib/refine-retry.ts`); null when it was not refined. Absent in older builds. */
+  refine?: { measured: boolean; retried: boolean; ms: number; reason: string } | null;
 }
 
 /** The user left the confirm screen with these corners. */

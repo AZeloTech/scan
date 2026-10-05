@@ -174,8 +174,11 @@
    * A corner the capture could not see — a sheet, a clip lay over it — placed
    * where its two edges meet (`lib/corner-check.ts`): the puck hollow, ringed
    * dashed, with a small "estimado" under it, until the person moves it.
+   * Corners nothing measured (`lib/refine-retry.ts`) are drawn the same way,
+   * every one of them, with "confira" under each.
    */
-  .scan-root [data-scan-confirm-editor] .scan-corner-handle[data-scan-estimated]:not(.is-active) {
+  .scan-root [data-scan-confirm-editor] .scan-corner-handle[data-scan-estimated]:not(.is-active),
+  .scan-root [data-scan-confirm-editor] .scan-corner-handle[data-scan-unmeasured]:not(.is-active) {
     background-color: rgba(15, 18, 13, 0.45);
     border: 3px dashed #fafaf7;
     box-shadow: 0 0 0 2px rgba(15, 18, 13, 0.6);

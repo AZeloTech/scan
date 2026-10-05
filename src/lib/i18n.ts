@@ -315,6 +315,17 @@ export interface AppCopy {
     estimatedPill: string;
     estimatedBadge: string;
     estimatedHandle: (corner: string) => string;
+    /**
+     * The capture's refinement measured nothing about these corners — it ran
+     * out of time even on its retry, or found nothing to measure on
+     * (`lib/refine-retry.ts`): the corners are the detector's, unchecked. The
+     * pill's sentence when no other reason takes it, the badge on every
+     * handle and the handle's accessible name. Never "estimado": nothing was
+     * inferred.
+     */
+    unmeasuredPill: string;
+    unmeasuredBadge: string;
+    unmeasuredHandle: (corner: string) => string;
   };
 
   review: {
@@ -1114,6 +1125,9 @@ const PT: AppCopy = {
     estimatedPill: "Um canto estava coberto — confira o canto estimado",
     estimatedBadge: "estimado",
     estimatedHandle: (corner) => `${corner}: canto estimado — confira`,
+    unmeasuredPill: "Confira os cantos — não deu para medir",
+    unmeasuredBadge: "confira",
+    unmeasuredHandle: (corner) => `${corner}: canto não medido — confira`,
   },
 
   review: {
@@ -1805,6 +1819,9 @@ const EN: AppCopy = {
     estimatedPill: "A corner was covered — check the estimated corner",
     estimatedBadge: "estimated",
     estimatedHandle: (corner) => `${corner}: estimated corner — check it`,
+    unmeasuredPill: "Check the corners — couldn't measure",
+    unmeasuredBadge: "check",
+    unmeasuredHandle: (corner) => `${corner}: corner not measured — check it`,
   },
 
   review: {

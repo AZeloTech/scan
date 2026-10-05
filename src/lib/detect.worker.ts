@@ -263,6 +263,7 @@ async function run(job: Job): Promise<void> {
     let evidence = null;
     let refined: ResultReply["refined"] = null;
     let refineMs: number | null = null;
+    let refineBudgetMiss = false;
     let check: CornerCheck | null = null;
     let measuredCovered: CoveredCorner[] | null = null;
     if ((job.evidence || job.refineMs > 0) && found.success && found.corners !== null && workContext !== null) {
@@ -276,6 +277,7 @@ async function run(job: Job): Promise<void> {
         // the overlay draws. The classical detector's is only snapped nearby.
         const result = refineQuad(pixels, quad, { mode: found.detector === "ml" ? "full" : "local", budgetMs: job.refineMs });
         refineMs = result.ms;
+        refineBudgetMiss = result.reason === "budget";
         check = cornerCheckOf(result);
         if (result.measured) {
           covered = coveredCorners(result.corners);
@@ -314,6 +316,7 @@ async function run(job: Job): Promise<void> {
       luma,
       refined,
       refineMs,
+      refineBudgetMiss,
       check,
       covered: measuredCovered,
       evidence,

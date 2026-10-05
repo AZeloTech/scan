@@ -25,6 +25,7 @@ import { detectInBlob } from "@/lib/flatten";
 import { assessBlob, type GateReading } from "@/lib/capture-gate";
 import { type NormalizedQuad } from "@/lib/quad";
 import type { CornerCheck } from "@/lib/corner-check";
+import type { RefineOutcome } from "@/lib/refine-retry";
 import type { StillAttention } from "@/lib/still-check";
 import { isAcceptedImageType, prepareCapture, ImagePrepError } from "@/lib/image";
 import { encodeQuality } from "@/lib/encode";
@@ -83,6 +84,13 @@ export interface Capture {
    * over as estimated. Absent when not measured (a gallery pick, an edit).
    */
   cornerCheck?: CornerCheck;
+  /**
+   * What the capture's refinement of those corners did (`lib/refine-retry.ts`):
+   * measured or not, retried for time or not. With `corners` and no
+   * `cornerCheck`, a `measured: false` here is the confirm screen's
+   * "não deu para medir". Absent when nothing was refined.
+   */
+  refine?: RefineOutcome;
   /**
    * The on-device "will this OCR?" reading, measured on the full-resolution
    * frame BEFORE any warp. It is the page's only quality verdict — there is

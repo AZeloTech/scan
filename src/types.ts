@@ -376,6 +376,18 @@ export interface ScanDiagnosticsSize {
  */
 export type ScanDiagnosticsEvent = { v: ScanDiagnosticsVersion; seq: number; t: number } & ScanDiagnosticsPayload;
 
+/**
+ * What a capture's corner refinement did — metadata only: whether the
+ * corners were measured (false: the confirm screen says "não deu para
+ * medir"), whether the first run ran out of time and a second, larger budget
+ * ran, and how long both took (whole ms).
+ */
+export interface ScanDiagnosticsRefine {
+  measured: boolean;
+  retried: boolean;
+  ms: number;
+}
+
 /** {@link ScanDiagnosticsEvent} without its envelope. */
 export type ScanDiagnosticsPayload =
   /** The flow mounted. No user agent: a host that wants one has it already. */
@@ -449,6 +461,12 @@ export type ScanDiagnosticsPayload =
        * surface reading for a while; auto-capture may not.
        */
       paperAgeMs?: number | null;
+      /**
+       * Passes since the previous sample whose edge refinement ran out of its
+       * live budget (the pass's corners then unmeasured: auto-capture holds).
+       * Added in 0.x without a version bump: optional, older readers ignore it.
+       */
+      refineBudgetMisses?: number;
     }
   /** The part of the frame the person can see changed (fractions of the frame). */
   | { type: "visible"; x: number; y: number; width: number; height: number; fit: string }
@@ -534,6 +552,8 @@ export type ScanDiagnosticsPayload =
       /** The capture's word on the corners it hands to the confirm screen (as for `pass`); null with none or not measured. */
       corners?: ScanDiagnosticsCorners | null;
       separate?: boolean | null;
+      /** What the capture's corner refinement did ({@link ScanDiagnosticsRefine}); null with no corners or none refined. */
+      refine?: ScanDiagnosticsRefine | null;
     }
   /**
    * The confirm-corners screen was answered: kept as seeded (`accepted`),
@@ -557,6 +577,8 @@ export type ScanDiagnosticsPayload =
       capped: boolean | null;
       /** The seeded corners' provenance (as for `pass`): which handles were marked estimated; null when not measured. */
       corners?: ScanDiagnosticsCorners | null;
+      /** What the seed's corner refinement did ({@link ScanDiagnosticsRefine}); null when the seed was not refined. */
+      refine?: ScanDiagnosticsRefine | null;
     }
   /**
    * A page's pixels were rendered from its canonical (after the capture, and
