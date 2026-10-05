@@ -49,6 +49,23 @@ freezes at 1.0.
 - `capture` events (`source: "file"`) for every page read from a file.
 
 ### Fixed
+- **The camera opens on phones that hang on a 4K request.** Some older
+  Android phones neither resolve nor reject a high-resolution `getUserMedia`
+  for many seconds, then reject it with `NotReadableError` ("Timeout starting
+  video source"); the screen sat on «Abrindo a câmera…» and then reported a
+  refusal the person never made. The camera is now asked for in up to three
+  steps, each with a deadline of about 8 s armed once the permission is
+  granted: the 4K back camera, the back camera at any size, any camera. A
+  stream that arrives after its deadline is stopped. `video.play()` has a 5 s
+  deadline too: a stream that has a frame by then is shown, one with none is
+  stopped. The video is muted and inline before the stream is attached
+  (autoplay on Chrome for Android).
+- **Only a refusal is reported as `camera_denied`.** A camera that was allowed
+  but would not open is the new `ScanErrorCode` **`camera_unavailable`**
+  (recoverable): the fallback surface says «Não conseguimos abrir a câmera
+  deste aparelho.» above the way out — the device's own camera app — with "Já
+  tenho a foto" beside it. While a plainer request is under way the opening
+  screen says «tentando de outro jeito».
 - **A failed asset load is retried.** scanic's module and the pdf.js chunk were
   memoised even when the load failed, so one transient 404 or dropped
   connection broke them for the page's life; a failure is now forgotten and the

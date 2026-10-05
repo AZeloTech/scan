@@ -252,7 +252,7 @@ export function ScanFlow(props: ScanFlowProps) {
 
   /**
    * An error that ends the session, as opposed to one a screen can recover
-   * from. `camera_denied` and `no_camera` are handled inside the capture screen
+   * from. `camera_denied`, `no_camera` and `camera_unavailable` are handled inside the capture screen
    * by falling back to the file intake, and only reach here when there is no
    * fallback to fall back to.
    */

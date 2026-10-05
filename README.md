@@ -330,6 +330,22 @@ here (an in-app browser, an insecure page, a refused permission), the capture
 screen's fallback surface opens the device's own camera app, and "Já tenho a
 foto" stays beside it for photos already taken.
 
+#### When the camera will not open
+
+The camera is asked for in up to three steps, each with a deadline (about 8 s
+once the permission is granted; a person still reading the system prompt is
+never timed out): the back camera at up to 4K, then the back camera at
+whatever size it offers, then any camera. Older Android phones that hang on
+the 4K request open on the second step. The `error` event's code tells the
+host what happened, and all three are recoverable (the fallback surface takes
+over, which on a phone opens the device's own camera app):
+
+| Code | Meaning |
+|---|---|
+| `camera_denied` | the person refused the permission, or a policy blocks it (`NotAllowedError`, `SecurityError`). Never retried. |
+| `no_camera` | there is no camera, or the browser offers no `getUserMedia` (an insecure page). |
+| `camera_unavailable` | allowed, but every step timed out or failed (`NotReadableError`, `AbortError`…), or the stream never delivered a frame. The surface says so (pt-BR «Não conseguimos abrir a câmera deste aparelho.»). |
+
 ### Warming up before the sheet opens
 
 ```ts

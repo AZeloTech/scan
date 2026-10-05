@@ -16,15 +16,24 @@ export type ScanLang = "pt-BR" | "en-US";
 /**
  * Why the flow could not continue.
  *
- * `camera_denied` and `no_camera` are recoverable and the library handles them
- * itself by falling back to the file intake — a host that receives them is being
- * informed, not asked to act. The rest end the session.
+ * `camera_denied`, `no_camera` and `camera_unavailable` are recoverable and
+ * the library handles them itself by falling back to the file intake — a host
+ * that receives them is being informed, not asked to act. The rest end the
+ * session.
  */
 export type ScanErrorCode =
   /** The person refused the camera permission prompt, or a policy blocks it. */
   | "camera_denied"
   /** There is no camera, or the browser will not enumerate one. */
   | "no_camera"
+  /**
+   * The camera was not refused but would not open: every request timed out or
+   * failed (`NotReadableError`, `AbortError`…), or the stream never delivered
+   * a frame. Older Android phones that hang on a high-resolution request are
+   * the usual case. The capture screen falls back to the file intake, which
+   * on a phone opens the device's own camera app.
+   */
+  | "camera_unavailable"
   /** An asset under `assetBaseUrl` could not be fetched: wrong path, CSP, MIME type. */
   | "asset_load"
   /** The corner-detection model loaded but would not initialise. */

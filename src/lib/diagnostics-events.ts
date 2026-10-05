@@ -114,6 +114,7 @@ const QUALITIES: readonly ScanQuality[] = ["sharp", "blurred", "small_text", "un
 const ERROR_CODES: readonly ScanErrorCode[] = [
   "camera_denied",
   "no_camera",
+  "camera_unavailable",
   "asset_load",
   "model_init",
   "out_of_memory",

@@ -140,6 +140,10 @@ export interface AppCopy {
      */
     pick: (n: number) => string;
     opening: string;
+    /** Under «opening» once the first ask for the camera failed and a plainer one is under way. */
+    openingRetry: string;
+    /** Above the fallback surface when the camera was allowed but would not open. */
+    cameraUnavailable: string;
     preparing: string;
     tapHere: string;
     /** {@link AppCopy.capture.tapHere}'s other half, for the picker. */
@@ -1024,6 +1028,8 @@ const PT: AppCopy = {
     take: (n) => `Fotografar página ${n}`,
     pick: (n) => `Escolher imagem da página ${n}`,
     opening: "Abrindo a câmera…",
+    openingRetry: "tentando de outro jeito",
+    cameraUnavailable: "Não conseguimos abrir a câmera deste aparelho.",
     preparing: "Preparando a foto…",
     tapHere: "toque aqui",
     clickToPick: "clique para selecionar o arquivo",
@@ -1729,6 +1735,8 @@ const EN: AppCopy = {
     take: (n) => `Photograph page ${n}`,
     pick: (n) => `Choose an image for page ${n}`,
     opening: "Opening the camera…",
+    openingRetry: "trying another way",
+    cameraUnavailable: "We couldn't open this device's camera.",
     preparing: "Preparing the photo…",
     tapHere: "tap here",
     clickToPick: "click to select a file",
