@@ -15,7 +15,8 @@ type ScanicModule = typeof import("scanic");
 let modulePromise: Promise<ScanicModule> | null = null;
 
 /**
- * Lazily loaded on the first capture, from the host's asset directory.
+ * Lazily loaded on the first capture, from the host's asset directory, and
+ * memoised — successes only.
  *
  * The specifier is a variable on purpose, and carries both bundlers' opt-out
  * comments: this module must be fetched at run time and never followed at build
@@ -26,6 +27,17 @@ let modulePromise: Promise<ScanicModule> | null = null;
  * consumer's build (`scanic-entry.ts`).
  */
 export function loadScanic(urls: AssetUrls): Promise<ScanicModule> {
-  modulePromise ??= (import(/* webpackIgnore: true */ /* @vite-ignore */ urls.scanic) as Promise<ScanicModule>);
+  if (modulePromise === null) {
+    const attempt = import(/* webpackIgnore: true */ /* @vite-ignore */ urls.scanic) as Promise<ScanicModule>;
+    // A rejection clears the memo: a remembered failure would turn one 404 or
+    // one dropped connection into a broken scanner for the rest of the page's
+    // life, every later attempt "failing" without a request leaving the tab.
+    // (The browser keeps its own record of a failed module URL in some
+    // engines; a retry costs at most a request that fails again.)
+    attempt.catch(() => {
+      if (modulePromise === attempt) modulePromise = null;
+    });
+    modulePromise = attempt;
+  }
   return modulePromise;
 }

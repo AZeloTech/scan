@@ -46,6 +46,7 @@ import { refineDiagnostic, type RefineOutcome } from "@/lib/refine-retry";
 import { flash, shutterPulse } from "@/lib/motion";
 import { probe, probeSetting, probing, type CaptureProbe, type CornersFrom } from "@/lib/probe";
 import { useLiveDetect } from "@/hooks/useLiveDetect";
+import { cameraPermissionWatcher, openCamera, startPlayback, stopStream, type CameraOpenFailure } from "@/lib/camera-open";
 import { checkStill } from "@/lib/still-check";
 import { lumaThumb, registerStill, type LumaThumb, type StillRegistration } from "@/lib/still-register";
 import { resolveFit, type FitPolicy } from "@/lib/visible-region";
@@ -240,6 +241,8 @@ export interface CaptureChromeParts {
    */
   gallery: {
     busy: boolean;
+    /** The picker may take several photos at once (see `CaptureStage`'s `onFiles`). */
+    multiple: boolean;
     onChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   } | null;
   shutter: {
@@ -326,6 +329,13 @@ interface CaptureStageProps {
    * no network, no images.
    */
   diagnostics?: boolean;
+  /**
+   * Several photos picked at once from "Já tenho a foto". Present: the gallery
+   * picker allows multiple selection, and a pick of two or more is handed over
+   * here whole instead of going through the confirm screen one by one (a pick
+   * of one still does). Absent — the retake sheet — the picker takes one.
+   */
+  onFiles?: (files: File[]) => void;
 }
 
 export function CaptureStage({
@@ -345,6 +355,7 @@ export function CaptureStage({
   onAutoCaptureChange,
   chrome,
   diagnostics = false,
+  onFiles,
 }: CaptureStageProps) {
   const copy = useCopy();
   // The asset base the host gave the flow. Every loader below is handed it
@@ -495,6 +506,10 @@ export function CaptureStage({
     setPickerOnly(!window.matchMedia("(pointer: coarse)").matches);
   }, []);
   const [cameraLost, setCameraLost] = React.useState(false);
+  /** The first ask for the camera failed and a plainer one is under way. */
+  const [cameraRetrying, setCameraRetrying] = React.useState(false);
+  /** Why the screen fell back to the file surface, when the camera was asked for. */
+  const [fallbackReason, setFallbackReason] = React.useState<CameraOpenFailure | null>(null);
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState<string | null>(null);
   const [announcement, setAnnouncement] = React.useState("");
@@ -532,9 +547,11 @@ export function CaptureStage({
      * which is what `recoverable` says here, and what turns into `onCancel`
      * upstream.
      */
-    const cameraUnavailable = (code: "camera_denied" | "no_camera"): void => {
+    const cameraUnavailable = (code: CameraOpenFailure): void => {
       if (cancelled) return;
       diagnosticsSink?.emit({ type: "camera", state: "unavailable", startMs: null, stream: null, torch: false, fit: fitRef.current });
+      setCameraRetrying(false);
+      setFallbackReason(code);
       setMode("fallback");
       reportError(code, intakeImages);
     };
@@ -558,32 +575,29 @@ export function CaptureStage({
         return;
       }
       const askedAt = performance.now();
-      try {
-        stream = await media.getUserMedia({
-          video: {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 3840 },
-            height: { ideal: 2160 },
-          },
-          audio: false,
-        });
-      } catch (error) {
-        // Two different facts wearing one `catch`: a refusal (or a policy, or
-        // an insecure origin) and a device that is not there. The host is told
-        // which, because "no camera on this laptop" and "you said no" are
-        // different things to put in front of a person.
-        const name = error instanceof DOMException ? error.name : "";
-        cameraUnavailable(
-          name === "NotFoundError" || name === "DevicesNotFoundError"
-            ? "no_camera"
-            : "camera_denied",
-        );
+      // A ladder of asks, each with a deadline (`lib/camera-open.ts`): older
+      // Android phones hang on the 4K ask and then reject it with
+      // NotReadableError, which is neither a refusal nor a missing camera.
+      // Only a refusal is reported as one; a camera that would not open
+      // after every ask is `camera_unavailable`.
+      const opened = await openCamera({
+        getUserMedia: (constraints) => media.getUserMedia(constraints),
+        whenGranted: cameraPermissionWatcher(navigator),
+        onAttempt: (attempt) => {
+          if (!cancelled && attempt > 0) setCameraRetrying(true);
+        },
+        isCancelled: () => cancelled,
+      });
+      if (opened.kind === "cancelled") return;
+      if (opened.kind === "failed") {
+        cameraUnavailable(opened.code);
         return;
       }
       if (cancelled) {
-        for (const track of stream.getTracks()) track.stop();
+        stopStream(opened.stream);
         return;
       }
+      stream = opened.stream;
       // A track that ends (another app grabbed the camera, the OS revoked it)
       // must stop the detection loop — it would be sampling a frozen frame.
       for (const track of stream.getTracks()) {
@@ -594,11 +608,33 @@ export function CaptureStage({
       setTorchAvailable(hasTorch(trackRef.current));
       const video = videoRef.current;
       if (video !== null) {
+        // Chrome on Android lets a video autoplay only while it is muted and
+        // inline; React sets `muted` as a property and never as an attribute,
+        // so both are stated here again before the stream is attached.
+        video.muted = true;
+        video.defaultMuted = true;
+        video.playsInline = true;
+        video.autoplay = true;
+        video.setAttribute("muted", "");
+        video.setAttribute("playsinline", "");
         video.srcObject = stream;
-        try {
-          await video.play();
-        } catch {
-          // Autoplay refusal still leaves a usable frame after user gesture.
+        // A refused play() still leaves a usable frame after a gesture; a
+        // play() that hangs with no frame at all is a camera that delivers
+        // nothing, and is treated like one that would not open.
+        const showable = await startPlayback(video);
+        if (cancelled) return;
+        if (!showable) {
+          for (const track of stream.getTracks()) {
+            track.removeEventListener("ended", handleTrackEnded);
+            track.stop();
+          }
+          stream = null;
+          video.srcObject = null;
+          trackRef.current = null;
+          setTrack(null);
+          setTorchAvailable(false);
+          cameraUnavailable("camera_unavailable");
+          return;
         }
       }
       streamCappedRef.current = false;
@@ -615,6 +651,7 @@ export function CaptureStage({
           fit: fitRef.current,
         });
       }
+      setCameraRetrying(false);
       setMode("live");
       // The live stream's cap (`lib/stream-cap.ts`): announced on every camera,
       // applied only on Android Chrome once a still has proven itself.
@@ -1270,9 +1307,14 @@ export function CaptureStage({
 
   const handleFile = React.useCallback(
     async (event: React.ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
+      const picked = Array.from(event.target.files ?? []);
       // Let the same file be picked twice in a row.
       event.target.value = "";
+      if (picked.length > 1 && onFiles !== undefined) {
+        onFiles(picked);
+        return;
+      }
+      const file = picked[0];
       if (file === undefined) return;
       busyRef.current = true;
       setBusy(true);
@@ -1294,8 +1336,20 @@ export function CaptureStage({
         setBusy(false);
       }
     },
-    [copy, onCapture, pageNumber, path, reportPrepFailure, urls],
+    [copy, onCapture, onFiles, pageNumber, path, reportPrepFailure, urls],
   );
+
+  /**
+   * Where "Já tenho a foto" is offered. Live, as always — and on the fallback
+   * surface of a phone as well: that surface opens the device's own camera app
+   * (`capture="environment"`), which on most phones skips the photo library
+   * entirely, so without this a person whose browser cannot open the camera
+   * here (an in-app browser, a refused permission) could only shoot, never
+   * pick the photo they already took. On a computer the fallback surface *is*
+   * the file chooser, so a second one would only repeat it.
+   */
+  const galleryOffered =
+    !disabled && intakeImages && (mode === "live" || (mode === "fallback" && !pickerOnly));
 
   /**
    * The fallback surface goes through `prepareCapture` + the full detect the
@@ -1695,6 +1749,7 @@ export function CaptureStage({
             <p className="font-display text-2xl font-semibold text-shell-ink">
               {copy.capture.opening}
             </p>
+            {cameraRetrying && <Meta onNight>{copy.capture.openingRetry}</Meta>}
           </div>
         )}
 
@@ -1706,7 +1761,7 @@ export function CaptureStage({
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 border-2 border-dashed border-shell-line px-6 text-center">
             <CameraIcon size={40} className="text-shell-ink2/50" />
             <p className="text-base leading-snug text-shell-ink2">
-              {copy.primer.body}
+              {fallbackReason === "camera_unavailable" ? copy.capture.cameraUnavailable : copy.primer.body}
             </p>
           </div>
         )}
@@ -1744,6 +1799,11 @@ export function CaptureStage({
                   surface will actually open. `captureLabel` is the screen's own
                   phrase ("Fotografar página 3", "Refazer página 3") and stays
                   the word wherever the camera is genuinely reachable. */}
+              {/* Allowed, yet would not open: said once, above the way out —
+                  the phone's own camera app, which this input opens. */}
+              {fallbackReason === "camera_unavailable" && !busy && (
+                <p className="text-base leading-snug text-shell-ink2">{copy.capture.cameraUnavailable}</p>
+              )}
               {busy ? (
                 <SpinnerIcon size={40} className="text-shell-accent" />
               ) : pickerOnly ? (
@@ -1872,9 +1932,10 @@ export function CaptureStage({
           hasQuad: detect.hasQuad,
           notice: stageNotice,
           gallery:
-            mode === "live" && !disabled && intakeImages
+            galleryOffered
               ? {
                   busy,
+                  multiple: onFiles !== undefined,
                   onChange: (event) => {
                     void handleFile(event);
                   },
@@ -1904,7 +1965,7 @@ export function CaptureStage({
           the screen wants on the right — three real targets rather than two
           captions around a button (see `CameraActionBar`). */}
       <CameraActionBar>
-        {mode === "live" && !disabled && intakeImages ? (
+        {galleryOffered ? (
           <CameraPill
             icon={<ImageIcon size={16} />}
             label={copy.capture.gallery}
@@ -1914,6 +1975,7 @@ export function CaptureStage({
               <input
                 type="file"
                 accept={ACCEPT_ATTRIBUTE}
+                multiple={onFiles !== undefined}
                 disabled={busy}
                 className="scan-sr-only"
                 onChange={(event) => {

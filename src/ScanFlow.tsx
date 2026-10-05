@@ -26,6 +26,7 @@ import type {
   ScanErrorCode,
   ScanEvent,
   ScanFlowProps,
+  ScanPhotoImportReport,
   ScanStep,
 } from "./types";
 import { assetUrls, explainBadAssetBaseUrl } from "./lib/runtime-config";
@@ -33,6 +34,8 @@ import { ScanStoreProvider } from "./hooks/useScanStore";
 import { FlowNavigationProvider } from "./hooks/useFlowNavigation";
 import { ScanRuntimeProvider, type ScanRuntime } from "./hooks/useScanRuntime";
 import { FlowScreens } from "./FlowScreens";
+import { PhotoImportProvider } from "./hooks/usePhotoImport";
+import { isDesktopSurface } from "./lib/environment";
 import { LangProvider } from "./components/I18n";
 import { createExitGate, type ExitGate } from "./lib/exit-gate";
 import { SHELL_ROOT_STYLE } from "./lib/shell-theme";
@@ -50,11 +53,13 @@ export function ScanFlow(props: ScanFlowProps) {
     maxBytes,
     defaultFileName: fileNameProp,
     intake,
+    initialImages,
     onComplete,
     onCancel,
     onPagesChange,
     onEvent,
     onDiagnostics,
+    onPhotoImport,
     className,
     // Left `undefined` when omitted: omitted and `false` mean different things
     // (`autoCaptureOffered`).
@@ -66,6 +71,25 @@ export function ScanFlow(props: ScanFlowProps) {
 
   const captureLayout = pickCaptureLayout(captureLayoutProp, experimentalCaptureLayout);
 
+  /**
+   * The host's photos, copied once on mount (`initialImages` is read once:
+   * a host re-rendering with a new array must not re-import, or reset, the
+   * document somebody is already working on).
+   */
+  const [seed] = useState<readonly File[]>(() => Array.from(initialImages ?? []));
+
+  /**
+   * The surface is decided once, at mount, and never re-read.
+   *
+   * It answers "is there a camera worth pointing at paper", which does not
+   * change while somebody is scanning — but a window that crosses a breakpoint
+   * mid-flow would otherwise swap the whole interface out from under them and
+   * lose the screen they were on. Decided here rather than in `FlowScreens`
+   * because the phone's first step depends on it: a flow seeded with photos
+   * opens on the review list, not the viewfinder.
+   */
+  const [desktop] = useState(() => intake?.camera === false || isDesktopSurface());
+
   /** The auto-capture choice, for this flow only: off in every new one. */
   const autoCaptureChosen = useRef(false);
 
@@ -75,8 +99,8 @@ export function ScanFlow(props: ScanFlowProps) {
    * The ref is updated during render rather than in an effect: an event can be
    * emitted from a layout effect deeper in the tree, before ours would have run.
    */
-  const handlers = useRef({ onComplete, onCancel, onPagesChange, onEvent, onDiagnostics });
-  handlers.current = { onComplete, onCancel, onPagesChange, onEvent, onDiagnostics };
+  const handlers = useRef({ onComplete, onCancel, onPagesChange, onEvent, onDiagnostics, onPhotoImport });
+  handlers.current = { onComplete, onCancel, onPagesChange, onEvent, onDiagnostics, onPhotoImport };
 
   /**
    * The diagnostics stream (`onDiagnostics`, experimental): a sink only while
@@ -162,10 +186,46 @@ export function ScanFlow(props: ScanFlowProps) {
   /** The live page count, readable by callbacks that must not depend on it. */
   const pageCountRef = useRef(0);
 
+  /**
+   * What became of the host's photos, once their run is over. Kept for
+   * `onComplete` and reported to the host the first time only: a seed is read
+   * once per flow, and so is its report.
+   */
+  const seedReport = useRef<ScanPhotoImportReport | null>(null);
+  const reportPhotoImport = useCallback((report: ScanPhotoImportReport) => {
+    if (seedReport.current !== null) return;
+    const copy: ScanPhotoImportReport = {
+      imported: [...report.imported],
+      refused: [...report.refused],
+      overflow: [...report.overflow],
+    };
+    seedReport.current = copy;
+    // The host gets its own arrays: what it does to them is not our record.
+    handlers.current.onPhotoImport?.({
+      imported: [...copy.imported],
+      refused: [...copy.refused],
+      overflow: [...copy.overflow],
+    });
+  }, []);
+
   const complete = useCallback(
     (file: File, pageCount: number) => {
       if (!exitGate.complete()) return;
-      handlers.current.onComplete({ file, pageCount, bytes: file.size });
+      const seeded = seedReport.current;
+      handlers.current.onComplete({
+        file,
+        pageCount,
+        bytes: file.size,
+        ...(seeded === null
+          ? {}
+          : {
+              initialImages: {
+                imported: [...seeded.imported],
+                refused: [...seeded.refused],
+                overflow: [...seeded.overflow],
+              },
+            }),
+      });
     },
     [exitGate]
   );
@@ -192,7 +252,7 @@ export function ScanFlow(props: ScanFlowProps) {
 
   /**
    * An error that ends the session, as opposed to one a screen can recover
-   * from. `camera_denied` and `no_camera` are handled inside the capture screen
+   * from. `camera_denied`, `no_camera` and `camera_unavailable` are handled inside the capture screen
    * by falling back to the file intake, and only reach here when there is no
    * fallback to fall back to.
    */
@@ -227,8 +287,9 @@ export function ScanFlow(props: ScanFlowProps) {
       diagnosticsSink,
       emit,
       reportError,
+      reportPhotoImport,
     }),
-    [urls, lang, maxPages, maxBytes, fileNameProp, intake?.camera, intake?.images, intake?.pdf, experimentalAutoCapture, experimentalDiagnostics, diagnosticsSink, captureLayout, emit]
+    [urls, lang, maxPages, maxBytes, fileNameProp, intake?.camera, intake?.images, intake?.pdf, experimentalAutoCapture, experimentalDiagnostics, diagnosticsSink, captureLayout, emit, reportError, reportPhotoImport]
   );
 
   // The session's facts, once, and the page going out of view and back.
@@ -276,8 +337,16 @@ export function ScanFlow(props: ScanFlowProps) {
               onExit={(reason) => cancel(reason, pageCountRef.current)}
               onStep={handleStep}
               isFinished={isFinished}
+              initialStep={!desktop && seed.length > 0 ? "review" : "capture"}
             >
-              <FlowScreens onComplete={complete} onPagesChange={handlePagesChange} />
+              <PhotoImportProvider>
+                <FlowScreens
+                  desktop={desktop}
+                  initialImages={seed}
+                  onComplete={complete}
+                  onPagesChange={handlePagesChange}
+                />
+              </PhotoImportProvider>
             </FlowNavigationProvider>
           </ScanStoreProvider>
         </ScanRuntimeProvider>

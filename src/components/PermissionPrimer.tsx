@@ -36,6 +36,8 @@ interface PermissionPrimerProps {
   onAllow: () => void;
   /** A photo arrived from the gallery instead. */
   onCapture: (capture: Capture) => void;
+  /** Several photos arrived from the gallery at once; the flow reads them in. */
+  onFiles?: (files: File[]) => void;
   /** Back to wherever they came from. */
   onBack: () => void;
 }
@@ -44,6 +46,7 @@ export function PermissionPrimer({
   access,
   onAllow,
   onCapture,
+  onFiles,
   onBack,
 }: PermissionPrimerProps) {
   const copy = useCopy();
@@ -85,8 +88,13 @@ export function PermissionPrimer({
 
   const handleFile = React.useCallback(
     async (event: React.ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
+      const picked = Array.from(event.target.files ?? []);
       event.target.value = "";
+      if (picked.length > 1 && onFiles !== undefined) {
+        onFiles(picked);
+        return;
+      }
+      const file = picked[0];
       if (file === undefined) return;
       setBusy(true);
       setMessage(null);
@@ -107,7 +115,7 @@ export function PermissionPrimer({
         setBusy(false);
       }
     },
-    [copy, onCapture, reportError, urls],
+    [copy, onCapture, onFiles, reportError, urls],
   );
 
   return (
@@ -130,6 +138,7 @@ export function PermissionPrimer({
               <input
                 type="file"
                 accept={ACCEPT_ATTRIBUTE}
+                multiple={onFiles !== undefined}
                 disabled={busy}
                 className="scan-sr-only"
                 onChange={(event) => {

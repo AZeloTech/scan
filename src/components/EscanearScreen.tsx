@@ -4,6 +4,7 @@ import * as React from "react";
 import { useScanStore, useStore } from "@/hooks/useScanStore";
 import { useFlowNavigation } from "@/hooks/useFlowNavigation";
 import { useScanRuntime } from "@/hooks/useScanRuntime";
+import { usePhotoImport } from "@/hooks/usePhotoImport";
 import { popIn } from "@/lib/motion";
 import { holdDetectLane } from "@/lib/detect-lane";
 import type { PageTile } from "@/lib/page-tiles";
@@ -67,6 +68,7 @@ export function EscanearScreen() {
   const runtime = useScanRuntime();
   const { go, requestCancel } = useFlowNavigation();
   const { session, tiles } = useScanStore();
+  const { importFiles } = usePhotoImport();
   const [retakeKey, setRetakeKey] = React.useState<string | null>(null);
   const [previewKey, setPreviewKey] = React.useState<string | null>(null);
   const [adjustKey, setAdjustKey] = React.useState<string | null>(null);
@@ -166,6 +168,30 @@ export function EscanearScreen() {
     [store],
   );
 
+  /**
+   * Several photos picked at once. One confirm screen per photo would turn a
+   * pick of eight into eight interruptions, so they go in together — each
+   * still measured and outlined like any pick — and the person checks them
+   * where every page is checked: on the review list, which counts them in.
+   */
+  const handleFiles = React.useCallback(
+    (files: readonly File[]) => {
+      importFiles(files, "pick");
+      go("review");
+    },
+    [go, importFiles],
+  );
+
+  /** The same, from the primer: also its gallery answer (see above). */
+  const handlePrimerFiles = React.useCallback(
+    (files: readonly File[]) => {
+      primerChoice = { owner: store.id, choice: "gallery" };
+      setChoice("gallery");
+      handleFiles(files);
+    },
+    [handleFiles, store],
+  );
+
   // Keep the newest page in view, and let it land with a pop — the one moment
   // in the flow where the user's action produces a visible new object.
   React.useEffect(() => {
@@ -238,6 +264,7 @@ export function EscanearScreen() {
           setChoice("camera");
         }}
         onCapture={handlePrimerCapture}
+        onFiles={handlePrimerFiles}
         onBack={leave}
       />
     );
@@ -269,6 +296,7 @@ export function EscanearScreen() {
       runtime.autoCapture.chosen.current = on;
     },
     diagnostics: runtime.diagnostics,
+    onFiles: handleFiles,
   };
 
   const layout = runtime.captureLayout;
@@ -327,6 +355,7 @@ export function EscanearScreen() {
               runtime.autoCapture.chosen.current = on;
             }}
             diagnostics={runtime.diagnostics}
+            onFiles={handleFiles}
             rightAction={
               <CameraPill
                 // Not filled while a sheet is flagged: carrying on is allowed

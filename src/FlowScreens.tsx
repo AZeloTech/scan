@@ -17,35 +17,43 @@ import { useEffect, useRef } from "react";
 
 import { useFlowNavigation } from "@/hooks/useFlowNavigation";
 import { useScanRuntime } from "@/hooks/useScanRuntime";
-import { useScanStore } from "@/hooks/useScanStore";
-import { isDesktopSurface } from "@/lib/environment";
+import { useScanStore, useStore } from "@/hooks/useScanStore";
+import { usePhotoImport } from "@/hooks/usePhotoImport";
 import { EscanearScreen } from "@/components/EscanearScreen";
 import { ReviewScreen } from "@/components/ReviewScreen";
 import { GerarScreen } from "@/components/GerarScreen";
 import { DesktopFlow } from "@/components/desktop/DesktopFlow";
 
 export interface FlowScreensProps {
+  /** Which of the two flows is on, decided once by `ScanFlow`. */
+  desktop: boolean;
+  /** The host's photos (`initialImages`), copied on mount. Possibly empty. */
+  initialImages: readonly File[];
   onComplete(file: File, pageCount: number): void;
   onPagesChange(count: number): void;
 }
 
-export function FlowScreens({ onComplete, onPagesChange }: FlowScreensProps) {
+export function FlowScreens({ desktop, initialImages, onComplete, onPagesChange }: FlowScreensProps) {
   const { step } = useFlowNavigation();
   const { session, build } = useScanStore();
+  const store = useStore();
   const runtime = useScanRuntime();
+  const { importFiles } = usePhotoImport();
 
   /**
-   * The surface is decided once, at mount, and never re-read.
-   *
-   * It answers "is there a camera worth pointing at paper", which does not
-   * change while somebody is scanning — but a window that crosses a breakpoint
-   * mid-flow would otherwise swap the whole interface out from under them and
-   * lose the screen they were on.
+   * The phone's seed: the host's photos go into the document once, into the
+   * store that is actually committed. Keyed by the store's id rather than a
+   * boolean because StrictMode rehearses the mount with a store it then
+   * disposes — seeding that one would spend the photos on a dead document.
+   * (The desktop flow seeds its own pile the same way.)
    */
-  const desktop = useRef<boolean | null>(null);
-  if (desktop.current === null) {
-    desktop.current = !runtime.intake.camera || isDesktopSurface();
-  }
+  const seededFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (desktop || initialImages.length === 0) return;
+    if (store.disposed || seededFor.current === store.id) return;
+    seededFor.current = store.id;
+    importFiles(initialImages, "initial");
+  }, [desktop, importFiles, initialImages, store]);
 
   const pageCount = session?.pages.length ?? 0;
   const lastReported = useRef<number | null>(null);
@@ -74,10 +82,10 @@ export function FlowScreens({ onComplete, onPagesChange }: FlowScreensProps) {
     onComplete(file, build.pageCount);
   }, [build.phase, build.blob, build.fileName, build.pageCount, runtime.fileName, onComplete]);
 
-  if (desktop.current) {
+  if (desktop) {
     // The desktop flow runs its own three steps internally: it is one screen
     // with an interior, not three screens sharing a router.
-    return <DesktopFlow />;
+    return <DesktopFlow initialFiles={initialImages} />;
   }
 
   switch (step) {

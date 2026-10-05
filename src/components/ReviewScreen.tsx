@@ -5,6 +5,7 @@ import clsx from "clsx";
 import { useScanStore, useStore } from "@/hooks/useScanStore";
 import { useFlowNavigation } from "@/hooks/useFlowNavigation";
 import { useGeneratePdf } from "@/hooks/useGeneratePdf";
+import { usePhotoImport, type PhotoImportState } from "@/hooks/usePhotoImport";
 import { useEntrance } from "@/hooks/useEntrance";
 import { localeTag } from "@/lib/i18n";
 import { captureFlip, playFlip } from "@/lib/motion";
@@ -31,6 +32,7 @@ import {
   EyeIcon,
   PencilIcon,
   PlusIcon,
+  SpinnerIcon,
   XIcon,
 } from "@/components/icons";
 import { Button, LiveRegion, Meta, Notice, useCancelOnEscape } from "@/components/ui";
@@ -80,6 +82,9 @@ export function ReviewScreen() {
   const [pdfPreview, setPdfPreview] = React.useState(false);
   const [navigating, setNavigating] = React.useState(false);
   const generatePdf = useGeneratePdf();
+  const photoImport = usePhotoImport();
+  const imported = photoImport.state;
+  const importing = imported.working;
 
   /**
    * "Gerar PDF": the build starts here and step 3 is where it is watched. The
@@ -184,7 +189,9 @@ export function ReviewScreen() {
     );
   }
 
-  const announcement = blocked
+  const announcement = importing
+    ? copy.review.importing.working(imported.total)
+    : blocked
     ? copy.review.announceBlocked(brokenTiles.length)
     : stillWorking
       ? copy.review.announceWorking
@@ -218,21 +225,41 @@ export function ReviewScreen() {
                 icon={<PlusIcon size={14} />}
                 lines={copy.review.footer.add}
                 label={copy.review.addPage}
-                disabled={navigating}
+                // Photos still being read go in after whatever is there now:
+                // a page shot in the middle of the run would land between
+                // them. The run is seconds; the camera waits for it.
+                disabled={navigating || importing}
                 onClick={() => {
                   setNavigating(true);
+                  photoImport.dismiss();
                   go("capture");
                 }}
               />
             </div>
 
-            <Button
-              fullWidth
-              disabled={readyCount === 0 || stillWorking || blocked || navigating}
-              onClick={generate}
-            >
-              {stillWorking ? copy.review.preparing : copy.gerar.generate}
-            </Button>
+            {tiles.length === 0 && !importing && imported.nothingAdded ? (
+              // Not one of the photos opened. The camera is the way on, so it
+              // takes the primary's place rather than a dead "Gerar PDF".
+              <Button
+                fullWidth
+                disabled={navigating}
+                onClick={() => {
+                  setNavigating(true);
+                  photoImport.dismiss();
+                  go("capture");
+                }}
+              >
+                {copy.capture.take(1)}
+              </Button>
+            ) : (
+              <Button
+                fullWidth
+                disabled={readyCount === 0 || stillWorking || importing || blocked || navigating}
+                onClick={generate}
+              >
+                {stillWorking || importing ? copy.review.preparing : copy.gerar.generate}
+              </Button>
+            )}
           </div>
         }
       >
@@ -271,6 +298,8 @@ export function ReviewScreen() {
             </div>
           )}
 
+          <ImportSummary state={imported} copy={copy} />
+
           <ol ref={listRef} className="flex flex-col gap-2">
             {tiles.map((tile, index) => (
               <li key={tile.key} id={anchorId(tile)} tabIndex={-1} data-enter>
@@ -287,7 +316,7 @@ export function ReviewScreen() {
             ))}
           </ol>
 
-          {tiles.length === 0 && (
+          {tiles.length === 0 && !importing && (
             <Notice tone="neutral" title={copy.review.emptyTitle}>
               {copy.review.emptyBody}
             </Notice>
@@ -320,6 +349,82 @@ export function ReviewScreen() {
         />
       )}
     </>
+  );
+}
+
+/**
+ * What happened to a handful of photos read in one go, above the list.
+ *
+ * Three things, each only when it is true: the run's progress (a title, a mono
+ * counter and a hairline bar — the pages themselves land in the list below as
+ * they are read, so this line only has to say how many are still coming); the
+ * cap, said *before* the photos that do not fit are reached, so nobody watches
+ * pages vanish, and restated as the real count once the run is over (a refused
+ * photo frees its slot, so the forecast can be wrong); and, once the run is
+ * over, the files that did not open, each with the same sentence a single pick
+ * would have shown.
+ */
+function ImportSummary({ state, copy }: { state: PhotoImportState; copy: AppCopy }) {
+  const reasons = Array.from(new Set(state.refused.map((code) => copy.pageErrors[code])));
+  const showOverflow = state.overflow > 0 && (state.working || state.total > 0);
+  if (!state.working && !showOverflow && reasons.length === 0) return null;
+  const percent =
+    state.total === 0 ? 0 : Math.round((Math.min(state.settled, state.total) / state.total) * 100);
+
+  return (
+    <div className="flex flex-col gap-2">
+      {state.working && (
+        <div className="flex flex-col gap-2.5 rounded-[13px] border border-frost bg-warm p-3">
+          <div className="flex items-center gap-2.5">
+            <span
+              aria-hidden="true"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-mint text-leaf"
+            >
+              <SpinnerIcon size={16} />
+            </span>
+            <p className="min-w-0 flex-1 truncate text-sm font-semibold leading-snug text-ink">
+              {copy.review.importing.working(state.total)}
+            </p>
+            <Meta size="xs" className="shrink-0 tabular-nums">
+              {copy.review.importing.progress(Math.min(state.settled, state.total), state.total)}
+            </Meta>
+          </div>
+          <div aria-hidden="true" className="h-1 overflow-hidden rounded-sm bg-frost">
+            <div
+              className="h-full rounded-sm bg-leaf transition-[width] duration-300 ease-out motion-reduce:transition-none"
+              style={{ width: `${percent}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {showOverflow && (
+        <Notice tone="warning">
+          {!state.working
+            ? // Once the run is over the plan gives way to the count: a photo
+              // that could not be read freed its slot for a later one.
+              copy.review.importing.leftOut(state.overflow)
+            : state.fits === 0
+              ? copy.capture.capacityFallback
+              : copy.review.importing.overflow(state.fits)}
+        </Notice>
+      )}
+
+      {!state.working && reasons.length > 0 && (
+        <Notice
+          tone="warning"
+          title={
+            state.nothingAdded
+              ? copy.review.importing.noneTitle
+              : copy.review.importing.refusedTitle(state.refused.length)
+          }
+        >
+          {reasons.map((reason) => (
+            <p key={reason}>{reason}</p>
+          ))}
+        </Notice>
+      )}
+    </div>
   );
 }
 

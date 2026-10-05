@@ -21,6 +21,12 @@
  *      That is the part a build-output assertion cannot reach: every one of
  *      those files is located at runtime by a string, inside third-party code.
  *
+ * With `?seed=N` in the URL it also mounts the flow with `initialImages`: N
+ * drawn pages encoded as JPEG files, so the runner can check that a host's
+ * photos land on the review step and come out as one PDF. (Client-rendered
+ * consumers only: the files can only be made in a browser, and a static export
+ * would hydrate into a different tree.)
+ *
  * The image it feeds through is drawn here, in code: a pale rectangle on a dark
  * ground, with a few ruled lines. Nothing in this repository may be a photograph
  * of a real document, and a test fixture is no exception.
@@ -80,12 +86,45 @@ function SuspendsOnce() {
   return null;
 }
 
+/** `?seed=N`, read once; 0 when absent. */
+function seedCount() {
+  if (typeof window === "undefined") return 0;
+  const value = Number(new URLSearchParams(window.location.search).get("seed") ?? "0");
+  return Number.isInteger(value) && value > 0 ? Math.min(value, 30) : 0;
+}
+
+/** N drawn pages as JPEG files — what a host would hand over as `initialImages`. */
+export async function syntheticPhotos(count) {
+  const files = [];
+  for (let index = 0; index < count; index += 1) {
+    const canvas = drawSyntheticPage(900, 1270);
+    const blob = await new Promise((done) => canvas.toBlob(done, "image/jpeg", 0.9));
+    files.push(new File([blob], `pagina-${index + 1}.jpg`, { type: "image/jpeg" }));
+  }
+  return files;
+}
+
+if (typeof window !== "undefined") window.__scanSyntheticPhotos = syntheticPhotos;
+
 function report(patch) {
   window.__scanSmoke = { ...(window.__scanSmoke ?? {}), ...patch };
 }
 
 export default function SmokeApp() {
   const [mounted, setMounted] = useState(false);
+  const [wanted] = useState(seedCount);
+  const [seed, setSeed] = useState(null);
+
+  useEffect(() => {
+    if (wanted === 0) return;
+    let alive = true;
+    void syntheticPhotos(wanted).then((files) => {
+      if (alive) setSeed(files);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [wanted]);
 
   useEffect(() => {
     report({ done: false, mounted: true });
@@ -127,15 +166,21 @@ export default function SmokeApp() {
     <StrictMode>
       <Suspense fallback={null}>
         <div style={{ position: "fixed", inset: 0 }}>
+          {wanted > 0 && seed === null ? null : (
           <ScanFlow
+            initialImages={seed ?? undefined}
             assetBaseUrl={ASSET_BASE_URL}
             lang="pt-BR"
             maxPages={20}
             maxBytes={26 * 1024 * 1024}
             intake={{ camera: true, images: true, pdf: false }}
-            onComplete={({ file, pageCount, bytes }) =>
-              report({ uiComplete: { name: file.name, pageCount, bytes } })
+            onComplete={({ file, pageCount, bytes, initialImages }) =>
+              report({ uiComplete: { name: file.name, pageCount, bytes, initialImages: initialImages ?? null } })
             }
+            onPhotoImport={(photoImport) => {
+              const seen = window.__scanSmoke?.photoImports ?? [];
+              report({ photoImports: [...seen, photoImport] });
+            }}
             onCancel={(reason) => report({ uiCancel: reason })}
             onPagesChange={(count) => report({ uiPages: count })}
             onEvent={(event) => {
@@ -143,6 +188,7 @@ export default function SmokeApp() {
               report({ events: [...seen, event.name] });
             }}
           />
+          )}
         </div>
         <SuspendsOnce />
       </Suspense>

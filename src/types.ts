@@ -16,15 +16,24 @@ export type ScanLang = "pt-BR" | "en-US";
 /**
  * Why the flow could not continue.
  *
- * `camera_denied` and `no_camera` are recoverable and the library handles them
- * itself by falling back to the file intake — a host that receives them is being
- * informed, not asked to act. The rest end the session.
+ * `camera_denied`, `no_camera` and `camera_unavailable` are recoverable and
+ * the library handles them itself by falling back to the file intake — a host
+ * that receives them is being informed, not asked to act. The rest end the
+ * session.
  */
 export type ScanErrorCode =
   /** The person refused the camera permission prompt, or a policy blocks it. */
   | "camera_denied"
   /** There is no camera, or the browser will not enumerate one. */
   | "no_camera"
+  /**
+   * The camera was not refused but would not open: every request timed out or
+   * failed (`NotReadableError`, `AbortError`…), or the stream never delivered
+   * a frame. Older Android phones that hang on a high-resolution request are
+   * the usual case. The capture screen falls back to the file intake, which
+   * on a phone opens the device's own camera app.
+   */
+  | "camera_unavailable"
   /** An asset under `assetBaseUrl` could not be fetched: wrong path, CSP, MIME type. */
   | "asset_load"
   /** The corner-detection model loaded but would not initialise. */
@@ -32,7 +41,20 @@ export type ScanErrorCode =
   /** The browser ran out of memory. Older phones, many pages. */
   | "out_of_memory"
   /** PDF assembly failed, including "the size budget cannot be met". */
-  | "build_failed";
+  | "build_failed"
+  /**
+   * None of the `initialImages` could be opened (an unreadable or unsupported
+   * file, a HEIC the browser cannot decode).
+   *
+   * **Recoverable on the phone surface** while the camera is offered
+   * (`intake.camera`, the default): the flow stays open on the review step
+   * and offers to photograph page 1; the event says `recoverable: true` and
+   * no `onCancel` follows. **Terminal on the desktop surface**, where there is
+   * nothing else to fall back to: `recoverable: false`, then
+   * `onCancel("error")`. Either way `onPhotoImport` has already fired, with
+   * every index in `refused`.
+   */
+  | "images_unreadable";
 
 /**
  * Everything that happens inside, as it happens.
@@ -89,6 +111,34 @@ export interface ScanResult {
   pageCount: number;
   /** Exactly `file.size`, repeated here so a host need not reach into the File. */
   bytes: number;
+  /**
+   * What became of `initialImages` — the same report `onPhotoImport` received.
+   * Absent when no `initialImages` were passed, or when the PDF was finished
+   * before the photos had all been read.
+   */
+  initialImages?: ScanPhotoImportReport;
+}
+
+/**
+ * What became of each of the `initialImages`, as indices into that array
+ * (ascending, 0-based). A file's index is in exactly one list:
+ *
+ *  - `imported` — it became a page (or, for a PDF on the desktop surface, at
+ *    least one page). A page the person later deletes stays listed: this is
+ *    the record of the import, not of the finished document;
+ *  - `refused` — it could not be read: unreadable, unsupported, a HEIC this
+ *    browser cannot decode, a PDF where PDF intake is not on;
+ *  - `overflow` — the document had no room for it (`maxPages`). These are the
+ *    photos a host can hand to a second document.
+ *
+ * The one exception: when the person clears the desktop list («Limpar»)
+ * while the photos are still being read, the files the run never reached are
+ * in none of the three lists.
+ */
+export interface ScanPhotoImportReport {
+  imported: number[];
+  refused: number[];
+  overflow: number[];
 }
 
 export interface ScanFlowProps {
@@ -141,6 +191,60 @@ export interface ScanFlowProps {
 
   /** Which sources are offered. Defaults: camera on, images on, pdf off. */
   intake?: ScanIntake;
+
+  /**
+   * Photos the host already holds, turned into the document's first pages.
+   *
+   * **Read once, on mount**: a later change to this array is ignored, exactly
+   * like the other options that shape a session. Pass a new `key` to start a
+   * new document.
+   *
+   * Each file goes through the same intake as a pick from the file chooser:
+   * the quality gate, corner detection, the `maxPages` cap and the per-file
+   * refusals (an unreadable file is skipped with its own message; HEIC is
+   * best effort — Safari decodes it, most other browsers do not). Pages keep
+   * the array's order. Files past `maxPages` are left out, and the flow says
+   * so on screen before it starts. A PDF in the array is refused unless
+   * `intake.pdf` is on and the desktop surface is showing.
+   *
+   * Where the flow opens instead of its first screen:
+   *
+   *  - phone surface — the review step, with a "processing N photos" line while
+   *    the files are read; every page can be opened, corrected and reordered
+   *    from there, and more pages can be photographed when `intake.camera` is
+   *    on;
+   *  - desktop surface — step 2 («Conferir») once the files are read, or step 1
+   *    when one of them was refused, so the reason stays on screen.
+   *
+   * When the files have all been read, `onPhotoImport` says which became
+   * pages, which were refused and which did not fit.
+   *
+   * When none of them can be opened, an `error` event with `images_unreadable`
+   * is emitted: on the phone the flow stays open on the review step and points
+   * to the camera (recoverable); on the desktop `onCancel("error")` follows
+   * (terminal).
+   *
+   * Nothing about the files leaves the library: events carry page numbers,
+   * never names or bytes. An empty array behaves as if the prop were absent.
+   */
+  initialImages?: readonly File[];
+
+  /**
+   * Fires once, when the `initialImages` have all been read (or, on the
+   * desktop surface, when the person cleared them part-way), with what became
+   * of each one — see {@link ScanPhotoImportReport}. Never fires without
+   * `initialImages`, and never fires for photos the person adds inside the
+   * flow (a multi-pick from the gallery, a drop on the desktop): those have
+   * no index in the host's array. A flow unmounted before the run finished
+   * does not call it.
+   *
+   * It comes before any `images_unreadable` error the same run causes. The
+   * same report is repeated on `onComplete`'s result as `initialImages`.
+   *
+   * A host that wants to keep the photos that did not fit for a second
+   * document reads `overflow`.
+   */
+  onPhotoImport?(report: ScanPhotoImportReport): void;
 
   /**
    * Fires at most once per mounted instance, after the PDF exists. Final: after
