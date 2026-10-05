@@ -15,7 +15,7 @@ import { createContext, useContext, type ReactNode } from "react";
 import type { AssetUrls } from "@/lib/runtime-config";
 import type { CaptureLayout } from "@/lib/capture-layout";
 import type { DiagnosticsSink } from "@/lib/diagnostics-events";
-import type { ScanErrorCode, ScanEvent, ScanLang } from "@/types";
+import type { ScanErrorCode, ScanEvent, ScanLang, ScanPhotoImportReport } from "@/types";
 
 export interface ScanRuntime {
   /** Every runtime file, already resolved against the host's base. */
@@ -60,6 +60,12 @@ export interface ScanRuntime {
    * non-recoverable error ends the flow through the host's `onCancel`.
    */
   reportError(code: ScanErrorCode, recoverable: boolean): void;
+  /**
+   * The `initialImages` run is over: tell the host what became of each photo
+   * (`onPhotoImport`) and keep it for `onComplete`. Only the first call of a
+   * flow reaches the host; only the seeding run may call it.
+   */
+  reportPhotoImport(report: ScanPhotoImportReport): void;
 }
 
 const ScanRuntimeContext = createContext<ScanRuntime | null>(null);

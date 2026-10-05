@@ -30,9 +30,13 @@ export interface PhotoImportState {
   total: number;
   /** Of those, how many have been read — whatever became of them. */
   settled: number;
-  /** How many the document had no room for, known before the run starts. */
+  /**
+   * How many the document had no room for. While the run is on, the plan made
+   * before it started (`plannedIntake`); once it is over, the real count — a
+   * refused photo frees its slot for the next one, so the two can differ.
+   */
   overflow: number;
-  /** How many fit, for the "only the first N" line. */
+  /** How many the plan said would fit, for the "only the first N" line. */
   fits: number;
   /** The last finished run's refusals, in order. Empty while working. */
   refused: readonly PageErrorCode[];
@@ -125,15 +129,22 @@ export function PhotoImportProvider({ children }: { children: React.ReactNode })
               ...prev,
               working: false,
               settled: report.total,
+              // The plan's overflow was a forecast; this is what happened.
+              overflow: report.overflow,
               refused: report.refused,
               nothingAdded,
             }));
           }
-          // The host's photos could not become a single page. On the phone the
-          // camera is still right there, so the session stays open and the
-          // review step offers it; the host is told, not asked to close.
-          if (origin === "initial" && nothingAdded && report.refused.length > 0) {
-            runtime.reportError("images_unreadable", runtime.intake.camera);
+          if (origin === "initial") {
+            // The host learns which of its photos are in, whatever happened —
+            // including "none of them", before the error below.
+            runtime.reportPhotoImport(report.indices);
+            // The host's photos could not become a single page. On the phone
+            // the camera is still right there, so the session stays open and
+            // the review step offers it; the host is told, not asked to close.
+            if (nothingAdded && report.refused.length > 0) {
+              runtime.reportError("images_unreadable", runtime.intake.camera);
+            }
           }
         })
         // The queue outlives any one run: a runner that threw must not take

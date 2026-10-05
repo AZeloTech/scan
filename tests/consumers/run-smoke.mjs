@@ -125,6 +125,15 @@ async function drivePhotoIntake(browser, origin, { seeded }) {
       if (result.uiComplete.pageCount !== 3) problems.push(`seeded PDF has ${result.uiComplete.pageCount} pages, not 3`);
       const captures = (result.events ?? []).filter((event) => event === "capture").length;
       if (captures !== 3) problems.push(`seeded flow emitted ${captures} capture events, not 3`);
+      // Once (StrictMode's rehearsal must not report), with every photo in.
+      const expected = JSON.stringify({ imported: [0, 1, 2], refused: [], overflow: [] });
+      const imports = result.photoImports ?? [];
+      if (imports.length !== 1 || JSON.stringify(imports[0]) !== expected) {
+        problems.push(`onPhotoImport fired ${imports.length} time(s): ${JSON.stringify(imports)}`);
+      }
+      if (JSON.stringify(result.uiComplete.initialImages) !== expected) {
+        problems.push(`onComplete's initialImages is ${JSON.stringify(result.uiComplete.initialImages)}`);
+      }
     } catch (error) {
       problems.push(`initialImages did not reach a 3-page PDF: ${String(error).split("\n")[0]}`);
     }
@@ -144,6 +153,9 @@ async function drivePhotoIntake(browser, origin, { seeded }) {
     });
     await page.waitForFunction(() => window.__scanSmoke?.uiPages === 2, null, { timeout: 60_000 });
     await page.getByText(reviewTitle).waitFor({ timeout: 10_000 });
+    // A pick made inside the flow has no index in a host array: not reported.
+    const picked = await page.evaluate(() => window.__scanSmoke?.photoImports ?? []);
+    if (picked.length !== 0) problems.push(`a multi-pick fired onPhotoImport: ${JSON.stringify(picked)}`);
   } catch (error) {
     problems.push(`a multi-pick did not land 2 pages on review: ${String(error).split("\n")[0]}`);
   }

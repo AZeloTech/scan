@@ -318,6 +318,23 @@ export function markMlReady(): void {
 }
 
 /**
+ * A new scanning session may try the model again.
+ *
+ * {@link disableMl} latches for the session on purpose — within one, a model
+ * that failed (or is hopelessly slow here) must not be retried on every
+ * frame. But the latch is module state, and without this it outlived the
+ * session: one transient 404 or dropped connection for the model would keep
+ * every later scan on the page classical. Called when the detection lane is
+ * released for good (no scanner on the page for the idle grace), which is
+ * where one session ends and the next one starts.
+ */
+export function allowMlAgain(): void {
+  if (inFlight) return;
+  disabled = false;
+  ready = false;
+}
+
+/**
  * The runtime that was proven lives somewhere that is gone (the detection
  * worker died): this thread has to warm its own before the model is primary
  * again. The fail-closed latch is untouched — a failure stays a failure.

@@ -11,6 +11,13 @@ import {
   type ChosenFile,
 } from "@/lib/desktop-intake";
 import type { Capture } from "@/lib/capture-intake";
+import {
+  pileResult,
+  seedVerdict,
+  SeedTracker,
+  type PileOutcome,
+  type PileResult,
+} from "@/lib/seed-intake";
 import { isPdfFile } from "@/lib/pdf-import";
 import type { AssetUrls } from "@/lib/runtime-config";
 import type { ScanStore } from "@/lib/scan-store";
@@ -73,7 +80,7 @@ export function DesktopFlow({ initialFiles = NO_FILES }: DesktopFlowProps = {}) 
     if (session === null) store.start();
   }, [session, store]);
 
-  const intake = useIntake(
+  const rawIntake = useIntake(
     tiles,
     store,
     runtime.urls,
@@ -87,44 +94,68 @@ export function DesktopFlow({ initialFiles = NO_FILES }: DesktopFlowProps = {}) 
    * actually committed (StrictMode rehearses the mount with one it disposes).
    * They go through step 1's own pile, so the rows, the "Abrindo 3 de 8…" line,
    * the per-file refusals and the page cap are exactly a pick's.
+   *
+   * The seed is followed through its own run (`SeedTracker`), not through the
+   * list: the list also holds what the person adds, and after a «Limpar» their
+   * next pick must never be mistaken for the host's photos.
    */
   const seededFor = React.useRef<string | null>(null);
-  const [seedPending, setSeedPending] = React.useState(initialFiles.length > 0);
-  const acceptFiles = intake.accept;
-  const clearFiles = intake.clear;
+  const seedTracker = React.useRef<SeedTracker | null>(null);
+  if (seedTracker.current === null) seedTracker.current = new SeedTracker();
+  /** A seed run that finished and still has to decide where the flow goes. */
+  const [seedSettle, setSeedSettle] = React.useState<PileResult | null>(null);
+  const acceptFiles = rawIntake.accept;
+  const clearFiles = rawIntake.clear;
   React.useEffect(() => {
     if (initialFiles.length === 0) return;
     if (store.disposed || seededFor.current === store.id) return;
+    const tracker = seedTracker.current!;
     // A seed already went into a store that was then disposed (the rehearsal):
-    // abandon its run and its rows before seeding the real one.
+    // abandon its run and its rows before seeding the real one. `begin`
+    // disowns that run, so its finish reports nothing.
     if (seededFor.current !== null) clearFiles();
     seededFor.current = store.id;
-    acceptFiles(initialFiles);
-  }, [acceptFiles, clearFiles, initialFiles, store]);
+    const token = tracker.begin();
+    acceptFiles(initialFiles, (result) => {
+      // The flow went away while the photos were read: nobody to tell.
+      if (store.disposed) return;
+      const finished = tracker.finish(token, result);
+      if (finished.report !== null) runtime.reportPhotoImport(finished.report);
+      if (finished.settle !== null) setSeedSettle(finished.settle);
+    });
+  }, [acceptFiles, clearFiles, initialFiles, runtime, store]);
 
   /**
-   * Once the seed has been read: straight on to «Conferir» when every photo
-   * became a page — that is what the host handed them over for. When one was
-   * refused, or the cap left some out, step 1 stays, because that is where the
-   * reason is written next to the file's name. When none could be opened there
-   * is nothing to check and no camera to fall back to here, so the session
-   * ends and the host is told why.
+   * «Limpar» ends the seed's say in where the flow goes: its run still reports
+   * what it got to, but neither its end nor anything picked afterwards moves
+   * the flow on or ends the session.
    */
-  const seedSettled =
-    seedPending &&
-    intake.files.length > 0 &&
-    !intake.busy &&
-    intake.done === intake.files.length;
+  const clearAll = React.useCallback(() => {
+    seedTracker.current?.clear();
+    setSeedSettle(null);
+    clearFiles();
+  }, [clearFiles]);
+  const intake = React.useMemo<IntakeState>(
+    () => ({ ...rawIntake, clear: clearAll }),
+    [rawIntake, clearAll],
+  );
+
+  /**
+   * Once the seed has been read — and anything picked meanwhile has settled
+   * too, so the step does not change under a pile still opening — straight on
+   * to «Conferir» when every photo became a page. When one was refused, or
+   * the cap left some out, step 1 stays, because that is where the reason is
+   * written next to the file's name. When none could be opened there is
+   * nothing to check and no camera to fall back to here, so the session ends
+   * and the host is told why.
+   */
   React.useEffect(() => {
-    if (!seedSettled) return;
-    setSeedPending(false);
-    const refused = intake.files.some((file) => file.state === "refused");
-    if (tiles.length === 0) {
-      runtime.reportError("images_unreadable", false);
-      return;
-    }
-    if (!refused && !intake.atCapacity) setStep("conferir");
-  }, [seedSettled, intake.files, intake.atCapacity, tiles.length, runtime]);
+    if (seedSettle === null || intake.busy) return;
+    setSeedSettle(null);
+    const verdict = seedVerdict(seedSettle, tiles.length);
+    if (verdict === "unreadable") runtime.reportError("images_unreadable", false);
+    else if (verdict === "conferir") setStep("conferir");
+  }, [seedSettle, intake.busy, tiles.length, runtime]);
 
   /** Which page the workspace is looking at. Null until step 2 first opens. */
   const [cursor, setCursor] = React.useState<string | null>(null);
@@ -370,7 +401,11 @@ export interface IntakeState {
   /** How many rows have settled, for the "Abrindo 3 de 8…" line. */
   done: number;
   atCapacity: boolean;
-  accept: (files: FileList | readonly File[] | null) => void;
+  /**
+   * Queue a pile. `onDone` hears, once, what became of each file — as indices
+   * into `files` — when this pile's run ends, finished or abandoned.
+   */
+  accept: (files: FileList | readonly File[] | null, onDone?: (result: PileResult) => void) => void;
   clear: () => void;
   /** The pages a chosen row became, so a row can show its own thumbnail. */
   tileFor: (file: ChosenFile) => PageTile | null;
@@ -424,14 +459,31 @@ function useIntake(
   );
 
   const accept = React.useCallback(
-    (incoming: FileList | readonly File[] | null) => {
+    (incoming: FileList | readonly File[] | null, onDone?: (result: PileResult) => void) => {
       const chosen = Array.from(incoming ?? []);
+      /** What became of each file, by its index in `chosen`. */
+      const outcomes = new Map<number, PileOutcome>();
       // Dropped folders and drag-and-drop reach here without passing the
       // dialog's `accept`, so the refusal has to be here as well — this is the
       // line that guarantees pdf.js is never fetched when the host said no.
-      const allowed = allowPdf ? chosen : chosen.filter((file) => !isPdfFile(file));
+      const allowed: File[] = [];
+      chosen.forEach((file, index) => {
+        if (!allowPdf && isPdfFile(file)) outcomes.set(index, "refused");
+        else allowed.push(file);
+      });
       const ordered = orderForIntake(allowed);
-      if (ordered.length === 0) return;
+      if (ordered.length === 0) {
+        onDone?.(pileResult(chosen.length, outcomes, false));
+        return;
+      }
+      // A folder is re-sorted by name, so each row has to remember which of
+      // the files it was handed it is (the same File may appear twice).
+      const taken = new Set<number>();
+      const origins = ordered.map((file) => {
+        const index = chosen.findIndex((candidate, at) => candidate === file && !taken.has(at) && !outcomes.has(at));
+        taken.add(index);
+        return index;
+      });
       const label = folderLabel(ordered);
       const seed = (seedRef.current += 1);
       const rows = chosenFrom(ordered, seed);
@@ -445,6 +497,7 @@ function useIntake(
         key: row.key,
         file: ordered[index],
       }));
+      const originOf = new Map(rows.map((row, index) => [row.key, origins[index]]));
 
       pendingRef.current += 1;
       queueRef.current = queueRef.current
@@ -465,7 +518,14 @@ function useIntake(
                 return pages[pages.length - 1]?.id ?? null;
               },
               onStart: (key) => patch(key, { state: "opening" }),
-              onSettled: (key, pageIds, error) =>
+              onSettled: (key, pageIds, error) => {
+                const origin = originOf.get(key);
+                if (origin !== undefined) {
+                  outcomes.set(
+                    origin,
+                    error !== null ? "refused" : pageIds.length > 0 ? "added" : "skipped",
+                  );
+                }
                 patch(key, {
                   pageIds: [...pageIds],
                   error,
@@ -475,7 +535,8 @@ function useIntake(
                       : pageIds.length > 0
                         ? "added"
                         : "skipped",
-                }),
+                });
+              },
               onCapacityHit: () => setAtCapacity(true),
               cancelled: () => runRef.current !== generation,
             },
@@ -488,6 +549,7 @@ function useIntake(
         .finally(() => {
           pendingRef.current -= 1;
           if (pendingRef.current === 0) setBusy(false);
+          onDone?.(pileResult(chosen.length, outcomes, runRef.current !== generation));
         });
     },
     [allowPdf, assets, emit, maxPages, patch, store],

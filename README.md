@@ -162,7 +162,8 @@ Full types ship with the package (`ScanFlowProps`). In short:
 | `defaultFileName` | the finished file's name, used **verbatim**. When you pass it, the flow shows no way to name the document (no marking chips, no text field) and the PDF's `/Title` is this name without `.pdf`. Without it the flow composes `<yyyymmdd>-<hhmm>_<marking>.pdf` from the scan's start and a marking — "exame" unless the person picks another ("receita"…, or a short slugged text) on the screen a failed build falls back to, or on the desktop flow's step 3, and `/Title` is that file name without `.pdf` — typed text never reaches the metadata as typed. Keep personal data out of it; pass it if your application must not receive anything a person typed. |
 | `intake` | which sources are offered: `camera`, `images`, `pdf`. pdf.js loads only if you enable it, and the file-picker copy only mentions PDFs when it is on. |
 | `initialImages` | photos you already hold (`readonly File[]`), turned into the first pages. **Read once, on mount** — later changes are ignored; remount with a new `key` for a new document. See [Starting from photos](#starting-from-photos). |
-| `onComplete` | fires once, with the exact `File`, its page count and its byte size. Final. |
+| `onComplete` | fires once, with the exact `File`, its page count and its byte size — and, when `initialImages` were passed and read before the PDF was finished, `initialImages`: the same report as `onPhotoImport`. Final. |
+| `onPhotoImport` | fires once, when the `initialImages` have all been read: `{ imported, refused, overflow }`, each a list of indices into your `initialImages` array. See [Starting from photos](#starting-from-photos). |
 | `onCancel` | a request to close, with `"user"` (never final — see above) or `"error"` (final). |
 | `onPagesChange` | how many pages are held, so you can ask before discarding. |
 | `onEvent` | step, capture (`source: "file"` for every page read from a file — `initialImages`, a multi-pick, the desktop picker), quality, size and error events. Numbers and enums only — never image data, never a file name. Safe to forward straight to analytics. |
@@ -281,9 +282,45 @@ is on and the desktop surface is showing.
   are read — unless one was refused or left out by the cap, in which case it
   stays on step 1, where the reason is written next to the file.
 - **None could be opened:** an `error` event with `images_unreadable`. On the
-  phone it is recoverable — the flow stays on the review step, says why, and its
-  primary button becomes "Fotografar página 1". On the desktop it is final and
-  `onCancel("error")` follows.
+  phone it is recoverable while the camera is offered (`intake.camera`, the
+  default) — the event says `recoverable: true`, the flow stays on the review
+  step, says why, and its primary button becomes "Fotografar página 1"; no
+  `onCancel` follows. On the desktop it is terminal: `recoverable: false`, then
+  `onCancel("error")`.
+- **The cap, after the fact:** a photo that could not be read frees its slot for
+  the next one, so the "only the first N" forecast can be wrong. Once the photos
+  are read the phone's notice gives the real count ("2 fotos ficaram de fora…"),
+  or disappears when nothing was left out.
+
+#### Which photos made it in: `onPhotoImport`
+
+```tsx
+<ScanFlow
+  initialImages={photos}
+  onPhotoImport={({ imported, refused, overflow }) => {
+    // indices into `photos`, ascending
+    setLeftOver(overflow.map((index) => photos[index]));  // for a second document
+  }}
+  onComplete={({ file, initialImages }) => attach(file /* initialImages: same report */)}
+  /* … */
+/>
+```
+
+It fires **once**, when the seeding run is over, before any `images_unreadable`
+error that run causes (so a phone seed where every file failed reports all of
+them in `refused`, then stays open on the review step). Every index is in
+exactly one list: `imported` became a page (a page later deleted stays listed —
+this is the record of the import), `refused` could not be read, `overflow` did
+not fit under `maxPages`. One exception: when the person clears the desktop list
+(«Limpar») while the photos are still being read, the run stops and reports what
+it reached; the files it never got to are in none of the lists.
+
+Photos the person adds **inside** the flow — a multi-pick from the gallery, a
+drop or a pick on the desktop — are **not** reported: they have no index in your
+array, and the pages they become are already counted by `onPagesChange`. A flow
+unmounted before the photos were read does not call it. The report is repeated
+on `onComplete`'s result as `initialImages`, absent when there were no
+`initialImages` or when the PDF was finished before they had all been read.
 
 The same intake serves the phone's own multi-select: "Já tenho a foto" and the
 permission screen's gallery button accept several photos at once. One photo
@@ -300,15 +337,21 @@ import { preloadScanAssets } from "@azelotech/scan";
 
 const release = preloadScanAssets({ assetBaseUrl: "/scan-assets" });
 // …the person taps "scan"; <ScanFlow> mounts onto a warm detector.
-// If they close without scanning:
+// When your sheet closes — after a finished scan, a cancel, an error, or
+// without scanning at all:
 release();
 ```
 
 Starts the detection worker and, through it, the corner model's download and
 compile (~3.4 MB), the same work `<ScanFlow>` starts when its viewfinder mounts.
-The warm worker is kept while anything holds it and for about a minute after
-the last release. Importing it does nothing; it fetches only this library's own
-files.
+**Release when the sheet closes, in every case.** A mounted `<ScanFlow>` holds
+the worker by itself, so releasing once the flow is on screen is fine too; a
+release that is never called keeps the worker (and the ~30 MB its runtime
+holds) for the page's life. Once nothing holds it the warm worker stays for
+about a minute, then its memory is given back. Each release counts once:
+calling it twice (a close handler and an unmount cleanup) is harmless and never
+takes away a hold that a mounted flow or another preload still has. Importing
+it does nothing; it fetches only this library's own files.
 
 ### Proving your wiring works
 

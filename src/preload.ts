@@ -8,10 +8,20 @@
  * coming — the person tapped the button that opens the sheet — can start it a
  * beat sooner with this.
  *
- * Returns a release. The warm worker is kept while anything holds it (this
- * call, or a mounted `<ScanFlow>`), and for about a minute after the last
- * release, then its memory is given back. Call the release when the host's
- * sheet closes without scanning; calling it twice is harmless.
+ * Returns a release, and **the host must call it when its sheet closes — in
+ * every case**: after a finished scan, after a cancel, after an error, and
+ * when the sheet closes without the flow ever mounting. A mounted
+ * `<ScanFlow>` holds the worker on its own while it is on screen, so
+ * releasing as soon as the flow has mounted is also fine; never releasing is
+ * not — the worker (and the ~30 MB its runtime holds) then stays for the
+ * page's life. Once nothing holds it, the warm worker is kept for about a
+ * minute, so a sheet opened again soon after starts warm, and then its memory
+ * is given back.
+ *
+ * Each release counts once: calling the same release twice (a close handler
+ * and an unmount cleanup both firing) is harmless, and can never release a
+ * hold that somebody else — another `preloadScanAssets` call, or a mounted
+ * flow — still has.
  *
  * Fetches nothing but this library's own files under `assetBaseUrl`, and does
  * nothing at all until called — importing it has no side effects.
@@ -27,5 +37,13 @@ export interface PreloadScanAssetsOptions {
 
 export function preloadScanAssets(options: PreloadScanAssetsOptions): () => void {
   if (typeof window === "undefined") return () => undefined;
-  return holdDetectLane(assetUrls(options.assetBaseUrl));
+  const release = holdDetectLane(assetUrls(options.assetBaseUrl));
+  let released = false;
+  // Idempotent here as well as in the lane: this function is the public
+  // promise, and it must hold whatever the lane's internals become.
+  return () => {
+    if (released) return;
+    released = true;
+    release();
+  };
 }

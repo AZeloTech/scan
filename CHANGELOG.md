@@ -16,15 +16,25 @@ freezes at 1.0.
   "Processando N fotos…" line and progress bar; the desktop surface fills step
   1 and moves on to «Conferir» when every photo became a page (it stays on step
   1 when one was refused or left out, so the reason stays on screen).
+- **`onPhotoImport({ imported, refused, overflow })`**: fires once when the
+  `initialImages` have been read, with each photo's fate as indices into that
+  array — e.g. to keep the photos that did not fit (`overflow`) for a second
+  document. The same report is on `onComplete`'s result as the optional
+  `initialImages` field (`ScanPhotoImportReport`, exported). Photos added
+  inside the flow (a multi-pick, a desktop pick or drop) are not reported.
 - **`images_unreadable`** error code: none of the `initialImages` could be
-  opened. Recoverable on the phone (the review step offers the camera),
-  followed by `onCancel("error")` on the desktop.
+  opened. Recoverable on the phone while the camera is offered (the review
+  step offers "Fotografar página 1"; no `onCancel`), terminal on the desktop
+  (`onCancel("error")` follows). `onPhotoImport` fires first, with every index
+  in `refused`.
 - **Multi-select on the phone.** "Já tenho a foto" and the permission screen's
   gallery button accept several photos; two or more go straight to the review
   step through the same intake (one still goes through confirm-corners).
 - **"Só as primeiras N entram"**: when photos outnumber the room left in the
   document, the review step says so before they are read (en: "Only the first
-  N fit; the rest can go in a second document.").
+  N fit; the rest can go in a second document."). Once they are read the
+  notice gives the real count — a refused photo frees its slot, so the
+  forecast can be wrong — or goes away when nothing was left out.
 - **A HEIC the browser cannot decode is named as such**, per file, with the way
   out ("tire a foto pela câmera"), on the phone and on the desktop list
   (`PageErrorCode` gains `heic`).
@@ -33,8 +43,24 @@ freezes at 1.0.
   fallback surface opens the device's camera app, and the gallery pick now
   stays available next to it.
 - **`preloadScanAssets({ assetBaseUrl })`**: warm the detection worker and the
-  corner model before the flow mounts; returns a release.
+  corner model before the flow mounts; returns a release the host calls when
+  its sheet closes, in every case. Each release counts once: a double call
+  never takes away a hold that a mounted flow still has.
 - `capture` events (`source: "file"`) for every page read from a file.
+
+### Fixed
+- **A failed asset load is retried.** scanic's module and the pdf.js chunk were
+  memoised even when the load failed, so one transient 404 or dropped
+  connection broke them for the page's life; a failure is now forgotten and the
+  next attempt fetches again. The corner model's failure latch still holds for
+  the session, and is lifted once no scanner has been on the page for the idle
+  grace (about a minute), so the next session tries the model again. (The
+  dewarp engine, the deskew maths and the dewarp worker already retried.)
+- **Desktop: «Limpar» ends the host's photos' say.** After the person cleared
+  a list that started from `initialImages`, their next pick could be taken for
+  the seed — moving the flow on, or ending the session with
+  `images_unreadable` when that pick failed. The seed is now followed through
+  its own run only.
 
 ### Changed
 - The package no longer ships source maps (more than half of the tarball); the

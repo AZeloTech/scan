@@ -94,7 +94,13 @@ test("pages land in the array's order, one at a time, each reported", async () =
   assert.deepEqual(order, ["c.jpg", "a.jpg", "b.jpg"]);
   assert.deepEqual(pageNumbers, [1, 2, 3]);
   assert.deepEqual(progress, [1, 2, 3]);
-  assert.deepEqual(report, { total: 3, added: 3, refused: [], overflow: 0 });
+  assert.deepEqual(report, {
+    total: 3,
+    added: 3,
+    refused: [],
+    overflow: 0,
+    indices: { imported: [0, 1, 2], refused: [], overflow: [] },
+  });
 });
 
 test("photos past the cap are counted as left out, never decoded", async () => {
@@ -113,7 +119,13 @@ test("photos past the cap are counted as left out, never decoded", async () => {
   );
   assert.deepEqual(decoded, ["1.jpg", "2.jpg"]);
   assert.equal(document.pages.length, 3);
-  assert.deepEqual(report, { total: 4, added: 2, refused: [], overflow: 2 });
+  assert.deepEqual(report, {
+    total: 4,
+    added: 2,
+    refused: [],
+    overflow: 2,
+    indices: { imported: [0, 1], refused: [], overflow: [2, 3] },
+  });
 });
 
 test("when every photo fails, nothing is added and each reason is kept", async () => {
@@ -130,6 +142,25 @@ test("when every photo fails, nothing is added and each reason is kept", async (
   assert.equal(report.added, 0);
   assert.deepEqual(report.refused, ["prep", "prep"]);
   assert.equal(report.overflow, 0);
+  assert.deepEqual(report.indices, { imported: [], refused: [0, 1], overflow: [] });
+});
+
+test("a refusal frees its slot: the plan's overflow is not the run's", async () => {
+  const files = [photo("1.jpg"), photo("2.jpg"), photo("3.jpg"), photo("4.jpg")];
+  const document = doc(3);
+  // Planned: 3 fit, 1 left out. The second photo cannot be read, so the
+  // fourth takes its place and nothing is left out.
+  assert.deepEqual(plannedIntake(files.length, 0, 3), { fits: 3, overflow: 1 });
+  const report = await importPhotos(files, document.target, {
+    assets: TEST_ASSETS,
+    decoders: decoders(async (file) => {
+      if (file.name === "2.jpg") throw new ImagePrepError("prep");
+      return captureOf(file);
+    }),
+  });
+  assert.equal(document.pages.length, 3);
+  assert.equal(report.overflow, 0);
+  assert.deepEqual(report.indices, { imported: [0, 2, 3], refused: [1], overflow: [] });
 });
 
 test("one bad photo costs one page, and a HEIC says it is the format", async () => {
@@ -159,6 +190,7 @@ test("one bad photo costs one page, and a HEIC says it is the format", async () 
   assert.deepEqual(report.refused, ["unsupported", "heic", "unsupported"]);
   assert.equal(report.overflow, 0);
   assert.equal(document.pages.length, 2);
+  assert.deepEqual(report.indices, { imported: [0, 3], refused: [1, 2, 4], overflow: [] });
 });
 
 test("a run abandoned mid-decode adds nothing more and reports no overflow", async () => {
@@ -175,6 +207,8 @@ test("a run abandoned mid-decode adds nothing more and reports no overflow", asy
   assert.equal(document.pages.length, 0);
   assert.equal(report.added, 0);
   assert.equal(report.overflow, 0);
+  // The files it never reached are in none of the three lists.
+  assert.deepEqual(report.indices, { imported: [], refused: [], overflow: [] });
 });
 
 test("HEIC is recognised by type or by extension", () => {

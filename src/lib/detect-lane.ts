@@ -49,7 +49,7 @@ import {
   type ResultReply,
   type WorkerToMain,
 } from "@/lib/detect-protocol";
-import { forgetMlReady, markMlReady, ML_WEAK_CONFIDENCE } from "@/lib/ml-detection";
+import { allowMlAgain, forgetMlReady, markMlReady, ML_WEAK_CONFIDENCE } from "@/lib/ml-detection";
 import { mlDetectorOptions, type AssetUrls } from "@/lib/runtime-config";
 import { probe, probeSetting, probing } from "@/lib/probe";
 import type { CornerPoints } from "scanic";
@@ -239,15 +239,22 @@ export function holdDetectLane(urls: AssetUrls): () => void {
   // that deployed a new version between two mounts): start over.
   if (holders === 1 && decision !== null && startedWith !== urlsKey(urls)) resetDetectLane();
   void startDetectLane(urls);
+  // Each hold releases once, however often its release is called: a second
+  // call must never take away a hold somebody else still has.
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    holders -= 1;
+    holders = Math.max(0, holders - 1);
     if (holders > 0) return;
     idleTimer = window.setTimeout(() => {
       idleTimer = null;
-      if (holders === 0) resetDetectLane();
+      if (holders !== 0) return;
+      resetDetectLane();
+      // No scanner on the page for the whole grace: that session is over, and
+      // a model that failed in it (a transient 404 included) gets another
+      // chance in the next one.
+      allowMlAgain();
     }, IDLE_RELEASE_MS);
   };
 }

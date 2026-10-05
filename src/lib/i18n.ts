@@ -368,6 +368,8 @@ export interface AppCopy {
       progress: (done: number, total: number) => string;
       /** The cap is shorter than the pile: said before the first photo is read. */
       overflow: (fits: number) => string;
+      /** The run is over and the cap left `n` photos out — the real count, not the forecast. */
+      leftOut: (n: number) => string;
       /** Some photos could not be opened; the reasons follow, one per line. */
       refusedTitle: (n: number) => string;
       /** Not one of them could be opened. */
@@ -1166,6 +1168,10 @@ const PT: AppCopy = {
         fits === 1
           ? "Só a primeira entra; o resto pode ir num segundo documento."
           : `Só as primeiras ${fits} entram; o resto pode ir num segundo documento.`,
+      leftOut: (n) =>
+        n === 1
+          ? "1 foto ficou de fora: o documento chegou ao limite de páginas. Ela pode ir num segundo documento."
+          : `${n} fotos ficaram de fora: o documento chegou ao limite de páginas. Elas podem ir num segundo documento.`,
       refusedTitle: (n) => (n === 1 ? "1 foto não entrou" : `${n} fotos não entraram`),
       noneTitle: "Nenhuma das fotos pôde ser aberta",
     },
@@ -1868,6 +1874,10 @@ const EN: AppCopy = {
         fits === 1
           ? "Only the first one fits; the rest can go in a second document."
           : `Only the first ${fits} fit; the rest can go in a second document.`,
+      leftOut: (n) =>
+        n === 1
+          ? "1 photo was left out: the document reached its page limit. It can go in a second document."
+          : `${n} photos were left out: the document reached its page limit. They can go in a second document.`,
       refusedTitle: (n) => (n === 1 ? "1 photo was left out" : `${n} photos were left out`),
       noneTitle: "None of the photos could be opened",
     },

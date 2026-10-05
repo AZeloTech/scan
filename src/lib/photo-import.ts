@@ -52,6 +52,20 @@ export interface PhotoImportReport {
   refused: readonly PageErrorCode[];
   /** Files the document had no room for. Never refused silently: the screen says so. */
   overflow: number;
+  /**
+   * The same outcome per file, as indices into the array the run was given:
+   * which became pages, which were refused, which the cap left out. Together
+   * they hold every index once — except after a cancelled run, where the
+   * files it never reached are in none of them.
+   */
+  indices: PhotoImportIndices;
+}
+
+/** Indices into the run's own array, ascending. */
+export interface PhotoImportIndices {
+  imported: number[];
+  refused: number[];
+  overflow: number[];
 }
 
 /**
@@ -97,6 +111,7 @@ export async function importPhotos(
 ): Promise<PhotoImportReport> {
   const total = files.length;
   const refusedByKey = new Map<string, PageErrorCode>();
+  const addedKeys = new Set<string>();
   let added = 0;
   let settled = 0;
   const cancelled = options.cancelled ?? (() => false);
@@ -126,8 +141,9 @@ export async function importPhotos(
         return id;
       },
       onStart: () => undefined,
-      onSettled: (key, _pageIds, error) => {
+      onSettled: (key, pageIds, error) => {
         if (error !== null) refusedByKey.set(key, error);
+        else if (pageIds.length > 0) addedKeys.add(key);
         settled += 1;
         options.onProgress?.({ total, settled, added });
       },
@@ -140,13 +156,22 @@ export async function importPhotos(
 
   // The refusals in the files' own order, whichever came first in the loop.
   const refused: PageErrorCode[] = [];
+  const indices: PhotoImportIndices = { imported: [], refused: [], overflow: [] };
+  const stopped = cancelled();
   files.forEach((_file, index) => {
-    const code = refusedByKey.get(`p${index}`);
-    if (code !== undefined) refused.push(code);
+    const key = `p${index}`;
+    const code = refusedByKey.get(key);
+    if (code !== undefined) {
+      refused.push(code);
+      indices.refused.push(index);
+    } else if (addedKeys.has(key)) {
+      indices.imported.push(index);
+    } else if (!stopped) {
+      // Neither a page nor refused for a reason of its own: left out because
+      // the document was full — whether the runner stopped before it or the
+      // store turned it away.
+      indices.overflow.push(index);
+    }
   });
-  // Everything that neither became a page nor was refused for a reason of its
-  // own was left out because the document was full — whether the runner
-  // stopped before it or the store turned it away.
-  const overflow = cancelled() ? 0 : total - added - refused.length;
-  return { total, added, refused, overflow };
+  return { total, added, refused, overflow: indices.overflow.length, indices };
 }

@@ -359,8 +359,10 @@ export function ReviewScreen() {
  * counter and a hairline bar — the pages themselves land in the list below as
  * they are read, so this line only has to say how many are still coming); the
  * cap, said *before* the photos that do not fit are reached, so nobody watches
- * pages vanish; and, once the run is over, the files that did not open, each
- * with the same sentence a single pick would have shown.
+ * pages vanish, and restated as the real count once the run is over (a refused
+ * photo frees its slot, so the forecast can be wrong); and, once the run is
+ * over, the files that did not open, each with the same sentence a single pick
+ * would have shown.
  */
 function ImportSummary({ state, copy }: { state: PhotoImportState; copy: AppCopy }) {
   const reasons = Array.from(new Set(state.refused.map((code) => copy.pageErrors[code])));
@@ -398,9 +400,13 @@ function ImportSummary({ state, copy }: { state: PhotoImportState; copy: AppCopy
 
       {showOverflow && (
         <Notice tone="warning">
-          {state.fits === 0
-            ? copy.capture.capacityFallback
-            : copy.review.importing.overflow(state.fits)}
+          {!state.working
+            ? // Once the run is over the plan gives way to the count: a photo
+              // that could not be read freed its slot for a later one.
+              copy.review.importing.leftOut(state.overflow)
+            : state.fits === 0
+              ? copy.capture.capacityFallback
+              : copy.review.importing.overflow(state.fits)}
         </Notice>
       )}
 

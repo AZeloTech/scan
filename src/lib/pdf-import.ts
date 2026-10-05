@@ -84,14 +84,21 @@ let libraryPromise: Promise<typeof import("pdfjs-dist")> | null = null;
  */
 /**
  * Exported so a host can prove its asset wiring works before somebody relies on
- * it — see `@azelotech/scan/self-test`. Idempotent and memoised.
+ * it — see `@azelotech/scan/self-test`. Idempotent and memoised; a failed
+ * load is forgotten, so the next call tries again.
  */
 export async function loadPdfjs(urls: AssetUrls): Promise<typeof import("pdfjs-dist")> {
   if (libraryPromise === null) {
-    libraryPromise = import("pdfjs-dist").then((pdfjs) => {
+    const attempt = import("pdfjs-dist").then((pdfjs) => {
       pdfjs.GlobalWorkerOptions.workerSrc = urls.pdfWorker;
       return pdfjs;
     });
+    // Successes only: a chunk that failed to arrive once is retried on the
+    // next PDF, not refused for the page's life.
+    attempt.catch(() => {
+      if (libraryPromise === attempt) libraryPromise = null;
+    });
+    libraryPromise = attempt;
   }
   return libraryPromise;
 }

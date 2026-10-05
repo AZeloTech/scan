@@ -26,6 +26,7 @@ import type {
   ScanErrorCode,
   ScanEvent,
   ScanFlowProps,
+  ScanPhotoImportReport,
   ScanStep,
 } from "./types";
 import { assetUrls, explainBadAssetBaseUrl } from "./lib/runtime-config";
@@ -58,6 +59,7 @@ export function ScanFlow(props: ScanFlowProps) {
     onPagesChange,
     onEvent,
     onDiagnostics,
+    onPhotoImport,
     className,
     // Left `undefined` when omitted: omitted and `false` mean different things
     // (`autoCaptureOffered`).
@@ -97,8 +99,8 @@ export function ScanFlow(props: ScanFlowProps) {
    * The ref is updated during render rather than in an effect: an event can be
    * emitted from a layout effect deeper in the tree, before ours would have run.
    */
-  const handlers = useRef({ onComplete, onCancel, onPagesChange, onEvent, onDiagnostics });
-  handlers.current = { onComplete, onCancel, onPagesChange, onEvent, onDiagnostics };
+  const handlers = useRef({ onComplete, onCancel, onPagesChange, onEvent, onDiagnostics, onPhotoImport });
+  handlers.current = { onComplete, onCancel, onPagesChange, onEvent, onDiagnostics, onPhotoImport };
 
   /**
    * The diagnostics stream (`onDiagnostics`, experimental): a sink only while
@@ -184,10 +186,46 @@ export function ScanFlow(props: ScanFlowProps) {
   /** The live page count, readable by callbacks that must not depend on it. */
   const pageCountRef = useRef(0);
 
+  /**
+   * What became of the host's photos, once their run is over. Kept for
+   * `onComplete` and reported to the host the first time only: a seed is read
+   * once per flow, and so is its report.
+   */
+  const seedReport = useRef<ScanPhotoImportReport | null>(null);
+  const reportPhotoImport = useCallback((report: ScanPhotoImportReport) => {
+    if (seedReport.current !== null) return;
+    const copy: ScanPhotoImportReport = {
+      imported: [...report.imported],
+      refused: [...report.refused],
+      overflow: [...report.overflow],
+    };
+    seedReport.current = copy;
+    // The host gets its own arrays: what it does to them is not our record.
+    handlers.current.onPhotoImport?.({
+      imported: [...copy.imported],
+      refused: [...copy.refused],
+      overflow: [...copy.overflow],
+    });
+  }, []);
+
   const complete = useCallback(
     (file: File, pageCount: number) => {
       if (!exitGate.complete()) return;
-      handlers.current.onComplete({ file, pageCount, bytes: file.size });
+      const seeded = seedReport.current;
+      handlers.current.onComplete({
+        file,
+        pageCount,
+        bytes: file.size,
+        ...(seeded === null
+          ? {}
+          : {
+              initialImages: {
+                imported: [...seeded.imported],
+                refused: [...seeded.refused],
+                overflow: [...seeded.overflow],
+              },
+            }),
+      });
     },
     [exitGate]
   );
@@ -249,8 +287,9 @@ export function ScanFlow(props: ScanFlowProps) {
       diagnosticsSink,
       emit,
       reportError,
+      reportPhotoImport,
     }),
-    [urls, lang, maxPages, maxBytes, fileNameProp, intake?.camera, intake?.images, intake?.pdf, experimentalAutoCapture, experimentalDiagnostics, diagnosticsSink, captureLayout, emit]
+    [urls, lang, maxPages, maxBytes, fileNameProp, intake?.camera, intake?.images, intake?.pdf, experimentalAutoCapture, experimentalDiagnostics, diagnosticsSink, captureLayout, emit, reportError, reportPhotoImport]
   );
 
   // The session's facts, once, and the page going out of view and back.

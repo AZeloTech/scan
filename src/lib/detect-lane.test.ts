@@ -13,7 +13,7 @@ import {
   startDetectLane,
   type LaneJob,
 } from "./detect-lane.ts";
-import { isMlDisabled, isMlReady } from "./ml-detection.ts";
+import { disableMl, isMlDisabled, isMlReady } from "./ml-detection.ts";
 import type { DetectMessage, WorkerToMain } from "./detect-protocol.ts";
 import { assetUrls } from "@/lib/runtime-config";
 
@@ -331,5 +331,44 @@ test("a mount with other assets, while nobody else holds the lane, starts it ove
   assert.equal(spawned[0].terminated, true);
   assert.equal(spawned[1].url, other.detectWorker);
   next();
+  timers.clear();
+});
+
+test("a release called twice never takes away somebody else's hold", async () => {
+  fresh("hello");
+  // A host's preload, then the flow it opened.
+  const preload = holdDetectLane(URLS);
+  const flow = holdDetectLane(URLS);
+  await startDetectLane(URLS);
+  const worker = spawned[0];
+  // The host's close handler and its unmount cleanup both release the preload.
+  preload();
+  preload();
+  fireTimers(IDLE_RELEASE_MS);
+  assert.equal(worker.terminated, false, "the mounted flow's hold was spent by a double release");
+  flow();
+  flow();
+  fireTimers(IDLE_RELEASE_MS);
+  assert.equal(worker.terminated, true);
+  // And the count did not go below zero: one new hold keeps the lane.
+  const next = holdDetectLane(URLS);
+  await startDetectLane(URLS);
+  fireTimers(IDLE_RELEASE_MS);
+  assert.equal(spawned[1].terminated, false);
+  next();
+  timers.clear();
+});
+
+test("a model that failed in one session gets another chance in the next", async () => {
+  fresh("hello");
+  const release = holdDetectLane(URLS);
+  await startDetectLane(URLS);
+  // A transient failure latches the model off — for this session.
+  disableMl();
+  assert.equal(isMlDisabled(), true);
+  release();
+  fireTimers(IDLE_RELEASE_MS);
+  // No scanner on the page for the whole grace: the next one may try again.
+  assert.equal(isMlDisabled(), false);
   timers.clear();
 });

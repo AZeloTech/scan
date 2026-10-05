@@ -35,10 +35,15 @@ export type ScanErrorCode =
   | "build_failed"
   /**
    * None of the `initialImages` could be opened (an unreadable or unsupported
-   * file, a HEIC the browser cannot decode). Recoverable on the phone surface,
-   * where the flow stays open on the review step and offers the camera; final
-   * on the desktop surface, where there is nothing else to fall back to and an
-   * `onCancel("error")` follows.
+   * file, a HEIC the browser cannot decode).
+   *
+   * **Recoverable on the phone surface** while the camera is offered
+   * (`intake.camera`, the default): the flow stays open on the review step
+   * and offers to photograph page 1; the event says `recoverable: true` and
+   * no `onCancel` follows. **Terminal on the desktop surface**, where there is
+   * nothing else to fall back to: `recoverable: false`, then
+   * `onCancel("error")`. Either way `onPhotoImport` has already fired, with
+   * every index in `refused`.
    */
   | "images_unreadable";
 
@@ -97,6 +102,34 @@ export interface ScanResult {
   pageCount: number;
   /** Exactly `file.size`, repeated here so a host need not reach into the File. */
   bytes: number;
+  /**
+   * What became of `initialImages` — the same report `onPhotoImport` received.
+   * Absent when no `initialImages` were passed, or when the PDF was finished
+   * before the photos had all been read.
+   */
+  initialImages?: ScanPhotoImportReport;
+}
+
+/**
+ * What became of each of the `initialImages`, as indices into that array
+ * (ascending, 0-based). A file's index is in exactly one list:
+ *
+ *  - `imported` — it became a page (or, for a PDF on the desktop surface, at
+ *    least one page). A page the person later deletes stays listed: this is
+ *    the record of the import, not of the finished document;
+ *  - `refused` — it could not be read: unreadable, unsupported, a HEIC this
+ *    browser cannot decode, a PDF where PDF intake is not on;
+ *  - `overflow` — the document had no room for it (`maxPages`). These are the
+ *    photos a host can hand to a second document.
+ *
+ * The one exception: when the person clears the desktop list («Limpar»)
+ * while the photos are still being read, the files the run never reached are
+ * in none of the three lists.
+ */
+export interface ScanPhotoImportReport {
+  imported: number[];
+  refused: number[];
+  overflow: number[];
 }
 
 export interface ScanFlowProps {
@@ -174,14 +207,35 @@ export interface ScanFlowProps {
    *  - desktop surface — step 2 («Conferir») once the files are read, or step 1
    *    when one of them was refused, so the reason stays on screen.
    *
+   * When the files have all been read, `onPhotoImport` says which became
+   * pages, which were refused and which did not fit.
+   *
    * When none of them can be opened, an `error` event with `images_unreadable`
    * is emitted: on the phone the flow stays open on the review step and points
-   * to the camera; on the desktop `onCancel("error")` follows.
+   * to the camera (recoverable); on the desktop `onCancel("error")` follows
+   * (terminal).
    *
    * Nothing about the files leaves the library: events carry page numbers,
    * never names or bytes. An empty array behaves as if the prop were absent.
    */
   initialImages?: readonly File[];
+
+  /**
+   * Fires once, when the `initialImages` have all been read (or, on the
+   * desktop surface, when the person cleared them part-way), with what became
+   * of each one — see {@link ScanPhotoImportReport}. Never fires without
+   * `initialImages`, and never fires for photos the person adds inside the
+   * flow (a multi-pick from the gallery, a drop on the desktop): those have
+   * no index in the host's array. A flow unmounted before the run finished
+   * does not call it.
+   *
+   * It comes before any `images_unreadable` error the same run causes. The
+   * same report is repeated on `onComplete`'s result as `initialImages`.
+   *
+   * A host that wants to keep the photos that did not fit for a second
+   * document reads `overflow`.
+   */
+  onPhotoImport?(report: ScanPhotoImportReport): void;
 
   /**
    * Fires at most once per mounted instance, after the PDF exists. Final: after

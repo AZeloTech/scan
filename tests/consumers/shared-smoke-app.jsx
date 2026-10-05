@@ -174,9 +174,13 @@ export default function SmokeApp() {
             maxPages={20}
             maxBytes={26 * 1024 * 1024}
             intake={{ camera: true, images: true, pdf: false }}
-            onComplete={({ file, pageCount, bytes }) =>
-              report({ uiComplete: { name: file.name, pageCount, bytes } })
+            onComplete={({ file, pageCount, bytes, initialImages }) =>
+              report({ uiComplete: { name: file.name, pageCount, bytes, initialImages: initialImages ?? null } })
             }
+            onPhotoImport={(photoImport) => {
+              const seen = window.__scanSmoke?.photoImports ?? [];
+              report({ photoImports: [...seen, photoImport] });
+            }}
             onCancel={(reason) => report({ uiCancel: reason })}
             onPagesChange={(count) => report({ uiPages: count })}
             onEvent={(event) => {
